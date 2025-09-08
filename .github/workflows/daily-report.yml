@@ -2,7 +2,7 @@ name: Daily Report
 
 on:
   schedule:
-    - cron: '0 0 * * *'  # 매일 자정 UTC → 오후 6시 MDT
+    - cron: '0 3 * * *'  # 매일 자정 UTC → 오후 6시 MDT
   workflow_dispatch:
 
 jobs:
