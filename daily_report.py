@@ -14,7 +14,7 @@ from email.mime.multipart import MIMEMultipart
 from datetime import datetime
 from googletrans import Translator
 
-# ====== 환경 변수에서 불러오기 (GitHub Secrets) ======
+# ====== 환경 변수 불러오기 (GitHub Secrets) ======
 NEWS_API_KEY = os.getenv("NEWS_API_KEY")
 FRED_API_KEY = os.getenv("FRED_API_KEY")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
@@ -40,18 +40,18 @@ portfolio = {
     "TSLA": {"shares": 10, "avg_price": 320.745},
 }
 
-indices = ["^GSPC", "^IXIC", "^DJI", "^VIX", "^TNX"]
-
-# ====== 실시간 환율 가져오기 ======
+# ====== 환율 가져오기 ======
 def get_usd_to_cad_rate():
     try:
         url = "https://api.exchangerate.host/latest?base=USD&symbols=CAD"
         res = requests.get(url).json()
-        rate = res["rates"]["CAD"]
+        rate = res.get("rates", {}).get("CAD")
+        if rate is None:
+            raise ValueError("환율 응답에 CAD 데이터 없음")
         return rate
     except Exception as e:
         print(f"환율 가져오기 실패: {e}")
-        return 1.3829  # 실패 시 기본값
+        return 1.3829  # 기본값
 
 # ====== 아이콘 설명 ======
 def get_market_icon_legend_html():
@@ -68,7 +68,7 @@ def get_market_icon_legend_html():
     html += "</table><br>"
     return html
 
-# ====== 기술적 지표 계산 ======
+# ====== 기술적 지표 ======
 def get_rsi_macd(ticker):
     data = yf.Ticker(ticker).history(period="60d")
     close = data["Close"]
@@ -99,10 +99,7 @@ def get_rsi_macd(ticker):
 # ====== 포트폴리오 HTML ======
 def get_portfolio_status_html():
     usd_to_cad = get_usd_to_cad_rate()
-    total_usd = 0
-    total_cad = 0
-    total_cost = 0
-    total_profit = 0
+    total_usd, total_cad, total_cost, total_profit = 0, 0, 0, 0
 
     html = "<table border='1' cellpadding='5'>"
     html += "<tr><th>종목</th><th>보유수량</th><th>현재가 / 평단가 (USD)</th><th>총 투자금액 (USD)</th><th>전일 대비</th><th>평가금액 (USD)</th><th>평가금액 (CAD)</th><th>손익 (USD)</th><th>수익률</th><th>RSI / MACD</th></tr>"
@@ -171,7 +168,7 @@ def generate_profit_chart():
     plt.close()
     return f"<img src='data:image/png;base64,{img_base64}'/>"
 
-# ====== 수익률 경고 알림 ======
+# ====== 수익률 경고 ======
 def get_alerts_html():
     html = "<h3>🚨 수익률 경고</h3><ul>"
     for ticker, info in portfolio.items():
@@ -182,13 +179,12 @@ def get_alerts_html():
     html += "</ul>" if html != "<h3>🚨 수익률 경고</h3><ul>" else "<p>⚠️ 현재 수익률 경고 조건에 해당하는 종목 없음</p>"
     return html
 
-# ====== 뉴스 요약 및 번역 함수 ======
+# ====== 뉴스 요약 ======
 def get_news_summary_html():
     if not OPENAI_API_KEY:
         return "<p>⚠️ OPENAI_API_KEY 없음 → 뉴스 요약을 불러올 수 없습니다.</p>"
 
     html = ""
-
     for ticker in portfolio.keys():
         html += f"<div style='margin-bottom:20px;'>"
         html += f"<div style='margin-left:20px;'>• <strong>{ticker} 관련 뉴스 요약</strong></div>"
@@ -231,12 +227,117 @@ def get_news_summary_html():
             html += f"<div style='margin-left:40px; color:gray;'>뉴스 가져오기 실패: {e}</div>"
 
         html += "</div>"
-
     return html
 
-# ====== (중략: get_indices_status_html, get_economic_table_html 그대로 유지) ======
+# ====== 주요 지수 ======
+def get_indices_status_html():
+    index_info = {
+        "^GSPC": ("S&P 500", "미국 대형주 500개로 구성된 대표적인 주가지수.", "미국 증시의 전반적인 흐름을 반영합니다."),
+        "^IXIC": ("NASDAQ", "기술주 중심의 지수.", "기술주가 강세일수록 상승 가능성이 높습니다."),
+        "^DJI": ("다우존스", "미국의 대표적인 30개 대기업 지수.", "전통 산업과 대형주의 흐름을 보여줍니다."),
+        "^VIX": ("VIX", "시장의 불안감 또는 공포 수준.", "높을수록 시장 불안, 낮을수록 안정입니다."),
+        "^TNX": ("미국 10년물 국채 수익률", "장기 금리의 기준.", "금리 상승은 부담, 하락은 완화 신호입니다."),
+        "GC=F": ("Gold", "안전자산으로서의 금 가격 지수.", "금값 상승은 시장 불안 또는 인플레이션 우려를 반영합니다.")
+    }
 
-# ====== 이메일 발송 함수 ======
+    html = "<h3 style='margin-left:20px;'>📈 주요 지수 및 시장 전망</h3>"
+    html += "<table border='1' cellpadding='5'><tr><th>지수</th><th>현재값</th><th>전일 대비</th><th>시장 전망</th><th>설명</th><th>현재 해석</th></tr>"
+
+    for symbol, (label, desc, insight) in index_info.items():
+        try:
+            hist = yf.Ticker(symbol).history(period="2d")["Close"]
+            today = hist.iloc[-1]
+            yesterday = hist.iloc[-2]
+            change = today - yesterday
+            change_rate = (change / yesterday) * 100
+            change_color = "green" if change > 0 else "red"
+
+            if abs(change_rate) < 1:
+                outlook_icon = "⚖️"
+            elif change_rate >= 3:
+                outlook_icon = "🚀"
+            elif change_rate > 0:
+                outlook_icon = "📈"
+            elif change_rate <= -3:
+                outlook_icon = "📉"
+            else:
+                outlook_icon = "⚠️"
+
+            if symbol == "^VIX":
+                outlook_icon = "🌪️" if change > 0 else "🧘"
+            elif symbol == "^TNX":
+                outlook_icon = "⚠️" if change > 0 else "📈"
+
+            html += f"<tr><td>{label}</td><td>{today:.2f}</td>"
+            html += f"<td><span style='color:{change_color}'>{change:+.2f} ({change_rate:+.2f}%)</span></td>"
+            html += f"<td>{outlook_icon}</td><td>{desc}</td><td>{insight}</td></tr>"
+
+        except Exception as e:
+            html += f"<tr><td>{label}</td><td colspan='5' style='color:gray;'>데이터 오류: {e}</td></tr>"
+
+    html += "</table>"
+    return html
+
+# ====== 경제지표 ======
+def get_economic_table_html():
+    indicators = {
+        "FEDFUNDS": {"label": "미국 기준금리 (%)", "desc": "대출·소비·투자에 직접적인 영향을 미침.", "direction": "down", "insight": "금리가 낮아지면 주식시장에 긍정적입니다."},
+        "CPIAUCSL": {"label": "소비자물가지수 (CPI)", "desc": "인플레이션 지표.", "direction": "down", "insight": "물가가 안정되면 금리 인상 부담이 줄어듭니다."},
+        "UNRATE": {"label": "실업률 (%)", "desc": "경기 침체 또는 회복의 신호.", "direction": "down", "insight": "실업률이 낮아지면 경기 회복 신호로 긍정적입니다."}
+    }
+
+    months = [str(m).zfill(2) for m in range(1, 13)]
+    month_labels = [f"{m}월" for m in months]
+    data, icon_map = {}, {}
+
+    for series_id in indicators.keys():
+        url = f"https://api.stlouisfed.org/fred/series/observations?series_id={series_id}&api_key={FRED_API_KEY}&file_type=json"
+        res = requests.get(url).json()
+        obs = res.get("observations", [])
+        monthly_values = {o["date"][5:7]: o["value"] for o in obs if o["date"].startswith("2025")}
+        data[series_id] = monthly_values
+
+        recent_months = sorted(monthly_values.keys())[-3:]
+        recent_values = [float(monthly_values[m]) for m in recent_months if monthly_values.get(m, "-") != "-"]
+        icon = "⚖️"
+        if len(recent_values) >= 2:
+            delta = recent_values[-1] - recent_values[-2]
+            if indicators[series_id]["direction"] == "down":
+                if delta < -0.2: icon = "🚀"
+                elif delta < -0.01: icon = "📈"
+                elif abs(delta) <= 0.01: icon = "⚖️"
+                elif delta > 0.2: icon = "📉"
+                elif delta > 0.01: icon = "⚠️"
+            else:
+                if delta > 0.2: icon = "🚀"
+                elif delta > 0.01: icon = "📈"
+                elif abs(delta) <= 0.01: icon = "⚖️"
+                elif delta < -0.2: icon = "📉"
+                elif delta < -0.01: icon = "⚠️"
+        icon_map[series_id] = icon
+
+    html = "<h3 style='margin-left:20px;'>📌 주요 경제지표 요약</h3>"
+    html += "<table border='1' cellpadding='5'><tr><th>지표</th><th>설명</th><th>현재 해석</th></tr>"
+    for series_id, info in indicators.items():
+        html += f"<tr><td>{info['label']}</td><td>{info['desc']}</td><td>{info['insight']}</td></tr>"
+    html += "</table><br>"
+
+    html += "<h3 style='margin-left:20px;'>📊 주요 경제지표 월별 변화 (2025년)</h3>"
+    html += "<table border='1' cellpadding='5'><tr><th>지표</th>"
+    for label in month_labels:
+        html += f"<th>{label}</th>"
+    html += "</tr>"
+    for series_id, info in indicators.items():
+        icon = icon_map.get(series_id, "⚖️")
+        html += f"<tr><td>{info['label']} {icon}</td>"
+        for m in months:
+            value = data.get(series_id, {}).get(m, "-")
+            html += f"<td>{value}</td>"
+        html += "</tr>"
+    html += "</table>"
+    return html
+
+# ====== 이메일 발송 ======
 def send_email_html(subject, html_body):
     msg = MIMEMultipart("alternative")
     msg["From"] = EMAIL_SENDER
@@ -248,7 +349,7 @@ def send_email_html(subject, html_body):
         server.login(EMAIL_SENDER, EMAIL_PASSWORD)
         server.sendmail(EMAIL_SENDER, EMAIL_RECEIVER, msg.as_string())
 
-# ====== 메인 리포트 생성 및 실행 ======
+# ====== 메인 리포트 ======
 def daily_report_html():
     today = datetime.today().strftime("%Y-%m-%d")
     portfolio_html = get_portfolio_status_html()
@@ -281,6 +382,7 @@ def daily_report_html():
 # ====== 실행 트리거 ======
 if __name__ == "__main__":
     daily_report_html()
+
 
 
 
