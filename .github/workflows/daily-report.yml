@@ -2,8 +2,8 @@ name: Daily Report
 
 on:
   schedule:
-    - cron: '0 0 * * *'  # 매일 자정 UTC → 오후 6시 MDT
-  workflow_dispatch: (원하면 수동 실행도 추가 가능)
+    - cron: '0 0 * * *'
+  workflow_dispatch:
 
 jobs:
   run-daily-report:
