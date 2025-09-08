@@ -27,6 +27,10 @@ EMAIL_RECEIVER = os.getenv("EMAIL_RECEIVER")
 translator = Translator()
 
 # OpenAI API 키 설정
+api_key = os.getenv("OPENAI_API_KEY")
+if not api_key:
+    raise ValueError("OPENAI_API_KEY is missing. Make sure it's set in GitHub Secrets and passed to the workflow.")
+
 openai.api_key = OPENAI_API_KEY
 
 # ChatGPT 호출 예시
