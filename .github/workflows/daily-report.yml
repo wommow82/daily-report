@@ -21,7 +21,7 @@ jobs:
       - name: Install dependencies
         run: |
           pip install --upgrade pip
-          pip install yfinance pandas matplotlib numpy requests beautifulsoup4 selenium googletrans==4.0.0-rc1 openai schedule googletrans
+          pip install yfinance pandas matplotlib numpy requests beautifulsoup4 selenium openai schedule googletrans==4.0.0-rc1 
 
       - name: Run daily report script
         run: python3 daily_report.py
