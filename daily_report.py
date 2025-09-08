@@ -12,7 +12,7 @@ from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from datetime import datetime
 from googletrans import Translator
-from openai import OpenAI
+from openai
 
 # ====== 환경 변수에서 불러오기 (GitHub Secrets) ======
 NEWS_API_KEY = os.getenv("NEWS_API_KEY")
@@ -25,6 +25,14 @@ EMAIL_RECEIVER = os.getenv("EMAIL_RECEIVER")
 client = OpenAI(api_key=OPENAI_API_KEY)
 translator = Translator()
 
+response = openai.ChatCompletion.create(
+    model="gpt-3.5-turbo",
+    messages=[
+        {"role": "user", "content": "Hello!"}
+    ]
+)
+
+print(response.choices[0].message.content)
 # ====== 포트폴리오 구성 ======
 portfolio = {
     "NVDA": {"shares": 128, "avg_price": 123.97},
