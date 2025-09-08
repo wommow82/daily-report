@@ -1,5 +1,3 @@
-이건 GIT에 실행한 코드들
-
 #!/usr/bin/env python3
 # coding: utf-8
 
