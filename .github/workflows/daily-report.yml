@@ -3,7 +3,7 @@ name: Daily Report
 on:
   schedule:
     - cron: '0 0 * * *'  # 매일 자정 UTC → 오후 6시 MDT
-  workflow_dispatch:      # 수동 실행도 가능하게 설정
+  workflow_dispatch:
 
 jobs:
   run-daily-report:
@@ -22,4 +22,4 @@ jobs:
         run: pip install --upgrade pip
 
       - name: Run daily report script
-        run: python daily_report.py
+        run: python daily_report/daily_report.py
