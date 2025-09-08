@@ -34,14 +34,14 @@ if not api_key:
 openai.api_key = OPENAI_API_KEY
 
 # ChatGPT 호출 예시
-response = openai.ChatCompletion.create(
-    model="gpt-3.5-turbo",
-    messages=[
-        {"role": "user", "content": "Hello!"}
-    ]
-)
-
-print(response.choices[0].message.content)
+try:
+    response = openai.ChatCompletion.create(
+        model="gpt-3.5-turbo",
+        messages=[{"role": "user", "content": "Hello!"}]
+    )
+    print(response.choices[0].message.content)
+except openai.error.RateLimitError as e:
+    print("Rate limit exceeded:", e)
 
 # ====== 포트폴리오 구성 ======
 portfolio = {
