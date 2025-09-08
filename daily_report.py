@@ -8,11 +8,11 @@ import smtplib
 import matplotlib.pyplot as plt
 import io
 import base64
+import openai
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from datetime import datetime
 from googletrans import Translator
-from openai
 
 # ====== 환경 변수에서 불러오기 (GitHub Secrets) ======
 NEWS_API_KEY = os.getenv("NEWS_API_KEY")
