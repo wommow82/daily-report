@@ -1,0 +1,25 @@
+name: Daily Report
+
+on:
+  schedule:
+    - cron: '0 0 * * *'  # 매일 자정 UTC → 오후 6시 MDT
+  workflow_dispatch:      # 수동 실행도 가능하게 설정
+
+jobs:
+  run-daily-report:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+
+      - name: Install dependencies
+        run: pip install --upgrade pip
+
+      - name: Run daily report script
+        run: python daily_report.py
