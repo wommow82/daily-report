@@ -15,6 +15,7 @@ from datetime import datetime
 from googletrans import Translator
 
 # ====== 환경 변수에서 불러오기 (GitHub Secrets) ======
+# 환경변수 불러오기
 NEWS_API_KEY = os.getenv("NEWS_API_KEY")
 FRED_API_KEY = os.getenv("FRED_API_KEY")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
@@ -22,9 +23,13 @@ EMAIL_SENDER = os.getenv("EMAIL_SENDER")
 EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD")
 EMAIL_RECEIVER = os.getenv("EMAIL_RECEIVER")
 
-client = OpenAI(api_key=OPENAI_API_KEY)
+# 번역기 초기화
 translator = Translator()
 
+# OpenAI API 키 설정
+openai.api_key = OPENAI_API_KEY
+
+# ChatGPT 호출 예시
 response = openai.ChatCompletion.create(
     model="gpt-3.5-turbo",
     messages=[
@@ -33,6 +38,7 @@ response = openai.ChatCompletion.create(
 )
 
 print(response.choices[0].message.content)
+
 # ====== 포트폴리오 구성 ======
 portfolio = {
     "NVDA": {"shares": 128, "avg_price": 123.97},
