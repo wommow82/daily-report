@@ -52,7 +52,7 @@ portfolio = {
     "TSLA": {"shares": 10, "avg_price": 320.745},
 }
 
-indices = ["^GSPC", "^IXIC", "^DJI", "^VIX", "^TNX"]
+indices = ["^GSPC", "^IXIC", "^DJI", "^VIX", "^TNX", "^GC=F"]
 
 # ====== 실시간 환율 가져오기 ======
 def get_usd_to_cad_rate():
