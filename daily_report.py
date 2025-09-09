@@ -448,6 +448,3 @@ def daily_report_html():
 # ====== 실행 트리거 ======
 if __name__ == "__main__":
     daily_report_html()          
-
-if __name__ == "__main__":
-    daily_report_html()
