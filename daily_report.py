@@ -256,7 +256,6 @@ def get_news_summary_html():
 # ====== 투자 전략 평가 ======
 def get_investment_assessment_html():
     try:
-        # 포트폴리오 종목과 경제 상황을 GPT에 전달하여 종합 평가 요청
         prompt = f"""
 당신은 전문 투자 전략가입니다. 아래 정보를 기반으로 평가하세요.
 
@@ -268,26 +267,26 @@ def get_investment_assessment_html():
 - 경제지표: 기준금리(FEDFUNDS), CPI, 실업률(UNRATE)
 
 📌 요청 사항:
-1. **종목별 투자 전략**: 보유 종목(NVDA, PLTR, RGTI, SCHD, TSLA)에 대해 단기/장기 관점에서 각각 제안.
-   - 매수/보유/부분매도 등 액션 포함.
-   - 기술적 지표(RSI, MACD)와 뉴스 요약을 고려해 간단히 언급.
-2. **포트폴리오 차원 전략**:
-   - 현금 비중 및 리밸런싱 권고 (예: 기술주 vs 배당 ETF 비중 조정).
-   - 단기(1~3개월) / 장기(1년+) 전략 요약.
-3. 한국어로 5~7줄 정도로 작성.
-
-결과를 HTML 리포트에 넣을 수 있도록 간결하고 조리 있게 정리해 주세요.
+1. 종목별 단기/장기 전략 제안 (매수/보유/매도 등 액션 포함).
+2. 포트폴리오 차원에서 현금 비중과 리밸런싱 권고.
+3. 한국어로 5~7줄 정도 작성.
 """
 
         gpt_response = openai.ChatCompletion.create(
-            model="gpt-4o-mini",   # 필요에 따라 gpt-4o로 변경 가능
+            model="gpt-4o-mini",
             messages=[{"role": "user", "content": prompt}],
             temperature=0.6
         )
         assessment = gpt_response.choices[0].message.content.strip()
+
+        # ⚡ 코드블록 제거 후 정리
+        if assessment.startswith("```"):
+            assessment = assessment.replace("```html", "").replace("```", "").strip()
+
         html = "<h3>🧐 투자 전략 종합 평가</h3>"
         html += f"<div style='margin-left:20px; color:#333;'>{assessment}</div>"
         return html
+
     except Exception as e:
         return f"<h3>🧐 투자 전략 종합 평가</h3><p style='color:gray;'>평가 생성 실패: {e}</p>"
 
