@@ -36,7 +36,7 @@ openai.api_key = OPENAI_API_KEY
 # ChatGPT 호출 예시
 try:
     response = openai.ChatCompletion.create(
-        model="gpt-3.5-turbo",
+        model="gpt-4o-mini",
         messages=[{"role": "user", "content": "Hello!"}]
     )
     print(response.choices[0].message.content)
