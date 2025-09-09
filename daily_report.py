@@ -204,7 +204,6 @@ def get_news_summary_html():
     html = ""  # 초기화
 
     for ticker in portfolio.keys():
-        # 종목별 제목: 들여쓰기 + 동그라미 + 강조
         html += f"<div style='margin-bottom:20px;'>"
         html += f"<div style='margin-left:20px;'>• <strong>{ticker} 관련 뉴스 요약</strong></div>"
 
@@ -222,24 +221,23 @@ def get_news_summary_html():
                 description = article.get("description", "설명 없음")
                 link = article.get("url", "#")
 
-                # 뉴스 제목: 들여쓰기 + 동그라미 + 링크
                 html += f"<div style='margin-left:40px;'>• <a href='{link}' target='_blank'>{title}</a></div>"
 
-                # GPT 요약 또는 오류 메시지: 더 깊은 들여쓰기
                 try:
                     prompt = f"""
 다음은 영어 뉴스 제목과 설명입니다:
 제목: {title}
 설명: {description}
 
-이 내용을 한국어로 번역하고, 간단한 요약과 투자 관점에서의 분석을 덧붙여 주세요.
+이 내용을 한국어로 번역하고, 간단히 요약한 후,
+투자자 입장에서 긍정/부정 요인을 짚어 주세요.
 """
-                    gpt_response = client.chat.completions.create(
-                        model="gpt-4",
+                    gpt_response = openai.ChatCompletion.create(
+                        model="gpt-4o-mini",
                         messages=[{"role": "user", "content": prompt}],
                         temperature=0.7
                     )
-                    translated = gpt_response.choices[0].message.content.strip()
+                    translated = gpt_response.choices[0].message["content"].strip()
                     html += f"<div style='margin-left:60px; color:#444;'>{translated}</div>"
                 except Exception as e:
                     html += f"<div style='margin-left:60px; color:gray;'>요약 실패: {e}</div>"
@@ -251,6 +249,34 @@ def get_news_summary_html():
 
     return html
 
+# ====== 투자 전략 평가 ======
+def get_investment_assessment_html():
+    try:
+        # 포트폴리오, 경제지표, 뉴스 요약을 하나의 맥락으로 GPT에 전달
+        prompt = f"""
+다음은 투자 보고서의 주요 내용입니다.
+
+포트폴리오 종목: {list(portfolio.keys())}
+경제지표: 기준금리, CPI, 실업률, 주요 지수 등 포함
+뉴스 요약은 위에서 제공된 결과를 바탕으로 합니다.
+
+👉 과제:
+1. 현재 시장 상황을 바탕으로 한 투자 전략의 종합 평가를 작성하세요.
+2. 단기 vs 장기 전략에 대한 제안도 포함하세요.
+3. 한국어로 3~5줄 정도 간단히 정리해 주세요.
+"""
+
+        gpt_response = openai.ChatCompletion.create(
+            model="gpt-4o-mini",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.6
+        )
+        assessment = gpt_response.choices[0].message["content"].strip()
+        html = "<h3>🧐 투자 전략 종합 평가</h3>"
+        html += f"<div style='margin-left:20px; color:#333;'>{assessment}</div>"
+        return html
+    except Exception as e:
+        return f"<h3>🧐 투자 전략 종합 평가</h3><p style='color:gray;'>평가 생성 실패: {e}</p>"
 
 # ====== 주요 지수 HTML ======
 def get_indices_status_html():
@@ -424,7 +450,8 @@ def daily_report_html():
     economic_html = get_economic_table_html()
     chart_html = generate_profit_chart()
     alerts_html = get_alerts_html()
-    icon_legend_html = get_market_icon_legend_html()  # 아이콘 설명표 추가
+    icon_legend_html = get_market_icon_legend_html()
+    assessment_html = get_investment_assessment_html()   # ✅ 추가
 
     body = f"""
     <html><body>
@@ -435,7 +462,8 @@ def daily_report_html():
     {portfolio_html}
     <h3>📰 종목별 뉴스 요약 (GPT 기반 + 한글 번역)</h3>
     {news_summary_html}
-    {icon_legend_html}  <!-- 아이콘 설명표 삽입 -->
+    {assessment_html}   <!-- ✅ 종합 평가 추가 -->
+    {icon_legend_html}
     <h3>📈 주요 지수</h3>
     {indices_html}
     <h3>📊 주요 경제지표</h3>
