@@ -199,9 +199,9 @@ def get_alerts_html():
     html += "</ul>" if html != "<h3>🚨 수익률 경고</h3><ul>" else "<p>⚠️ 현재 수익률 경고 조건에 해당하는 종목 없음</p>"
     return html
 
-# ====== 뉴스 요약 및 번역 함수 ======
+# ====== 뉴스 요약 및 번역 함수 (최적화 버전) ======
 def get_news_summary_html():
-    html = ""  # 초기화
+    html = ""  
 
     for ticker in portfolio.keys():
         html += f"<div style='margin-bottom:20px;'>"
@@ -216,36 +216,40 @@ def get_news_summary_html():
                 html += "</div>"
                 continue
 
-            for article in articles:
+            # 기사 3개를 하나의 프롬프트로 묶음
+            articles_text = ""
+            for idx, article in enumerate(articles, 1):
                 title = article.get("title", "제목 없음")
                 description = article.get("description", "설명 없음")
                 link = article.get("url", "#")
+                articles_text += f"\n[{idx}] 제목: {title}\n설명: {description}\n링크: {link}\n"
 
-                html += f"<div style='margin-left:40px;'>• <a href='{link}' target='_blank'>{title}</a></div>"
+            prompt = f"""
+아래는 {ticker} 관련 최근 뉴스 3개입니다:
 
-                try:
-                    prompt = f"""
-다음은 영어 뉴스 제목과 설명입니다:
-제목: {title}
-설명: {description}
+{articles_text}
 
-이 내용을 한국어로 번역하고, 간단히 요약한 후,
-투자자 입장에서 긍정/부정 요인을 짚어 주세요.
+👉 작업:
+1. 각 기사를 한국어로 간단히 번역/요약해 주세요.
+2. 기사별 투자 관점에서 긍정/부정 요인을 짚어 주세요.
+3. 마지막에 전체적으로 {ticker}에 대한 단기/장기 투자 시사점을 2~3줄 정리해 주세요.
 """
-                    gpt_response = openai.ChatCompletion.create(
-                        model="gpt-4o-mini",
-                        messages=[{"role": "user", "content": prompt}],
-                        temperature=0.7
-                    )
-                    translated = gpt_response.choices[0].message["content"].strip()
-                    html += f"<div style='margin-left:60px; color:#444;'>{translated}</div>"
-                except Exception as e:
-                    html += f"<div style='margin-left:60px; color:gray;'>요약 실패: {e}</div>"
+
+            try:
+                gpt_response = openai.ChatCompletion.create(
+                    model="gpt-4o-mini",   # 필요시 gpt-4o 로 교체 가능
+                    messages=[{"role": "user", "content": prompt}],
+                    temperature=0.7
+                )
+                summary = gpt_response.choices[0].message.content.strip()
+                html += f"<div style='margin-left:40px; color:#444;'>{summary}</div>"
+            except Exception as e:
+                html += f"<div style='margin-left:40px; color:gray;'>요약 실패: {e}</div>"
 
         except Exception as e:
             html += f"<div style='margin-left:40px; color:gray;'>뉴스 가져오기 실패: {e}</div>"
 
-        html += "</div>"  # 종목별 블록 닫기
+        html += "</div>"  
 
     return html
 
@@ -280,7 +284,7 @@ def get_investment_assessment_html():
             messages=[{"role": "user", "content": prompt}],
             temperature=0.6
         )
-        assessment = gpt_response.choices[0].message["content"].strip()
+        assessment = gpt_response.choices[0].message.content.strip()
         html = "<h3>🧐 투자 전략 종합 평가</h3>"
         html += f"<div style='margin-left:20px; color:#333;'>{assessment}</div>"
         return html
