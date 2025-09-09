@@ -112,55 +112,98 @@ def get_rsi_macd(ticker):
     return f"RSI: {latest_rsi:.1f} ({rsi_status}), MACD: {macd_trend}"
 
 # ====== 포트폴리오 HTML ======
+# ====== 포트폴리오 HTML ======
 def get_portfolio_status_html():
     usd_to_cad = get_usd_to_cad_rate()
     total_usd = 0
     total_cad = 0
     total_cost = 0
     total_profit = 0
+    total_daily_profit = 0
 
-    html = "<table border='1' cellpadding='5'>"
-    html += "<tr><th>종목</th><th>보유수량</th><th>현재가 / 평단가 (USD)</th><th>총 투자금액 (USD)</th><th>전일 대비</th><th>평가금액 (USD)</th><th>평가금액 (CAD)</th><th>손익 (USD)</th><th>수익률</th><th>RSI / MACD</th></tr>"
+    # ✅ 종목별 현황 표
+    html = "<h4>📌 종목별 현황</h4>"
+    html += "<table border='1' cellpadding='5'>"
+    html += (
+        "<tr>"
+        "<th>종목</th>"
+        "<th>보유수량</th>"
+        "<th>현재가 / 평단가 (USD)</th>"
+        "<th>일일 손익 (USD)</th>"
+        "<th>누적 손익 (USD)</th>"
+        "<th>수익률</th>"
+        "<th>RSI / MACD</th>"
+        "</tr>"
+    )
 
     for ticker, info in portfolio.items():
         stock = yf.Ticker(ticker)
         hist = stock.history(period="2d")["Close"]
         price_today = hist.iloc[-1]
         price_yesterday = hist.iloc[-2]
-        change = price_today - price_yesterday
-        change_rate = (change / price_yesterday) * 100
-        change_color = "green" if change > 0 else "red"
 
+        # 📊 일일 손익
+        daily_profit = (price_today - price_yesterday) * info["shares"]
+        daily_profit_color = "green" if daily_profit > 0 else "red"
+
+        # 📊 누적 손익
         cost = info["avg_price"] * info["shares"]
         value_usd = price_today * info["shares"]
-        value_cad = value_usd * usd_to_cad
         profit = value_usd - cost
-        rate = (profit / cost) * 100
         profit_color = "green" if profit > 0 else "red"
+
+        # 📊 수익률
+        rate = (profit / cost) * 100
         rate_color = "green" if rate > 0 else "red"
+
+        # 기술적 지표
         indicators = get_rsi_macd(ticker)
 
+        # 총합 계산
         total_usd += value_usd
-        total_cad += value_cad
+        total_cad += value_usd * usd_to_cad
         total_cost += cost
         total_profit += profit
+        total_daily_profit += daily_profit
 
-        html += f"<tr><td>{ticker}</td><td>{info['shares']}</td>"
-        html += f"<td>{price_today:.2f}$ / {info['avg_price']:.2f}$</td><td>{cost:,.2f}$</td>"
-        html += f"<td><span style='color:{change_color}'>{change:+.2f}$ ({change_rate:+.2f}%)</span></td>"
-        html += f"<td>{value_usd:,.2f}$</td><td>{value_cad:,.2f} CAD</td>"
-        html += f"<td><span style='color:{profit_color}'>{profit:+,.2f}$</span></td>"
-        html += f"<td><span style='color:{rate_color}'>{rate:+.2f}%</span></td><td>{indicators}</td></tr>"
+        # 행 추가
+        html += (
+            f"<tr><td>{ticker}</td><td>{info['shares']}</td>"
+            f"<td>{price_today:.2f}$ / {info['avg_price']:.2f}$</td>"
+            f"<td><span style='color:{daily_profit_color}'>{daily_profit:+,.2f}$</span></td>"
+            f"<td><span style='color:{profit_color}'>{profit:+,.2f}$</span></td>"
+            f"<td><span style='color:{rate_color}'>{rate:+.2f}%</span></td>"
+            f"<td>{indicators}</td></tr>"
+        )
 
+    html += "</table><br>"
+
+    # ✅ 포트폴리오 요약 표
     total_rate = (total_profit / total_cost) * 100 if total_cost > 0 else 0
     total_profit_color = "green" if total_profit > 0 else "red"
+    total_daily_profit_color = "green" if total_daily_profit > 0 else "red"
     total_rate_color = "green" if total_rate > 0 else "red"
 
-    # 총합 행 (열 정렬 맞춤)
-    html += f"<tr><td colspan='3'><strong>총 투자금액</strong></td><td><strong>{total_cost:,.2f}$</strong></td>"
-    html += f"<td></td><td><strong>{total_usd:,.2f}$</strong></td><td><strong>{total_cad:,.2f} CAD</strong></td>"
-    html += f"<td><strong><span style='color:{total_profit_color}'>{total_profit:+,.2f}$</span></strong></td>"
-    html += f"<td><strong><span style='color:{total_rate_color}'>{total_rate:+.2f}%</span></strong></td><td></td></tr>"
+    html += "<h4>📌 전체 포트폴리오 요약</h4>"
+    html += "<table border='1' cellpadding='5'>"
+    html += (
+        "<tr>"
+        "<th>총 투자금액 (USD)</th>"
+        "<th>총 평가금액 (USD)</th>"
+        "<th>총 평가금액 (CAD)</th>"
+        "<th>오늘 일일 손익 (USD)</th>"
+        "<th>총 누적 손익 (USD)</th>"
+        "<th>총 수익률</th>"
+        "</tr>"
+    )
+
+    html += (
+        f"<tr><td>{total_cost:,.2f}$</td>"
+        f"<td>{total_usd:,.2f}$</td><td>{total_cad:,.2f} CAD</td>"
+        f"<td><span style='color:{total_daily_profit_color}'>{total_daily_profit:+,.2f}$</span></td>"
+        f"<td><span style='color:{total_profit_color}'>{total_profit:+,.2f}$</span></td>"
+        f"<td><span style='color:{total_rate_color}'>{total_rate:+.2f}%</span></td></tr>"
+    )
 
     html += "</table>"
     return html
