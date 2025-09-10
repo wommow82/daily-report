@@ -193,6 +193,7 @@ def get_portfolio_indicators_html():
 
         # 📈 RSI & MACD 계산
         df = yf.download(ticker, period="6mo", interval="1d")
+        df = df.dropna()
         if df.empty:
             rsi, macd = None, None
         else:
@@ -201,13 +202,14 @@ def get_portfolio_indicators_html():
             loss = -delta.where(delta < 0, 0).rolling(window=14).mean()
             rs = gain / loss
             rsi_series = 100 - (100 / (1 + rs))
-            rsi = rsi_series.iloc[-1] if len(rsi_series) > 0 else None
+            rsi = rsi_series.dropna().iloc[-1] if not rsi_series.dropna().empty else None
 
             ema12 = df["Close"].ewm(span=12, adjust=False).mean()
             ema26 = df["Close"].ewm(span=26, adjust=False).mean()
             macd_series = ema12 - ema26
-            macd = macd_series.iloc[-1] if len(macd_series) > 0 else None
+            macd = macd_series.dropna().iloc[-1] if not macd_series.dropna().empty else None
 
+        # 📊 재무 지표
         per = info.get("trailingPE", "N/A")
         fwd_per = info.get("forwardPE", "N/A")
         pbr = info.get("priceToBook", "N/A")
@@ -215,6 +217,7 @@ def get_portfolio_indicators_html():
         eps = info.get("trailingEps", "N/A")
         debt_to_equity = info.get("debtToEquity", "N/A")
 
+        # 표시용
         rsi_disp = f"{rsi:.2f}" if isinstance(rsi, (int, float)) else "N/A"
         macd_disp = f"{macd:.2f}" if isinstance(macd, (int, float)) else "N/A"
 
@@ -230,6 +233,7 @@ def get_portfolio_indicators_html():
             f"<td>{debt_to_equity}</td></tr>"
         )
 
+        # GPT 해석용 데이터 수집
         indicators_data[ticker] = {
             "RSI": rsi_disp,
             "MACD": macd_disp,
@@ -250,12 +254,11 @@ def get_portfolio_indicators_html():
 
 {indicators_data}
 
-👉 각 종목에 대해:
-- RSI, MACD 등 기술적 지표 해석 (과매수/과매도, 추세 여부)
-- PER, PBR, ROE, EPS, 부채비율 등 재무 지표 해석
-- 투자자 관점에서 시사점을 bullet point로 요약
-
-한국어로 간단히 정리하세요.
+👉 작업:
+1. 각 종목별로 해석을 {{"종목명: bullet point"}} 형식으로 작성하세요.
+2. 종목명은 **굵게** 표시하세요.
+3. 각 bullet은 줄바꿈하여 보기 좋게 정리하세요.
+4. 내용은 한국어로 간단히 요약하세요.
 """
         gpt_response = openai.ChatCompletion.create(
             model="gpt-4o-mini",
@@ -265,6 +268,9 @@ def get_portfolio_indicators_html():
         comments = gpt_response.choices[0].message.content.strip()
         if comments.startswith("```"):
             comments = comments.replace("```html", "").replace("```", "").strip()
+
+        # 줄바꿈을 HTML <br>로 변환
+        comments = comments.replace("\n", "<br>")
 
         html += "<h4>🔎 종목별 지표 해석 코멘트</h4>"
         html += f"<div style='margin-left:20px; color:#333;'>{comments}</div>"
@@ -375,7 +381,7 @@ def get_alerts_html():
 
 # ====== 뉴스 요약 및 번역 함수 (최적화 버전) ======
 def get_news_summary_html():
-    html = "<h3>📰 종목별 뉴스 요약</h3>"
+    html = ""
 
     for ticker in portfolio.keys():
         html += f"<div style='border:1px solid #ccc; padding:12px; margin:12px 0; border-radius:10px;'>"
