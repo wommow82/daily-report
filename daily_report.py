@@ -266,7 +266,7 @@ def get_alerts_html():
 
 # ====== 뉴스 요약 및 번역 함수 (최적화 버전) ======
 def get_news_summary_html():
-    html = "<h3>📰 종목별 뉴스 요약</h3>"
+    html = ""
 
     for ticker in portfolio.keys():
         html += f"<div style='border:1px solid #ccc; padding:12px; margin:12px 0; border-radius:10px;'>"
