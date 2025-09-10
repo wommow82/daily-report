@@ -112,7 +112,6 @@ def get_rsi_macd(ticker):
     return f"RSI: {latest_rsi:.1f} ({rsi_status}), MACD: {macd_trend}"
 
 # ====== 포트폴리오 HTML ======
-# ====== 포트폴리오 HTML ======
 def get_portfolio_status_html():
     usd_to_cad = get_usd_to_cad_rate()
     total_usd = 0
@@ -208,6 +207,72 @@ def get_portfolio_status_html():
     html += "</table>"
     return html
 
+
+# ====== 포트폴리오 전체 정리 ======
+def get_portfolio_summary_html():
+    usd_to_cad = get_usd_to_cad_rate()
+    total_usd = 0
+    total_cost = 0
+    total_profit = 0
+    total_daily_profit = 0
+
+    html = "<h4>📌 전체 포트폴리오 요약</h4>"
+    html += "<table border='1' cellpadding='5'>"
+    html += (
+        "<tr>"
+        "<th>종목</th><th>보유수량</th>"
+        "<th>현재가 (USD)</th><th>일일 손익 (USD)</th>"
+        "<th>누적 손익 (USD)</th><th>수익률</th>"
+        "</tr>"
+    )
+
+    for ticker, info in portfolio.items():
+        stock = yf.Ticker(ticker)
+        hist = stock.history(period="2d")["Close"]
+        price_today = hist.iloc[-1]
+        price_yesterday = hist.iloc[-2]
+
+        daily_profit = (price_today - price_yesterday) * info["shares"]
+        cost = info["avg_price"] * info["shares"]
+        value_usd = price_today * info["shares"]
+        profit = value_usd - cost
+        rate = (profit / cost) * 100
+
+        total_usd += value_usd
+        total_cost += cost
+        total_profit += profit
+        total_daily_profit += daily_profit
+
+        daily_color = "green" if daily_profit > 0 else "red"
+        profit_color = "green" if profit > 0 else "red"
+        rate_color = "green" if rate > 0 else "red"
+
+        html += (
+            f"<tr><td>{ticker}</td><td>{info['shares']}</td>"
+            f"<td>{price_today:.2f}$</td>"
+            f"<td><span style='color:{daily_color}'>{daily_profit:+,.2f}$</span></td>"
+            f"<td><span style='color:{profit_color}'>{profit:+,.2f}$</span></td>"
+            f"<td><span style='color:{rate_color}'>{rate:+.2f}%</span></td></tr>"
+        )
+
+    total_rate = (total_profit / total_cost) * 100 if total_cost > 0 else 0
+    total_daily_color = "green" if total_daily_profit > 0 else "red"
+    total_profit_color = "green" if total_profit > 0 else "red"
+    total_rate_color = "green" if total_rate > 0 else "red"
+
+    # 합계 행
+    html += (
+        f"<tr><td><strong>합계</strong></td><td>-</td>"
+        f"<td>-</td>"
+        f"<td><span style='color:{total_daily_color}'><strong>{total_daily_profit:+,.2f}$</strong></td>"
+        f"<td><span style='color:{total_profit_color}'><strong>{total_profit:+,.2f}$</strong></td>"
+        f"<td><span style='color:{total_rate_color}'><strong>{total_rate:+.2f}%</strong></td></tr>"
+    )
+
+    html += "</table>"
+    html += f"<p>총 평가금액: {total_usd:,.2f}$ / {total_usd*usd_to_cad:,.2f} CAD</p>"
+    return html
+    
 # ====== 수익 추이 그래프 ======
 def generate_profit_chart():
     tickers = list(portfolio.keys())
@@ -244,75 +309,75 @@ def get_alerts_html():
 
 # ====== 뉴스 요약 및 번역 함수 (최적화 버전) ======
 def get_news_summary_html():
-    html = ""  
+    html = "<h3>📰 종목별 뉴스 요약</h3>"
 
     for ticker in portfolio.keys():
-        html += f"<div style='margin-bottom:20px;'>"
-        html += f"<div style='margin-left:20px;'>• <strong>{ticker} 관련 뉴스 요약</strong></div>"
+        html += f"<div style='border:1px solid #ccc; padding:10px; margin:10px; border-radius:10px;'>"
+        html += f"<h4>{ticker} 관련 뉴스</h4>"
 
         try:
             url = f"https://newsapi.org/v2/everything?q={ticker}&apiKey={NEWS_API_KEY}&pageSize=3&sortBy=publishedAt&language=en"
             response = requests.get(url).json()
             articles = response.get("articles", [])
             if not articles:
-                html += "<div style='margin-left:40px;'>• 관련 뉴스 없음</div>"
+                html += "<p style='color:gray;'>관련 뉴스 없음</p>"
                 html += "</div>"
                 continue
 
-            # 기사 3개를 하나의 프롬프트로 묶음
             articles_text = ""
             for idx, article in enumerate(articles, 1):
                 title = article.get("title", "제목 없음")
                 description = article.get("description", "설명 없음")
                 link = article.get("url", "#")
                 articles_text += f"\n[{idx}] 제목: {title}\n설명: {description}\n링크: {link}\n"
+                html += f"<p>• <a href='{link}' target='_blank'>{title}</a></p>"
 
             prompt = f"""
 아래는 {ticker} 관련 최근 뉴스 3개입니다:
 
 {articles_text}
 
-👉 작업:
-1. 각 기사를 한국어로 간단히 번역/요약해 주세요.
-2. 기사별 투자 관점에서 긍정/부정 요인을 짚어 주세요.
-3. 마지막에 전체적으로 {ticker}에 대한 단기/장기 투자 시사점을 2~3줄 정리해 주세요.
+👉 각 기사별 핵심 요약과 투자자 관점 코멘트를 한국어로 작성하고,
+마지막에 {ticker}에 대한 단기/장기 투자 시사점을 정리해 주세요.
 """
 
-            try:
-                gpt_response = openai.ChatCompletion.create(
-                    model="gpt-4o-mini",   # 필요시 gpt-4o 로 교체 가능
-                    messages=[{"role": "user", "content": prompt}],
-                    temperature=0.7
-                )
-                summary = gpt_response.choices[0].message.content.strip()
-                html += f"<div style='margin-left:40px; color:#444;'>{summary}</div>"
-            except Exception as e:
-                html += f"<div style='margin-left:40px; color:gray;'>요약 실패: {e}</div>"
+            gpt_response = openai.ChatCompletion.create(
+                model="gpt-4o-mini",
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.7
+            )
+            summary = gpt_response.choices[0].message.content.strip()
+            # 코드블록 제거
+            if summary.startswith("```"):
+                summary = summary.replace("```html", "").replace("```", "").strip()
+
+            html += f"<div style='margin-left:20px; color:#444;'>{summary}</div>"
 
         except Exception as e:
-            html += f"<div style='margin-left:40px; color:gray;'>뉴스 가져오기 실패: {e}</div>"
+            html += f"<p style='color:gray;'>요약 실패: {e}</p>"
 
-        html += "</div>"  
-
+        html += "</div>"
     return html
 
 # ====== 투자 전략 평가 ======
 def get_investment_assessment_html():
     try:
+        hour = datetime.now().hour  # 서버 기준 (UTC라면 MDT 변환 필요)
+        if 6 <= hour < 12:  # 예: MDT 오전
+            context = "지금은 MDT 오전, 시장 개장 전입니다. 오늘 장에서 주목해야 할 뉴스와 지표를 기반으로 투자 방향을 제안하세요."
+        else:  # 예: MDT 오후
+            context = "지금은 MDT 오후, 시장이 마감되었습니다. 오늘 하루 시장 변화를 요약하고, 내일 장에서 주의해야 할 점을 알려주세요."
+
         prompt = f"""
-당신은 전문 투자 전략가입니다. 아래 정보를 기반으로 평가하세요.
+{context}
 
 📌 포트폴리오 종목:
 {portfolio}
 
-📌 시장 및 경제지표:
-- 주요 지수: S&P500, NASDAQ, 다우존스, VIX, 미국 10년물 금리
-- 경제지표: 기준금리(FEDFUNDS), CPI, 실업률(UNRATE)
-
 📌 요청 사항:
-1. 종목별 단기/장기 전략 제안 (매수/보유/매도 등 액션 포함).
-2. 포트폴리오 차원에서 현금 비중과 리밸런싱 권고.
-3. 한국어로 5~7줄 정도 작성.
+1. 종목별 단기/장기 전략 (매수/보유/매도 권고 포함)
+2. 포트폴리오 차원 전략 (현금 비중, 리밸런싱 방향)
+3. 한국어로 5~7줄 작성
 """
 
         gpt_response = openai.ChatCompletion.create(
@@ -321,15 +386,12 @@ def get_investment_assessment_html():
             temperature=0.6
         )
         assessment = gpt_response.choices[0].message.content.strip()
-
-        # ⚡ 코드블록 제거 후 정리
         if assessment.startswith("```"):
             assessment = assessment.replace("```html", "").replace("```", "").strip()
 
         html = "<h3>🧐 투자 전략 종합 평가</h3>"
         html += f"<div style='margin-left:20px; color:#333;'>{assessment}</div>"
         return html
-
     except Exception as e:
         return f"<h3>🧐 투자 전략 종합 평가</h3><p style='color:gray;'>평가 생성 실패: {e}</p>"
 
@@ -500,13 +562,14 @@ def send_email_html(subject, html_body):
 def daily_report_html():
     today = datetime.today().strftime("%Y-%m-%d")
     portfolio_html = get_portfolio_status_html()
+    portfolio_summary_html = get_portfolio_summary_html()   # ✅ 추가
     indices_html = get_indices_status_html()
     news_summary_html = get_news_summary_html()
     economic_html = get_economic_table_html()
     chart_html = generate_profit_chart()
     alerts_html = get_alerts_html()
     icon_legend_html = get_market_icon_legend_html()
-    assessment_html = get_investment_assessment_html()   # ✅ 추가
+    assessment_html = get_investment_assessment_html()
 
     body = f"""
     <html><body>
@@ -515,9 +578,10 @@ def daily_report_html():
     {chart_html}
     <h3>💼 포트폴리오 현황</h3>
     {portfolio_html}
-    <h3>📰 종목별 뉴스 요약 (GPT 기반 + 한글 번역)</h3>
+    {portfolio_summary_html}   <!-- ✅ 요약 표 추가 -->
+    <h3>📰 종목별 뉴스 요약</h3>
     {news_summary_html}
-    {assessment_html}   <!-- ✅ 종합 평가 추가 -->
+    {assessment_html}
     {icon_legend_html}
     <h3>📈 주요 지수</h3>
     {indices_html}
