@@ -114,14 +114,8 @@ def get_rsi_macd(ticker):
 # ====== 포트폴리오 HTML ======
 def get_portfolio_status_html():
     usd_to_cad = get_usd_to_cad_rate()
-    total_usd = 0
-    total_cad = 0
-    total_cost = 0
-    total_profit = 0
-    total_daily_profit = 0
 
-    # ✅ 종목별 현황 표
-    html = "<h4>📌 종목별 현황</h4>"
+    html = "<h4>📌 종목별 현황 (상세)</h4>"
     html += "<table border='1' cellpadding='5'>"
     html += (
         "<tr>"
@@ -158,13 +152,6 @@ def get_portfolio_status_html():
         # 기술적 지표
         indicators = get_rsi_macd(ticker)
 
-        # 총합 계산
-        total_usd += value_usd
-        total_cad += value_usd * usd_to_cad
-        total_cost += cost
-        total_profit += profit
-        total_daily_profit += daily_profit
-
         # 행 추가
         html += (
             f"<tr><td>{ticker}</td><td>{info['shares']}</td>"
@@ -175,38 +162,8 @@ def get_portfolio_status_html():
             f"<td>{indicators}</td></tr>"
         )
 
-    html += "</table><br>"
-
-    # ✅ 포트폴리오 요약 표
-    total_rate = (total_profit / total_cost) * 100 if total_cost > 0 else 0
-    total_profit_color = "green" if total_profit > 0 else "red"
-    total_daily_profit_color = "green" if total_daily_profit > 0 else "red"
-    total_rate_color = "green" if total_rate > 0 else "red"
-
-    html += "<h4>📌 전체 포트폴리오 요약</h4>"
-    html += "<table border='1' cellpadding='5'>"
-    html += (
-        "<tr>"
-        "<th>총 투자금액 (USD)</th>"
-        "<th>총 평가금액 (USD)</th>"
-        "<th>총 평가금액 (CAD)</th>"
-        "<th>오늘 일일 손익 (USD)</th>"
-        "<th>총 누적 손익 (USD)</th>"
-        "<th>총 수익률</th>"
-        "</tr>"
-    )
-
-    html += (
-        f"<tr><td>{total_cost:,.2f}$</td>"
-        f"<td>{total_usd:,.2f}$</td><td>{total_cad:,.2f} CAD</td>"
-        f"<td><span style='color:{total_daily_profit_color}'>{total_daily_profit:+,.2f}$</span></td>"
-        f"<td><span style='color:{total_profit_color}'>{total_profit:+,.2f}$</span></td>"
-        f"<td><span style='color:{total_rate_color}'>{total_rate:+.2f}%</span></td></tr>"
-    )
-
     html += "</table>"
     return html
-
 
 # ====== 포트폴리오 전체 정리 ======
 def get_portfolio_summary_html():
@@ -312,7 +269,7 @@ def get_news_summary_html():
     html = "<h3>📰 종목별 뉴스 요약</h3>"
 
     for ticker in portfolio.keys():
-        html += f"<div style='border:1px solid #ccc; padding:10px; margin:10px; border-radius:10px;'>"
+        html += f"<div style='border:1px solid #ccc; padding:12px; margin:12px 0; border-radius:10px;'>"
         html += f"<h4>{ticker} 관련 뉴스</h4>"
 
         try:
@@ -324,21 +281,26 @@ def get_news_summary_html():
                 html += "</div>"
                 continue
 
+            # 기사 제목만 링크로 나열
             articles_text = ""
+            html += "<ul>"
             for idx, article in enumerate(articles, 1):
                 title = article.get("title", "제목 없음")
                 description = article.get("description", "설명 없음")
                 link = article.get("url", "#")
+                html += f"<li><a href='{link}' target='_blank'>{title}</a></li>"
                 articles_text += f"\n[{idx}] 제목: {title}\n설명: {description}\n링크: {link}\n"
-                html += f"<p>• <a href='{link}' target='_blank'>{title}</a></p>"
+            html += "</ul>"
 
+            # GPT 요약 요청
             prompt = f"""
 아래는 {ticker} 관련 최근 뉴스 3개입니다:
 
 {articles_text}
 
-👉 각 기사별 핵심 요약과 투자자 관점 코멘트를 한국어로 작성하고,
-마지막에 {ticker}에 대한 단기/장기 투자 시사점을 정리해 주세요.
+👉 작업:
+1. 각 기사별 핵심 요약을 한국어 bullet point 형식으로 정리해 주세요.
+2. 마지막에 📌 단기/장기 투자 시사점을 따로 구분해서 제시해 주세요.
 """
 
             gpt_response = openai.ChatCompletion.create(
@@ -347,11 +309,11 @@ def get_news_summary_html():
                 temperature=0.7
             )
             summary = gpt_response.choices[0].message.content.strip()
-            # 코드블록 제거
             if summary.startswith("```"):
                 summary = summary.replace("```html", "").replace("```", "").strip()
 
-            html += f"<div style='margin-left:20px; color:#444;'>{summary}</div>"
+            # GPT 요약은 별도 블록에 bullet point 표시
+            html += f"<div style='margin-left:20px; margin-top:8px; color:#444;'><ul>{summary}</ul></div>"
 
         except Exception as e:
             html += f"<p style='color:gray;'>요약 실패: {e}</p>"
