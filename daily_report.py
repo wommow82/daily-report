@@ -375,7 +375,7 @@ def get_alerts_html():
 
 # ====== 뉴스 요약 및 번역 함수 (최적화 버전) ======
 def get_news_summary_html():
-    html = ""
+    html = "<h3>📰 종목별 뉴스 요약</h3>"
 
     for ticker in portfolio.keys():
         html += f"<div style='border:1px solid #ccc; padding:12px; margin:12px 0; border-radius:10px;'>"
@@ -390,9 +390,9 @@ def get_news_summary_html():
                 html += "</div>"
                 continue
 
-            # 기사 제목만 링크로 나열
-            articles_text = ""
+            # 기사 제목은 링크로만 표시
             html += "<ul>"
+            articles_text = ""
             for idx, article in enumerate(articles, 1):
                 title = article.get("title", "제목 없음")
                 description = article.get("description", "설명 없음")
@@ -401,15 +401,16 @@ def get_news_summary_html():
                 articles_text += f"\n[{idx}] 제목: {title}\n설명: {description}\n링크: {link}\n"
             html += "</ul>"
 
-            # GPT 요약 요청
+            # GPT 프롬프트
             prompt = f"""
 아래는 {ticker} 관련 최근 뉴스 3개입니다:
 
 {articles_text}
 
 👉 작업:
-1. 각 기사별 핵심 요약을 한국어 bullet point 형식으로 정리해 주세요.
-2. 마지막에 📌 단기/장기 투자 시사점을 따로 구분해서 제시해 주세요.
+1. 각 기사별 요약은 [1], [2], [3] 번호를 붙여 구분하고, 핵심 내용을 bullet point로 정리하세요.
+2. 마지막에 📌 단기 시사점, 📌 장기 시사점을 줄바꿈해서 제시하세요.
+3. 한국어로 간단히 작성하세요.
 """
 
             gpt_response = openai.ChatCompletion.create(
@@ -418,11 +419,14 @@ def get_news_summary_html():
                 temperature=0.7
             )
             summary = gpt_response.choices[0].message.content.strip()
+
             if summary.startswith("```"):
                 summary = summary.replace("```html", "").replace("```", "").strip()
 
-            # GPT 요약은 별도 블록에 bullet point 표시
-            html += f"<div style='margin-left:20px; margin-top:8px; color:#444;'><ul>{summary}</ul></div>"
+            # 줄바꿈 처리
+            summary = summary.replace("\n", "<br>")
+
+            html += f"<div style='margin-left:20px; margin-top:8px; color:#444;'>{summary}</div>"
 
         except Exception as e:
             html += f"<p style='color:gray;'>요약 실패: {e}</p>"
@@ -434,9 +438,9 @@ def get_news_summary_html():
 def get_investment_assessment_html():
     try:
         hour = datetime.now().hour  # 서버 기준 (UTC라면 MDT 변환 필요)
-        if 6 <= hour < 12:  # 예: MDT 오전
-            context = "지금은 MDT 오전, 시장 개장 전입니다. 오늘 장에서 주목해야 할 뉴스와 지표를 기반으로 투자 방향을 제안하세요."
-        else:  # 예: MDT 오후
+        if 6 <= hour < 12:  # MDT 오전 리포트
+            context = "지금은 MDT 오전, 시장 개장 전입니다. 오늘 장에서 주목할 포인트와 전략을 제안하세요."
+        else:  # MDT 오후 리포트
             context = "지금은 MDT 오후, 시장이 마감되었습니다. 오늘 하루 시장 변화를 요약하고, 내일 장에서 주의해야 할 점을 알려주세요."
 
         prompt = f"""
@@ -445,10 +449,10 @@ def get_investment_assessment_html():
 📌 포트폴리오 종목:
 {portfolio}
 
-📌 요청 사항:
-1. 종목별 단기/장기 전략 (매수/보유/매도 권고 포함)
-2. 포트폴리오 차원 전략 (현금 비중, 리밸런싱 방향)
-3. 한국어로 5~7줄 작성
+👉 작업:
+1. [포트폴리오 전략]을 먼저 bullet point로 정리하세요.
+2. 이어서 [종목별 전략]을 종목 이름별로 bullet point로 나누어 정리하세요.
+3. 한국어로 간단하고 명료하게 작성하세요.
 """
 
         gpt_response = openai.ChatCompletion.create(
@@ -457,12 +461,17 @@ def get_investment_assessment_html():
             temperature=0.6
         )
         assessment = gpt_response.choices[0].message.content.strip()
+
         if assessment.startswith("```"):
             assessment = assessment.replace("```html", "").replace("```", "").strip()
+
+        # 줄바꿈 처리
+        assessment = assessment.replace("\n", "<br>")
 
         html = "<h3>🧐 투자 전략 종합 평가</h3>"
         html += f"<div style='margin-left:20px; color:#333;'>{assessment}</div>"
         return html
+
     except Exception as e:
         return f"<h3>🧐 투자 전략 종합 평가</h3><p style='color:gray;'>평가 생성 실패: {e}</p>"
 
@@ -632,8 +641,8 @@ def send_email_html(subject, html_body):
 # ====== 메인 리포트 생성 및 실행 ======
 def daily_report_html():
     today = datetime.today().strftime("%Y-%m-%d")
-    portfolio_html = get_portfolio_status_html()
-    portfolio_summary_html = get_portfolio_summary_html()   # ✅ 추가
+    portfolio_summary_html = get_portfolio_summary_html()
+    portfolio_indicators_html = get_portfolio_indicators_html()
     indices_html = get_indices_status_html()
     news_summary_html = get_news_summary_html()
     economic_html = get_economic_table_html()
@@ -648,8 +657,8 @@ def daily_report_html():
     {alerts_html}
     {chart_html}
     <h3>💼 포트폴리오 현황</h3>
-    {portfolio_html}
-    {portfolio_summary_html}   <!-- ✅ 요약 표 추가 -->
+    {portfolio_summary_html}
+    {portfolio_indicators_html}
     <h3>📰 종목별 뉴스 요약</h3>
     {news_summary_html}
     {assessment_html}
