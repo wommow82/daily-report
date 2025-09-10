@@ -125,7 +125,6 @@ def get_portfolio_status_html():
         "<th>일일 손익 (USD)</th>"
         "<th>누적 손익 (USD)</th>"
         "<th>수익률</th>"
-        "<th>RSI / MACD</th>"
         "</tr>"
     )
 
@@ -133,47 +132,146 @@ def get_portfolio_status_html():
         stock = yf.Ticker(ticker)
         hist = stock.history(period="2d")["Close"]
 
-        note = ""  # 메모 표시
+        note = ""
         if len(hist) == 0:
             price_today = info["avg_price"]
             price_yesterday = info["avg_price"]
             note = "※ 시세 데이터 없음, 평단가 기준"
         elif len(hist) == 1:
             price_today = hist.iloc[-1]
-            price_yesterday = info["avg_price"]  # 평단가를 어제로 간주
+            price_yesterday = info["avg_price"]
             note = "※ 어제 데이터 없음, 평단가 기준"
         else:
             price_today = hist.iloc[-1]
             price_yesterday = hist.iloc[-2]
 
-        # 📊 일일 손익
         daily_profit = (price_today - price_yesterday) * info["shares"]
         daily_profit_color = "green" if daily_profit > 0 else "red"
 
-        # 📊 누적 손익
         cost = info["avg_price"] * info["shares"]
         value_usd = price_today * info["shares"]
         profit = value_usd - cost
         profit_color = "green" if profit > 0 else "red"
 
-        # 📊 수익률
         rate = (profit / cost) * 100 if cost > 0 else 0
         rate_color = "green" if rate > 0 else "red"
 
-        # 기술적 지표
-        indicators = get_rsi_macd(ticker)
-
-        # 행 추가
         html += (
             f"<tr><td>{ticker}</td><td>{info['shares']}</td>"
             f"<td>{price_today:.2f}$ / {info['avg_price']:.2f}$</td>"
             f"<td><span style='color:{daily_profit_color}'>{daily_profit:+,.2f}$</span> {note}</td>"
             f"<td><span style='color:{profit_color}'>{profit:+,.2f}$</span></td>"
-            f"<td><span style='color:{rate_color}'>{rate:+.2f}%</span></td>"
-            f"<td>{indicators}</td></tr>"
+            f"<td><span style='color:{rate_color}'>{rate:+.2f}%</span></td></tr>"
         )
 
     html += "</table>"
+    return html
+
+# ====== 포트폴리오 지수지표 정리 ======
+def get_portfolio_indicators_html():
+    html = "<h4>📊 종목별 판단 지표</h4>"
+    html += "<table border='1' cellpadding='5'>"
+    html += (
+        "<tr>"
+        "<th>종목</th>"
+        "<th>RSI</th>"
+        "<th>MACD</th>"
+        "<th>PER</th>"
+        "<th>Forward PER</th>"
+        "<th>PBR</th>"
+        "<th>ROE</th>"
+        "<th>EPS</th>"
+        "<th>부채비율</th>"
+        "</tr>"
+    )
+
+    indicators_data = {}
+
+    for ticker in portfolio.keys():
+        stock = yf.Ticker(ticker)
+        info = stock.info
+
+        # 📈 RSI & MACD 계산
+        df = yf.download(ticker, period="6mo", interval="1d")
+        if df.empty:
+            rsi, macd = None, None
+        else:
+            delta = df["Close"].diff()
+            gain = delta.where(delta > 0, 0).rolling(window=14).mean()
+            loss = -delta.where(delta < 0, 0).rolling(window=14).mean()
+            rs = gain / loss
+            rsi_series = 100 - (100 / (1 + rs))
+            rsi = rsi_series.iloc[-1] if len(rsi_series) > 0 else None
+
+            ema12 = df["Close"].ewm(span=12, adjust=False).mean()
+            ema26 = df["Close"].ewm(span=26, adjust=False).mean()
+            macd_series = ema12 - ema26
+            macd = macd_series.iloc[-1] if len(macd_series) > 0 else None
+
+        per = info.get("trailingPE", "N/A")
+        fwd_per = info.get("forwardPE", "N/A")
+        pbr = info.get("priceToBook", "N/A")
+        roe = info.get("returnOnEquity", "N/A")
+        eps = info.get("trailingEps", "N/A")
+        debt_to_equity = info.get("debtToEquity", "N/A")
+
+        rsi_disp = f"{rsi:.2f}" if isinstance(rsi, (int, float)) else "N/A"
+        macd_disp = f"{macd:.2f}" if isinstance(macd, (int, float)) else "N/A"
+
+        html += (
+            f"<tr><td>{ticker}</td>"
+            f"<td>{rsi_disp}</td>"
+            f"<td>{macd_disp}</td>"
+            f"<td>{per}</td>"
+            f"<td>{fwd_per}</td>"
+            f"<td>{pbr}</td>"
+            f"<td>{roe}</td>"
+            f"<td>{eps}</td>"
+            f"<td>{debt_to_equity}</td></tr>"
+        )
+
+        indicators_data[ticker] = {
+            "RSI": rsi_disp,
+            "MACD": macd_disp,
+            "PER": per,
+            "Forward PER": fwd_per,
+            "PBR": pbr,
+            "ROE": roe,
+            "EPS": eps,
+            "부채비율": debt_to_equity,
+        }
+
+    html += "</table>"
+
+    # GPT 해석 코멘트
+    try:
+        prompt = f"""
+아래는 종목별 주요 지표입니다:
+
+{indicators_data}
+
+👉 각 종목에 대해:
+- RSI, MACD 등 기술적 지표 해석 (과매수/과매도, 추세 여부)
+- PER, PBR, ROE, EPS, 부채비율 등 재무 지표 해석
+- 투자자 관점에서 시사점을 bullet point로 요약
+
+한국어로 간단히 정리하세요.
+"""
+        gpt_response = openai.ChatCompletion.create(
+            model="gpt-4o-mini",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.6
+        )
+        comments = gpt_response.choices[0].message.content.strip()
+        if comments.startswith("```"):
+            comments = comments.replace("```html", "").replace("```", "").strip()
+
+        html += "<h4>🔎 종목별 지표 해석 코멘트</h4>"
+        html += f"<div style='margin-left:20px; color:#333;'>{comments}</div>"
+
+    except Exception as e:
+        html += f"<p style='color:gray;'>지표 해석 생성 실패: {e}</p>"
+
     return html
 
 # ====== 포트폴리오 전체 정리 ======
