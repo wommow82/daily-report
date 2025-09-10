@@ -132,8 +132,19 @@ def get_portfolio_status_html():
     for ticker, info in portfolio.items():
         stock = yf.Ticker(ticker)
         hist = stock.history(period="2d")["Close"]
-        price_today = hist.iloc[-1]
-        price_yesterday = hist.iloc[-2]
+
+        note = ""  # 메모 표시
+        if len(hist) == 0:
+            price_today = info["avg_price"]
+            price_yesterday = info["avg_price"]
+            note = "※ 시세 데이터 없음, 평단가 기준"
+        elif len(hist) == 1:
+            price_today = hist.iloc[-1]
+            price_yesterday = info["avg_price"]  # 평단가를 어제로 간주
+            note = "※ 어제 데이터 없음, 평단가 기준"
+        else:
+            price_today = hist.iloc[-1]
+            price_yesterday = hist.iloc[-2]
 
         # 📊 일일 손익
         daily_profit = (price_today - price_yesterday) * info["shares"]
@@ -146,7 +157,7 @@ def get_portfolio_status_html():
         profit_color = "green" if profit > 0 else "red"
 
         # 📊 수익률
-        rate = (profit / cost) * 100
+        rate = (profit / cost) * 100 if cost > 0 else 0
         rate_color = "green" if rate > 0 else "red"
 
         # 기술적 지표
@@ -156,7 +167,7 @@ def get_portfolio_status_html():
         html += (
             f"<tr><td>{ticker}</td><td>{info['shares']}</td>"
             f"<td>{price_today:.2f}$ / {info['avg_price']:.2f}$</td>"
-            f"<td><span style='color:{daily_profit_color}'>{daily_profit:+,.2f}$</span></td>"
+            f"<td><span style='color:{daily_profit_color}'>{daily_profit:+,.2f}$</span> {note}</td>"
             f"<td><span style='color:{profit_color}'>{profit:+,.2f}$</span></td>"
             f"<td><span style='color:{rate_color}'>{rate:+.2f}%</span></td>"
             f"<td>{indicators}</td></tr>"
