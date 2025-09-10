@@ -192,7 +192,7 @@ def get_portfolio_indicators_html():
         info = stock.info
 
         # 📈 RSI & MACD 계산
-        df = yf.download(ticker, period="6mo", interval="1d")
+        df = yf.download(ticker, period="1y", interval="1d")  # 데이터 기간을 1년으로 늘려 안정화
         df = df.dropna()
         if df.empty:
             rsi, macd = None, None
@@ -218,8 +218,8 @@ def get_portfolio_indicators_html():
         debt_to_equity = info.get("debtToEquity", "N/A")
 
         # 표시용
-        rsi_disp = f"{rsi:.2f}" if isinstance(rsi, (int, float)) else "N/A"
-        macd_disp = f"{macd:.2f}" if isinstance(macd, (int, float)) else "N/A"
+        rsi_disp = f"{rsi:.2f}" if isinstance(rsi, (int, float)) else "데이터 부족"
+        macd_disp = f"{macd:.2f}" if isinstance(macd, (int, float)) else "데이터 부족"
 
         html += (
             f"<tr><td>{ticker}</td>"
@@ -247,7 +247,7 @@ def get_portfolio_indicators_html():
 
     html += "</table>"
 
-    # GPT 해석 코멘트
+    # GPT 해석 코멘트 (투자자 시사점 포함)
     try:
         prompt = f"""
 아래는 종목별 주요 지표입니다:
@@ -255,10 +255,11 @@ def get_portfolio_indicators_html():
 {indicators_data}
 
 👉 작업:
-1. 각 종목별로 해석을 {{"종목명: bullet point"}} 형식으로 작성하세요.
-2. 종목명은 **굵게** 표시하세요.
-3. 각 bullet은 줄바꿈하여 보기 좋게 정리하세요.
-4. 내용은 한국어로 간단히 요약하세요.
+1. 각 종목별로 해석을 bullet point 형식으로 작성하세요.
+2. 종목명은 **굵게** 표시하고, 그 아래 줄바꿈 후 bullet point를 나열하세요.
+3. bullet point에는 (1) RSI, MACD 등 기술적 지표 해석, (2) PER, PBR, ROE, EPS, 부채비율 등 재무 지표 해석을 포함하세요.
+4. 마지막 bullet에는 반드시 📌 투자자 시사점(단기/장기)을 정리하세요.
+5. 한국어로 간단히 요약하세요.
 """
         gpt_response = openai.ChatCompletion.create(
             model="gpt-4o-mini",
@@ -269,7 +270,7 @@ def get_portfolio_indicators_html():
         if comments.startswith("```"):
             comments = comments.replace("```html", "").replace("```", "").strip()
 
-        # 줄바꿈을 HTML <br>로 변환
+        # 줄바꿈 처리
         comments = comments.replace("\n", "<br>")
 
         html += "<h4>🔎 종목별 지표 해석 코멘트</h4>"
