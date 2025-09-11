@@ -15,7 +15,6 @@ from datetime import datetime
 from googletrans import Translator
 
 # ====== 환경 변수에서 불러오기 (GitHub Secrets) ======
-# 환경변수 불러오기
 NEWS_API_KEY = os.getenv("NEWS_API_KEY")
 FRED_API_KEY = os.getenv("FRED_API_KEY")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
@@ -33,7 +32,7 @@ if not api_key:
 
 openai.api_key = OPENAI_API_KEY
 
-# ChatGPT 호출 예시
+# ChatGPT 호출 예시 (초기 연결 확인)
 try:
     response = openai.ChatCompletion.create(
         model="gpt-4o-mini",
@@ -42,6 +41,9 @@ try:
     print(response.choices[0].message.content)
 except openai.error.RateLimitError as e:
     print("Rate limit exceeded:", e)
+except Exception as e:
+    # 안전하게 예외 처리
+    print("OpenAI 초기 호출 에러:", e)
 
 # ====== 포트폴리오 구성 ======
 portfolio = {
@@ -80,38 +82,84 @@ def get_market_icon_legend_html():
     html += "</table><br>"
     return html
 
-    
-# ====== 기술적 지표 계산 ======
+# ====== 기술적 지표 계산 (수치 반환용, 안정화) ======
+def get_rsi_macd_values(ticker, period="365d"):
+    """
+    RSI (float or None), MACD histogram (float or None)을 반환.
+    데이터가 부족하면 (None, None) 반환.
+    """
+    try:
+        data = yf.Ticker(ticker).history(period=period)
+        if data is None or data.empty or "Close" not in data.columns:
+            return None, None
+
+        close = data["Close"].dropna()
+        if len(close) < 15:
+            return None, None
+
+        # RSI
+        delta = close.diff()
+        gain = delta.where(delta > 0, 0)
+        loss = -delta.where(delta < 0, 0)
+        avg_gain = gain.rolling(window=14).mean()
+        avg_loss = loss.rolling(window=14).mean()
+        rs = avg_gain / avg_loss
+        rsi_series = 100 - (100 / (1 + rs))
+        latest_rsi = rsi_series.dropna().iloc[-1] if not rsi_series.dropna().empty else None
+
+        # MACD histogram (macd - signal)
+        ema12 = close.ewm(span=12, adjust=False).mean()
+        ema26 = close.ewm(span=26, adjust=False).mean()
+        macd_line = ema12 - ema26
+        signal_line = macd_line.ewm(span=9, adjust=False).mean()
+        macd_hist = (macd_line - signal_line).dropna()
+        latest_macd = macd_hist.iloc[-1] if not macd_hist.empty else None
+
+        rsi_val = float(latest_rsi) if latest_rsi is not None else None
+        macd_val = float(latest_macd) if latest_macd is not None else None
+        return rsi_val, macd_val
+
+    except Exception as e:
+        # 오류 시 None 반환 (호출자에서 처리)
+        # print(f"get_rsi_macd_values error for {ticker}: {e}")
+        return None, None
+
+# (기존 get_rsi_macd는 그대로 두어 다른 곳에서 사용 가능)
 def get_rsi_macd(ticker):
-    data = yf.Ticker(ticker).history(period="60d")
-    close = data["Close"]
-    delta = close.diff()
-    gain = delta.where(delta > 0, 0)
-    loss = -delta.where(delta < 0, 0)
-    avg_gain = gain.rolling(window=14).mean()
-    avg_loss = loss.rolling(window=14).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    latest_rsi = rsi.iloc[-1]
+    try:
+        data = yf.Ticker(ticker).history(period="60d")
+        close = data["Close"].dropna()
+        if len(close) < 15:
+            return "RSI/MACD 데이터 부족"
+        delta = close.diff()
+        gain = delta.where(delta > 0, 0)
+        loss = -delta.where(delta < 0, 0)
+        avg_gain = gain.rolling(window=14).mean()
+        avg_loss = loss.rolling(window=14).mean()
+        rs = avg_gain / avg_loss
+        rsi = 100 - (100 / (1 + rs))
+        latest_rsi = rsi.dropna().iloc[-1]
 
-    # RSI 해석 추가
-    if latest_rsi >= 70:
-        rsi_status = "📈 과매수"
-    elif latest_rsi <= 30:
-        rsi_status = "📉 과매도"
-    else:
-        rsi_status = "⚖️ 중립"
+        # RSI 해석 추가
+        if latest_rsi >= 70:
+            rsi_status = "📈 과매수"
+        elif latest_rsi <= 30:
+            rsi_status = "📉 과매도"
+        else:
+            rsi_status = "⚖️ 중립"
 
-    # MACD 계산
-    ema12 = close.ewm(span=12, adjust=False).mean()
-    ema26 = close.ewm(span=26, adjust=False).mean()
-    macd_line = ema12 - ema26
-    signal_line = macd_line.ewm(span=9, adjust=False).mean()
-    macd_trend = "📈 상승" if macd_line.iloc[-1] > signal_line.iloc[-1] else "📉 하락"
+        # MACD 계산
+        ema12 = close.ewm(span=12, adjust=False).mean()
+        ema26 = close.ewm(span=26, adjust=False).mean()
+        macd_line = ema12 - ema26
+        signal_line = macd_line.ewm(span=9, adjust=False).mean()
+        macd_trend = "📈 상승" if macd_line.iloc[-1] > signal_line.iloc[-1] else "📉 하락"
 
-    return f"RSI: {latest_rsi:.1f} ({rsi_status}), MACD: {macd_trend}"
+        return f"RSI: {latest_rsi:.1f} ({rsi_status}), MACD: {macd_trend}"
+    except Exception:
+        return "RSI/MACD 계산 오류"
 
-# ====== 포트폴리오 HTML ======
+# ====== 포트폴리오 HTML (상세) ======
 def get_portfolio_status_html():
     usd_to_cad = get_usd_to_cad_rate()
 
@@ -130,20 +178,23 @@ def get_portfolio_status_html():
 
     for ticker, info in portfolio.items():
         stock = yf.Ticker(ticker)
-        hist = stock.history(period="2d")["Close"]
+        try:
+            hist = stock.history(period="2d")["Close"]
+        except Exception:
+            hist = []
 
         note = ""
-        if len(hist) == 0:
+        if getattr(hist, "empty", True) or len(hist) == 0:
             price_today = info["avg_price"]
             price_yesterday = info["avg_price"]
             note = "※ 시세 데이터 없음, 평단가 기준"
         elif len(hist) == 1:
-            price_today = hist.iloc[-1]
+            price_today = float(hist.iloc[-1])
             price_yesterday = info["avg_price"]
             note = "※ 어제 데이터 없음, 평단가 기준"
         else:
-            price_today = hist.iloc[-1]
-            price_yesterday = hist.iloc[-2]
+            price_today = float(hist.iloc[-1])
+            price_yesterday = float(hist.iloc[-2])
 
         daily_profit = (price_today - price_yesterday) * info["shares"]
         daily_profit_color = "green" if daily_profit > 0 else "red"
@@ -167,7 +218,7 @@ def get_portfolio_status_html():
     html += "</table>"
     return html
 
-# ====== 포트폴리오 지수지표 정리 ======
+# ====== 포트폴리오 지표 (판단용) ======
 def get_portfolio_indicators_html():
     html = "<h4>📊 종목별 판단 지표</h4>"
     html += "<table border='1' cellpadding='5'>"
@@ -175,7 +226,7 @@ def get_portfolio_indicators_html():
         "<tr>"
         "<th>종목</th>"
         "<th>RSI</th>"
-        "<th>MACD</th>"
+        "<th>MACD(hist)</th>"
         "<th>PER</th>"
         "<th>Forward PER</th>"
         "<th>PBR</th>"
@@ -189,27 +240,16 @@ def get_portfolio_indicators_html():
 
     for ticker in portfolio.keys():
         stock = yf.Ticker(ticker)
-        info = stock.info
+        info = {}
+        try:
+            info = stock.info or {}
+        except Exception:
+            info = {}
 
-        # 📈 RSI & MACD 계산
-        df = yf.download(ticker, period="1y", interval="1d")  # 데이터 기간을 1년으로 늘려 안정화
-        df = df.dropna()
-        if df.empty:
-            rsi, macd = None, None
-        else:
-            delta = df["Close"].diff()
-            gain = delta.where(delta > 0, 0).rolling(window=14).mean()
-            loss = -delta.where(delta < 0, 0).rolling(window=14).mean()
-            rs = gain / loss
-            rsi_series = 100 - (100 / (1 + rs))
-            rsi = rsi_series.dropna().iloc[-1] if not rsi_series.dropna().empty else None
+        # RSI & MACD 계산 (helper 사용)
+        rsi, macd = get_rsi_macd_values(ticker, period="365d")
 
-            ema12 = df["Close"].ewm(span=12, adjust=False).mean()
-            ema26 = df["Close"].ewm(span=26, adjust=False).mean()
-            macd_series = ema12 - ema26
-            macd = macd_series.dropna().iloc[-1] if not macd_series.dropna().empty else None
-
-        # 📊 재무 지표
+        # 재무 지표
         per = info.get("trailingPE", "N/A")
         fwd_per = info.get("forwardPE", "N/A")
         pbr = info.get("priceToBook", "N/A")
@@ -217,9 +257,8 @@ def get_portfolio_indicators_html():
         eps = info.get("trailingEps", "N/A")
         debt_to_equity = info.get("debtToEquity", "N/A")
 
-        # 표시용
         rsi_disp = f"{rsi:.2f}" if isinstance(rsi, (int, float)) else "데이터 부족"
-        macd_disp = f"{macd:.2f}" if isinstance(macd, (int, float)) else "데이터 부족"
+        macd_disp = f"{macd:.4f}" if isinstance(macd, (int, float)) else "데이터 부족"
 
         html += (
             f"<tr><td>{ticker}</td>"
@@ -233,7 +272,6 @@ def get_portfolio_indicators_html():
             f"<td>{debt_to_equity}</td></tr>"
         )
 
-        # GPT 해석용 데이터 수집
         indicators_data[ticker] = {
             "RSI": rsi_disp,
             "MACD": macd_disp,
@@ -270,7 +308,7 @@ def get_portfolio_indicators_html():
         if comments.startswith("```"):
             comments = comments.replace("```html", "").replace("```", "").strip()
 
-        # 줄바꿈 처리
+        # 줄바꿈을 HTML로 변환 (가독성 목적)
         comments = comments.replace("\n", "<br>")
 
         html += "<h4>🔎 종목별 지표 해석 코멘트</h4>"
@@ -281,7 +319,7 @@ def get_portfolio_indicators_html():
 
     return html
 
-# ====== 포트폴리오 전체 정리 ======
+# ====== 포트폴리오 전체 정리 (요약) ======
 def get_portfolio_summary_html():
     usd_to_cad = get_usd_to_cad_rate()
     total_usd = 0
@@ -301,15 +339,29 @@ def get_portfolio_summary_html():
 
     for ticker, info in portfolio.items():
         stock = yf.Ticker(ticker)
-        hist = stock.history(period="2d")["Close"]
-        price_today = hist.iloc[-1]
-        price_yesterday = hist.iloc[-2]
+        try:
+            hist = stock.history(period="5d")["Close"]
+        except Exception:
+            hist = []
+
+        note = ""
+        if getattr(hist, "empty", True) or len(hist) == 0:
+            price_today = info["avg_price"]
+            price_yesterday = info["avg_price"]
+            note = "※ 시세 데이터 없음, 평단가 기준"
+        elif len(hist) == 1:
+            price_today = float(hist.iloc[-1])
+            price_yesterday = info["avg_price"]
+            note = "※ 어제 데이터 없음, 평단가 기준"
+        else:
+            price_today = float(hist.iloc[-1])
+            price_yesterday = float(hist.iloc[-2])
 
         daily_profit = (price_today - price_yesterday) * info["shares"]
         cost = info["avg_price"] * info["shares"]
         value_usd = price_today * info["shares"]
         profit = value_usd - cost
-        rate = (profit / cost) * 100
+        rate = (profit / cost) * 100 if cost > 0 else 0
 
         total_usd += value_usd
         total_cost += cost
@@ -323,7 +375,7 @@ def get_portfolio_summary_html():
         html += (
             f"<tr><td>{ticker}</td><td>{info['shares']}</td>"
             f"<td>{price_today:.2f}$</td>"
-            f"<td><span style='color:{daily_color}'>{daily_profit:+,.2f}$</span></td>"
+            f"<td><span style='color:{daily_color}'>{daily_profit:+,.2f}$</span> {note}</td>"
             f"<td><span style='color:{profit_color}'>{profit:+,.2f}$</span></td>"
             f"<td><span style='color:{rate_color}'>{rate:+.2f}%</span></td></tr>"
         )
@@ -333,7 +385,7 @@ def get_portfolio_summary_html():
     total_profit_color = "green" if total_profit > 0 else "red"
     total_rate_color = "green" if total_rate > 0 else "red"
 
-    # 합계 행
+    # 합계 행 (간결하게)
     html += (
         f"<tr><td><strong>합계</strong></td><td>-</td>"
         f"<td>-</td>"
@@ -345,13 +397,21 @@ def get_portfolio_summary_html():
     html += "</table>"
     html += f"<p>총 평가금액: {total_usd:,.2f}$ / {total_usd*usd_to_cad:,.2f} CAD</p>"
     return html
-    
+
 # ====== 수익 추이 그래프 ======
 def generate_profit_chart():
     tickers = list(portfolio.keys())
     profits = []
     for ticker, info in portfolio.items():
-        price = yf.Ticker(ticker).history(period="2d")["Close"].iloc[-1]
+        try:
+            hist = yf.Ticker(ticker).history(period="2d")["Close"]
+            if getattr(hist, "empty", True) or len(hist) == 0:
+                price = info["avg_price"]
+            else:
+                price = float(hist.iloc[-1])
+        except Exception:
+            price = info["avg_price"]
+
         profit = (price - info["avg_price"]) * info["shares"]
         profits.append(profit)
 
@@ -362,22 +422,32 @@ def generate_profit_chart():
     plt.axhline(0, color='gray', linestyle='--')
 
     buf = io.BytesIO()
-    plt.savefig(buf, format="png")
+    plt.savefig(buf, format='png')
     buf.seek(0)
     img_base64 = base64.b64encode(buf.read()).decode("utf-8")
     plt.close()
     return f"<img src='data:image/png;base64,{img_base64}'/>"
-    
 
 # ====== 수익률 경고 알림 ======
 def get_alerts_html():
     html = "<h3>🚨 수익률 경고</h3><ul>"
+    any_item = False
     for ticker, info in portfolio.items():
-        price = yf.Ticker(ticker).history(period="2d")["Close"].iloc[-1]
-        rate = ((price - info["avg_price"]) / info["avg_price"]) * 100
-        if rate > 20:
-            html += f"<li><strong>{ticker}</strong>: 수익률 {rate:.2f}% → 수익 실현 고려!</li>"
-    html += "</ul>" if html != "<h3>🚨 수익률 경고</h3><ul>" else "<p>⚠️ 현재 수익률 경고 조건에 해당하는 종목 없음</p>"
+        try:
+            hist = yf.Ticker(ticker).history(period="2d")["Close"]
+            if getattr(hist, "empty", True) or len(hist) == 0:
+                continue
+            price = float(hist.iloc[-1])
+            rate = ((price - info["avg_price"]) / info["avg_price"]) * 100
+            if rate > 20:
+                any_item = True
+                html += f"<li><strong>{ticker}</strong>: 수익률 {rate:.2f}% → 수익 실현 고려!</li>"
+        except Exception:
+            continue
+    if not any_item:
+        html += "</ul><p>⚠️ 현재 수익률 경고 조건에 해당하는 종목 없음</p>"
+    else:
+        html += "</ul>"
     return html
 
 # ====== 뉴스 요약 및 번역 함수 (최적화 버전) ======
@@ -444,10 +514,12 @@ def get_news_summary_html():
 # ====== 투자 전략 평가 ======
 def get_investment_assessment_html():
     try:
-        hour = datetime.now().hour  # 서버 기준 (UTC라면 MDT 변환 필요)
-        if 6 <= hour < 12:  # MDT 오전 리포트
+        # MDT 기준으로 판단하려면 서버 시간대를 변환해야 합니다.
+        # 현재는 서버 시간 기준으로 간단 분기 사용.
+        hour = datetime.now().hour
+        if 6 <= hour < 12:
             context = "지금은 MDT 오전, 시장 개장 전입니다. 오늘 장에서 주목할 포인트와 전략을 제안하세요."
-        else:  # MDT 오후 리포트
+        else:
             context = "지금은 MDT 오후, 시장이 마감되었습니다. 오늘 하루 시장 변화를 요약하고, 내일 장에서 주의해야 할 점을 알려주세요."
 
         prompt = f"""
@@ -575,10 +647,9 @@ def get_economic_table_html():
         monthly_values = {o["date"][5:7]: o["value"] for o in obs if o["date"].startswith("2025")}
         data[series_id] = monthly_values
 
-        # 시장 전망 아이콘 계산
         recent_months = sorted(monthly_values.keys())[-3:]
         recent_values = [float(monthly_values[m]) for m in recent_months if monthly_values.get(m, "-") != "-"]
-        icon = "⚖️"  # 기본값
+        icon = "⚖️"
 
         if len(recent_values) >= 2:
             delta = recent_values[-1] - recent_values[-2]
@@ -607,7 +678,6 @@ def get_economic_table_html():
 
         icon_map[series_id] = icon
 
-    # 📌 첫 번째 표: 요약 정보 (시장 전망 제거)
     html = "<h3 style='margin-left:20px;'>📌 주요 경제지표 요약</h3>"
     html += "<table border='1' cellpadding='5'><tr><th>지표</th><th>설명</th><th>현재 해석</th></tr>"
 
@@ -615,7 +685,6 @@ def get_economic_table_html():
         html += f"<tr><td>{info['label']}</td><td>{info['desc']}</td><td>{info['insight']}</td></tr>"
     html += "</table><br>"
 
-    # 📊 두 번째 표: 월별 변화 + 아이콘
     html += "<h3 style='margin-left:20px;'>📊 주요 경제지표 월별 변화 (2025년)</h3>"
     html += "<table border='1' cellpadding='5'><tr><th>지표</th>"
     for label in month_labels:
@@ -681,4 +750,4 @@ def daily_report_html():
 
 # ====== 실행 트리거 ======
 if __name__ == "__main__":
-    daily_report_html()          
+    daily_report_html()
