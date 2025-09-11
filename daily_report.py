@@ -237,6 +237,7 @@ def get_portfolio_indicators_html():
     )
 
     indicators_data = {}
+    current_prices = {}
 
     for ticker in portfolio.keys():
         stock = yf.Ticker(ticker)
@@ -246,7 +247,7 @@ def get_portfolio_indicators_html():
         except Exception:
             info = {}
 
-        # RSI & MACD 계산 (helper 사용)
+        # RSI & MACD 계산 (안정화)
         rsi, macd = get_rsi_macd_values(ticker, period="365d")
 
         # 재무 지표
@@ -259,6 +260,18 @@ def get_portfolio_indicators_html():
 
         rsi_disp = f"{rsi:.2f}" if isinstance(rsi, (int, float)) else "데이터 부족"
         macd_disp = f"{macd:.4f}" if isinstance(macd, (int, float)) else "데이터 부족"
+
+        # 현재가 (목표가 계산에 활용)
+        try:
+            hist = stock.history(period="2d")["Close"]
+            if getattr(hist, "empty", True):
+                price = portfolio[ticker]["avg_price"]
+            else:
+                price = float(hist.iloc[-1])
+        except Exception:
+            price = portfolio[ticker]["avg_price"]
+
+        current_prices[ticker] = price
 
         html += (
             f"<tr><td>{ticker}</td>"
@@ -273,6 +286,7 @@ def get_portfolio_indicators_html():
         )
 
         indicators_data[ticker] = {
+            "현재가": price,
             "RSI": rsi_disp,
             "MACD": macd_disp,
             "PER": per,
@@ -285,19 +299,25 @@ def get_portfolio_indicators_html():
 
     html += "</table>"
 
-    # GPT 해석 코멘트 (투자자 시사점 포함)
+    # GPT 해석 코멘트 (매도 목표가 + 손절가 포함)
     try:
         prompt = f"""
-아래는 종목별 주요 지표입니다:
+아래는 종목별 주요 지표와 현재가입니다:
 
 {indicators_data}
 
 👉 작업:
 1. 각 종목별로 해석을 bullet point 형식으로 작성하세요.
 2. 종목명은 **굵게** 표시하고, 그 아래 줄바꿈 후 bullet point를 나열하세요.
-3. bullet point에는 (1) RSI, MACD 등 기술적 지표 해석, (2) PER, PBR, ROE, EPS, 부채비율 등 재무 지표 해석을 포함하세요.
-4. 마지막 bullet에는 반드시 📌 투자자 시사점(단기/장기)을 정리하세요.
-5. 한국어로 간단히 요약하세요.
+3. bullet point에는 반드시 다음을 포함하세요:
+   - RSI, MACD 등 기술적 지표 해석
+   - PER, PBR, ROE, EPS, 부채비율 등 재무 지표 해석
+   - 1차 매도 목표가 (현재가 대비 5~10% 상승 수준)
+   - 2차 매도 목표가 (현재가 대비 15~20% 상승 수준)
+   - 손절가 (현재가 대비 5~10% 하락 수준)
+   - 📌 투자자 시사점 (단기/장기 전략)
+4. 가격은 반드시 달러($)와 함께 표기하세요.
+5. 한국어로 간결하고 명료하게 작성하세요.
 """
         gpt_response = openai.ChatCompletion.create(
             model="gpt-4o-mini",
@@ -308,10 +328,8 @@ def get_portfolio_indicators_html():
         if comments.startswith("```"):
             comments = comments.replace("```html", "").replace("```", "").strip()
 
-        # 줄바꿈을 HTML로 변환 (가독성 목적)
-        comments = comments.replace("\n", "<br>")
-
-        html += "<h4>🔎 종목별 지표 해석 코멘트</h4>"
+        comments = comments.replace("\n", "<br>")  # 줄바꿈 → HTML
+        html += "<h4>🔎 종목별 지표 해석 + 매도/손절 전략</h4>"
         html += f"<div style='margin-left:20px; color:#333;'>{comments}</div>"
 
     except Exception as e:
@@ -514,24 +532,43 @@ def get_news_summary_html():
 # ====== 투자 전략 평가 ======
 def get_investment_assessment_html():
     try:
-        # MDT 기준으로 판단하려면 서버 시간대를 변환해야 합니다.
-        # 현재는 서버 시간 기준으로 간단 분기 사용.
+        # 현재가 가져오기 (목표가 계산에 활용)
+        current_prices = {}
+        for ticker in portfolio.keys():
+            try:
+                hist = yf.Ticker(ticker).history(period="2d")["Close"]
+                if getattr(hist, "empty", True):
+                    current_prices[ticker] = portfolio[ticker]["avg_price"]
+                else:
+                    current_prices[ticker] = float(hist.iloc[-1])
+            except Exception:
+                current_prices[ticker] = portfolio[ticker]["avg_price"]
+
+        # 리포트 시간대에 따른 맥락 설정 (MDT 기준, 서버가 UTC라면 조정 필요)
         hour = datetime.now().hour
-        if 6 <= hour < 12:
+        if 6 <= hour < 12:  # 오전 리포트
             context = "지금은 MDT 오전, 시장 개장 전입니다. 오늘 장에서 주목할 포인트와 전략을 제안하세요."
-        else:
+        else:  # 오후 리포트
             context = "지금은 MDT 오후, 시장이 마감되었습니다. 오늘 하루 시장 변화를 요약하고, 내일 장에서 주의해야 할 점을 알려주세요."
 
         prompt = f"""
 {context}
 
-📌 포트폴리오 종목:
-{portfolio}
+📌 종목별 현재가:
+{current_prices}
 
 👉 작업:
 1. [포트폴리오 전략]을 먼저 bullet point로 정리하세요.
-2. 이어서 [종목별 전략]을 종목 이름별로 bullet point로 나누어 정리하세요.
-3. 한국어로 간단하고 명료하게 작성하세요.
+2. [종목별 전략]을 종목 이름별로 bullet point로 정리하세요.
+3. 각 종목별 전략에 다음을 반드시 포함하세요:
+   - 1차 매도 목표가: 현재가보다 5~10% 높은 수준
+   - 2차 매도 목표가: 현재가보다 15~20% 높은 수준
+   - 손절가: 현재가보다 5~10% 낮은 수준
+   - 이유 (기술적 지표, 수익률, 최근 뉴스 등)
+   - 장기적 보유/매도 판단
+4. 가격은 반드시 달러($)와 함께 표기하세요.
+5. bullet point와 줄바꿈을 활용해 읽기 쉽게 정리하세요.
+6. 한국어로 간결하고 명료하게 작성하세요.
 """
 
         gpt_response = openai.ChatCompletion.create(
@@ -544,7 +581,7 @@ def get_investment_assessment_html():
         if assessment.startswith("```"):
             assessment = assessment.replace("```html", "").replace("```", "").strip()
 
-        # 줄바꿈 처리
+        # 줄바꿈 처리 → HTML <br>
         assessment = assessment.replace("\n", "<br>")
 
         html = "<h3>🧐 투자 전략 종합 평가</h3>"
