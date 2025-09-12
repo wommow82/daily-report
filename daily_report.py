@@ -49,7 +49,7 @@ except Exception as e:
 portfolio = {
     "NVDA": {"shares": 128, "avg_price": 123.97},
     "PLTR": {"shares": 10, "avg_price": 151.60},
-    "RGTI": {"shares": 50, "avg_price": 19.02},
+    "RGTI": {"shares": 10, "avg_price": 19.02},
     "SCHD": {"shares": 2140, "avg_price": 24.37},
     "TSLA": {"shares": 10, "avg_price": 320.745},
 }
