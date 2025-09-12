@@ -53,6 +53,8 @@ portfolio = {
     "SCHD": {"shares": 2140, "avg_price": 24.37},
     "TSLA": {"shares": 10, "avg_price": 320.745},
 }
+# 💰 계좌 현금 (전역)
+CASH_BALANCE = 3854.54
 
 indices = ["^GSPC", "^IXIC", "^DJI", "^VIX", "^TNX"]
 
@@ -398,12 +400,16 @@ def get_portfolio_summary_html():
             f"<td><span style='color:{rate_color}'>{rate:+.2f}%</span></td></tr>"
         )
 
+    # 💰 계좌 현금 추가
+    total_with_cash = total_usd + CASH_BALANCE
+    cash_ratio = (CASH_BALANCE / total_with_cash) * 100 if total_with_cash > 0 else 0
+
     total_rate = (total_profit / total_cost) * 100 if total_cost > 0 else 0
     total_daily_color = "green" if total_daily_profit > 0 else "red"
     total_profit_color = "green" if total_profit > 0 else "red"
     total_rate_color = "green" if total_rate > 0 else "red"
 
-    # 합계 행 (간결하게)
+    # 합계 행
     html += (
         f"<tr><td><strong>합계</strong></td><td>-</td>"
         f"<td>-</td>"
@@ -413,7 +419,11 @@ def get_portfolio_summary_html():
     )
 
     html += "</table>"
-    html += f"<p>총 평가금액: {total_usd:,.2f}$ / {total_usd*usd_to_cad:,.2f} CAD</p>"
+
+    # 💰 현금 정보 추가 출력
+    html += f"<p>💰 계좌 현금 잔고: <strong>{CASH_BALANCE:,.2f}$</strong> (포트폴리오 비중 {cash_ratio:.2f}%)</p>"
+    html += f"<p>총 평가금액 (현금 포함): <strong>{total_with_cash:,.2f}$</strong> / {total_with_cash * usd_to_cad:,.2f} CAD</p>"
+
     return html
 
 # ====== 수익 추이 그래프 ======
