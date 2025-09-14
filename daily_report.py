@@ -806,10 +806,10 @@ def daily_report_html():
 
 # ====== 실행 트리거 ======
 if __name__ == "__main__":
+    from datetime import datetime
     today = datetime.now()
-    if today.weekday() >= 5:
-        print("📌 주말 리포트 생략")
-    else:
-        html = daily_report_html()
-        if html:
-            send_email_report(html)
+    if today.weekday() >= 5:  # 토(5), 일(6)
+        print("📌 주말이므로 리포트를 실행하지 않습니다.")
+        exit(0)  # ✅ 여기서 스크립트 자체 종료
+
+    daily_report_html()  # 평일에만 실행
