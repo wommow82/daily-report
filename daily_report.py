@@ -761,8 +761,17 @@ def send_email_html(subject, html_body):
         server.login(EMAIL_SENDER, EMAIL_PASSWORD)
         server.sendmail(EMAIL_SENDER, EMAIL_RECEIVER, msg.as_string())
 
+def daily_report_html():
+
+
 # ====== 메인 리포트 생성 및 실행 ======
 def daily_report_html():
+    # 🛑 주말(토/일)에는 실행 안 함
+    today = datetime.now()
+    weekday = today.weekday()  # 월=0 ... 일=6
+    if weekday >= 5:
+        print("📌 주말이므로 리포트를 생성하지 않습니다.")
+        return ""  # 아무것도 리턴하지 않음 → 이후 메일 발송 안 됨
     today = datetime.today().strftime("%Y-%m-%d")
     portfolio_summary_html = get_portfolio_summary_html()
     portfolio_indicators_html = get_portfolio_indicators_html()
@@ -797,4 +806,10 @@ def daily_report_html():
 
 # ====== 실행 트리거 ======
 if __name__ == "__main__":
-    daily_report_html()
+    today = datetime.now()
+    if today.weekday() >= 5:
+        print("📌 주말 리포트 생략")
+    else:
+        html = daily_report_html()
+        if html:
+            send_email_report(html)
