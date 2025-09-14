@@ -761,9 +761,6 @@ def send_email_html(subject, html_body):
         server.login(EMAIL_SENDER, EMAIL_PASSWORD)
         server.sendmail(EMAIL_SENDER, EMAIL_RECEIVER, msg.as_string())
 
-def daily_report_html():
-
-
 # ====== 메인 리포트 생성 및 실행 ======
 def daily_report_html():
     # 🛑 주말(토/일)에는 실행 안 함
