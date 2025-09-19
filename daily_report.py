@@ -2,164 +2,111 @@
 # coding: utf-8
 
 import os
-import yfinance as yf
+import time
 import requests
-import smtplib
+import yfinance as yf
+import openai
+import pandas as pd
 import matplotlib.pyplot as plt
 import io
 import base64
-import openai
+from datetime import datetime, timedelta
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
-from datetime import datetime
-from googletrans import Translator
+import smtplib
 
-# ====== 환경 변수에서 불러오기 (GitHub Secrets) ======
-NEWS_API_KEY = os.getenv("NEWS_API_KEY")
-FRED_API_KEY = os.getenv("FRED_API_KEY")
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-EMAIL_SENDER = os.getenv("EMAIL_SENDER")
-EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD")
-EMAIL_RECEIVER = os.getenv("EMAIL_RECEIVER")
-
-# 번역기 초기화
-translator = Translator()
-
-# OpenAI API 키 설정
-api_key = os.getenv("OPENAI_API_KEY")
-if not api_key:
-    raise ValueError("OPENAI_API_KEY is missing. Make sure it's set in GitHub Secrets and passed to the workflow.")
-
-openai.api_key = OPENAI_API_KEY
-
-# ChatGPT 호출 예시 (초기 연결 확인)
-try:
-    response = openai.ChatCompletion.create(
-        model="gpt-4o-mini",
-        messages=[{"role": "user", "content": "Hello!"}]
-    )
-    print(response.choices[0].message.content)
-except openai.error.RateLimitError as e:
-    print("Rate limit exceeded:", e)
-except Exception as e:
-    # 안전하게 예외 처리
-    print("OpenAI 초기 호출 에러:", e)
-
-# ====== 포트폴리오 구성 ======
+# ---------------------------
+# Configuration / Globals
+# ---------------------------
+# 포트폴리오 - 필요시 수정
 portfolio = {
-    "NVDA": {"shares": 128, "avg_price": 123.97},
+    "NVDA": {"shares": 50, "avg_price": 123.97},
     "PLTR": {"shares": 10, "avg_price": 151.60},
     "SCHD": {"shares": 2140, "avg_price": 24.37},
     "TSLA": {"shares": 10, "avg_price": 320.745},
 }
-# 💰 계좌 현금 (전역)
-CASH_BALANCE = 3951.36
 
-indices = ["^GSPC", "^IXIC", "^DJI", "^VIX", "^TNX"]
+# 계좌 현금 (USD)
+CASH_BALANCE = 16671.21
 
-# ====== 실시간 환율 가져오기 ======
-def get_usd_to_cad_rate():
+# OpenAI / External API config (환경변수에서 읽음)
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+NEWS_API_KEY = os.getenv("NEWS_API_KEY")  # NewsAPI 사용 시
+FRED_API_KEY = os.getenv("FRED_API_KEY")
+TRADING_API_KEY = os.getenv("TRADINGECONOMICS_API_KEY", "guest:guest")
+
+# Email config (환경변수 필요)
+EMAIL_SENDER = os.getenv("EMAIL_SENDER")
+EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD")
+EMAIL_RECEIVER = os.getenv("EMAIL_RECEIVER")
+
+# OpenAI 설정
+if not OPENAI_API_KEY:
+    raise RuntimeError("OPENAI_API_KEY 환경변수가 필요합니다.")
+openai.api_key = OPENAI_API_KEY
+OPENAI_MODEL = "gpt-4o-mini"
+
+# ---------------------------
+# Helpers
+# ---------------------------
+def gpt_chat(prompt: str, retries: int = 3, backoff: int = 5) -> str:
+    """OpenAI ChatCompletion 호출 + 간단한 retry"""
+    for attempt in range(retries):
+        try:
+            resp = openai.ChatCompletion.create(
+                model=OPENAI_MODEL,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.6
+            )
+            return resp.choices[0].message.content.strip()
+        except openai.error.RateLimitError as e:
+            wait = backoff * (attempt + 1)
+            print(f"[GPT] Rate limit: 재시도 {attempt+1}/{retries} - {wait}s 대기")
+            time.sleep(wait)
+        except Exception as e:
+            print(f"[GPT] 오류: {e}")
+            time.sleep(backoff)
+    return "GPT 요청 실패(재시도 초과)"
+
+def get_usd_to_cad_rate() -> float:
     try:
-        url = "https://api.exchangerate.host/latest?base=USD&symbols=CAD"
-        res = requests.get(url).json()
-        rate = res["rates"]["CAD"]
-        return rate
+        res = requests.get("https://api.exchangerate.host/latest?base=USD&symbols=CAD", timeout=10)
+        data = res.json()
+        rate = data.get("rates", {}).get("CAD")
+        if rate:
+            return float(rate)
     except Exception as e:
-        print(f"환율 가져오기 실패: {e}")
-        return 1.3829  # 실패 시 기본값
+        print(f"환율 조회 실패: {e}")
+    # fallback
+    return 1.38
 
-
-
-# ====== 경제 달력 가져오기 ======
-def get_us_economic_calendar_html():
-    try:
-        # 📅 이번 달 시작~끝 날짜 계산
-        today = datetime.today()
-        start_date = today.replace(day=1).strftime("%Y-%m-%d")
-        next_month = today.replace(day=28) + timedelta(days=4)  # 다음 달로 넘어감
-        end_date = next_month.replace(day=1) - timedelta(days=1)
-        end_date = end_date.strftime("%Y-%m-%d")
-
-        # 📊 TradingEconomics API 호출 (공개 guest key 사용)
-        url = f"https://api.tradingeconomics.com/calendar?country=united states&start={start_date}&end={end_date}&c=guest:guest"
-        response = requests.get(url)
-        if response.status_code != 200:
-            return "<p>경제 일정 데이터를 가져올 수 없습니다.</p>"
-
-        data = response.json()
-        if not data:
-            return "<p>이번 달 미국 경제 발표 일정이 없습니다.</p>"
-
-        # 주요 이벤트만 필터 (CPI, PPI, GDP, FOMC, Payroll, PCE 등)
-        keywords = ["CPI", "PPI", "GDP", "FOMC", "Payroll", "PCE", "Inflation", "Unemployment", "ISM", "Retail"]
-        major_events = [item for item in data if any(k.lower() in item.get("Event", "").lower() for k in keywords)]
-
-        if not major_events:
-            return "<p>이번 달 주요 경제 이벤트가 없습니다.</p>"
-
-        # GPT에게 요약 + 투자 관점 요청
-        prompt = f"""
-아래는 이번 달 미국 주요 경제 발표 일정입니다:
-
-{major_events}
-
-👉 작업:
-1. 각 이벤트를 날짜순으로 정리하세요.
-2. 각 이벤트별로 아래 항목을 bullet point로 작성하세요:
-   - 발표일
-   - 지표 이름
-   - 예상치 / 이전 값 (있으면)
-   - 투자자 관점에서 주목할 포인트
-   - 예상되는 시장 반응 (긍정적/부정적)
-3. 한국어로 간결하고 읽기 좋게 정리하세요.
-4. 한눈에 보기 좋도록 줄바꿈과 bullet point를 적절히 활용하세요.
-"""
-
-        gpt_response = openai.ChatCompletion.create(
-            model="gpt-4o-mini",
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.5
-        )
-
-        summary = gpt_response.choices[0].message.content.strip()
-        summary = summary.replace("```", "").replace("html", "")
-        summary = summary.replace("\n", "<br>")
-
-        html = "<h3>🗓️ 이번 달 미국 경제 발표 일정</h3>"
-        html += f"<div style='margin-left:20px;'>{summary}</div>"
-        return html
-
-    except Exception as e:
-        return f"<h3>🗓️ 이번 달 미국 경제 발표 일정</h3><p>데이터 불러오기 실패: {e}</p>"
-
-
-# ====== 아이콘 설명 ======
-def get_market_icon_legend_html():
-    html = "<h3 style='margin-left:20px;'>📊 시장 전망 아이콘 설명</h3>"
-    html += "<table border='1' cellpadding='5'>"
-    html += "<tr><th>아이콘</th><th>의미</th></tr>"
-    html += "<tr><td>🚀</td><td>강한 상승 기대 (급등 가능성)</td></tr>"
-    html += "<tr><td>📈</td><td>상승 기대 (안정적 상승 흐름)</td></tr>"
-    html += "<tr><td>⚖️</td><td>중립 / 혼조세 (방향성 불확실)</td></tr>"
-    html += "<tr><td>⚠️</td><td>하락 우려 (주의 필요)</td></tr>"
-    html += "<tr><td>📉</td><td>급락 가능성 (강한 하락 압력)</td></tr>"
-    html += "<tr><td>🌪️</td><td>불안정 / 변동성 확대 (시장 혼란)</td></tr>"
-    html += "<tr><td>🧘</td><td>안정적 흐름 (변동성 낮음)</td></tr>"
-    html += "</table><br>"
-    return html
-
-# ====== 기술적 지표 계산 (수치 반환용, 안정화) ======
-def get_rsi_macd_values(ticker, period="365d"):
+def get_stock_prices(ticker: str):
     """
-    RSI (float or None), MACD histogram (float or None)을 반환.
-    데이터가 부족하면 (None, None) 반환.
+    return (price_today, price_yesterday) or (None, None) if missing
+    safe: checks length
     """
     try:
-        data = yf.Ticker(ticker).history(period=period)
-        if data is None or data.empty or "Close" not in data.columns:
+        hist = yf.Ticker(ticker).history(period="5d", interval="1d")["Close"]
+        if getattr(hist, "empty", True) or len(hist) == 0:
             return None, None
+        elif len(hist) == 1:
+            return float(hist.iloc[-1]), None
+        else:
+            return float(hist.iloc[-1]), float(hist.iloc[-2])
+    except Exception as e:
+        print(f"[get_stock_prices] {ticker} 에러: {e}")
+        return None, None
 
-        close = data["Close"].dropna()
+def get_rsi_macd_values(ticker: str, period: str = "365d"):
+    """
+    Returns (rsi_float_or_None, macd_hist_float_or_None)
+    Uses yfinance history and safe operations.
+    """
+    try:
+        df = yf.Ticker(ticker).history(period=period, interval="1d")
+        if df is None or df.empty or "Close" not in df.columns:
+            return None, None
+        close = df["Close"].dropna()
         if len(close) < 15:
             return None, None
 
@@ -173,186 +120,270 @@ def get_rsi_macd_values(ticker, period="365d"):
         rsi_series = 100 - (100 / (1 + rs))
         latest_rsi = rsi_series.dropna().iloc[-1] if not rsi_series.dropna().empty else None
 
-        # MACD histogram (macd - signal)
+        # MACD histogram
         ema12 = close.ewm(span=12, adjust=False).mean()
         ema26 = close.ewm(span=26, adjust=False).mean()
         macd_line = ema12 - ema26
-        signal_line = macd_line.ewm(span=9, adjust=False).mean()
-        macd_hist = (macd_line - signal_line).dropna()
+        signal = macd_line.ewm(span=9, adjust=False).mean()
+        macd_hist = (macd_line - signal).dropna()
         latest_macd = macd_hist.iloc[-1] if not macd_hist.empty else None
 
-        rsi_val = float(latest_rsi) if latest_rsi is not None else None
-        macd_val = float(latest_macd) if latest_macd is not None else None
-        return rsi_val, macd_val
-
+        return (float(latest_rsi) if latest_rsi is not None else None,
+                float(latest_macd) if latest_macd is not None else None)
     except Exception as e:
-        # 오류 시 None 반환 (호출자에서 처리)
-        # print(f"get_rsi_macd_values error for {ticker}: {e}")
+        print(f"[get_rsi_macd_values] {ticker} 에러: {e}")
         return None, None
 
-# (기존 get_rsi_macd는 그대로 두어 다른 곳에서 사용 가능)
-def get_rsi_macd(ticker):
-    try:
-        data = yf.Ticker(ticker).history(period="60d")
-        close = data["Close"].dropna()
-        if len(close) < 15:
-            return "RSI/MACD 데이터 부족"
-        delta = close.diff()
-        gain = delta.where(delta > 0, 0)
-        loss = -delta.where(delta < 0, 0)
-        avg_gain = gain.rolling(window=14).mean()
-        avg_loss = loss.rolling(window=14).mean()
-        rs = avg_gain / avg_loss
-        rsi = 100 - (100 / (1 + rs))
-        latest_rsi = rsi.dropna().iloc[-1]
-
-        # RSI 해석 추가
-        if latest_rsi >= 70:
-            rsi_status = "📈 과매수"
-        elif latest_rsi <= 30:
-            rsi_status = "📉 과매도"
-        else:
-            rsi_status = "⚖️ 중립"
-
-        # MACD 계산
-        ema12 = close.ewm(span=12, adjust=False).mean()
-        ema26 = close.ewm(span=26, adjust=False).mean()
-        macd_line = ema12 - ema26
-        signal_line = macd_line.ewm(span=9, adjust=False).mean()
-        macd_trend = "📈 상승" if macd_line.iloc[-1] > signal_line.iloc[-1] else "📉 하락"
-
-        return f"RSI: {latest_rsi:.1f} ({rsi_status}), MACD: {macd_trend}"
-    except Exception:
-        return "RSI/MACD 계산 오류"
-
-# ====== 포트폴리오 HTML (상세) ======
+# ---------------------------
+# Sections (HTML generators)
+# ---------------------------
 def get_portfolio_status_html():
-    usd_to_cad = get_usd_to_cad_rate()
-
+    """Detailed per-stock table (no totals)"""
     html = "<h4>📌 종목별 현황 (상세)</h4>"
-    html += "<table border='1' cellpadding='5'>"
-    html += (
-        "<tr>"
-        "<th>종목</th>"
-        "<th>보유수량</th>"
-        "<th>현재가 / 평단가 (USD)</th>"
-        "<th>일일 손익 (USD)</th>"
-        "<th>누적 손익 (USD)</th>"
-        "<th>수익률</th>"
-        "</tr>"
-    )
+    html += "<table border='1' cellpadding='5' style='border-collapse:collapse;'>"
+    html += "<tr><th>종목</th><th>보유수량</th><th>현재가 / 평단가 (USD)</th><th>일일 손익</th><th>누적 손익</th><th>수익률</th></tr>"
 
     for ticker, info in portfolio.items():
-        stock = yf.Ticker(ticker)
-        try:
-            hist = stock.history(period="2d")["Close"]
-        except Exception:
-            hist = []
-
+        price_today, price_yesterday = get_stock_prices(ticker)
         note = ""
-        if getattr(hist, "empty", True) or len(hist) == 0:
+        if price_today is None:
+            # no data -> use avg price as fallback
             price_today = info["avg_price"]
             price_yesterday = info["avg_price"]
-            note = "※ 시세 데이터 없음, 평단가 기준"
-        elif len(hist) == 1:
-            price_today = float(hist.iloc[-1])
+            note = "※ 시세 없음(평단 기준)"
+        elif price_yesterday is None:
             price_yesterday = info["avg_price"]
-            note = "※ 어제 데이터 없음, 평단가 기준"
-        else:
-            price_today = float(hist.iloc[-1])
-            price_yesterday = float(hist.iloc[-2])
+            note = "※ 어제 데이터 없음(평단 기준)"
 
         daily_profit = (price_today - price_yesterday) * info["shares"]
-        daily_profit_color = "green" if daily_profit > 0 else "red"
-
         cost = info["avg_price"] * info["shares"]
-        value_usd = price_today * info["shares"]
-        profit = value_usd - cost
-        profit_color = "green" if profit > 0 else "red"
+        total_value = price_today * info["shares"]
+        profit = total_value - cost
+        rate = (profit / cost) * 100 if cost != 0 else 0
 
-        rate = (profit / cost) * 100 if cost > 0 else 0
-        rate_color = "green" if rate > 0 else "red"
+        daily_color = "green" if daily_profit >= 0 else "red"
+        profit_color = "green" if profit >= 0 else "red"
+        rate_color = "green" if rate >= 0 else "red"
 
-        html += (
-            f"<tr><td>{ticker}</td><td>{info['shares']}</td>"
-            f"<td>{price_today:.2f}$ / {info['avg_price']:.2f}$</td>"
-            f"<td><span style='color:{daily_profit_color}'>{daily_profit:+,.2f}$</span> {note}</td>"
-            f"<td><span style='color:{profit_color}'>{profit:+,.2f}$</span></td>"
-            f"<td><span style='color:{rate_color}'>{rate:+.2f}%</span></td></tr>"
-        )
+        html += (f"<tr><td>{ticker}</td>"
+                 f"<td>{info['shares']}</td>"
+                 f"<td>{price_today:.2f}$ / {info['avg_price']:.2f}$</td>"
+                 f"<td style='color:{daily_color};'>{daily_profit:+.2f}$ {note}</td>"
+                 f"<td style='color:{profit_color};'>{profit:+.2f}$</td>"
+                 f"<td style='color:{rate_color};'>{rate:+.2f}%</td></tr>")
 
     html += "</table>"
     return html
 
-# ====== 포트폴리오 지표 (판단용) ======
-def get_portfolio_indicators_html():
-    html = "<h4>📊 종목별 판단 지표</h4>"
-    html += "<table border='1' cellpadding='5'>"
-    html += (
-        "<tr>"
-        "<th>종목</th>"
-        "<th>RSI</th>"
-        "<th>MACD(hist)</th>"
-        "<th>PER</th>"
-        "<th>Forward PER</th>"
-        "<th>PBR</th>"
-        "<th>ROE</th>"
-        "<th>EPS</th>"
-        "<th>부채비율</th>"
-        "</tr>"
-    )
+def get_portfolio_summary_html():
+    """Summary table + cash info"""
+    usd_to_cad = get_usd_to_cad_rate()
+    total_usd = 0.0
+    total_cost = 0.0
+    total_profit = 0.0
+    total_daily = 0.0
 
-    indicators_data = {}
+    html = "<h4>📌 전체 포트폴리오 요약</h4>"
+    html += "<table border='1' cellpadding='5' style='border-collapse:collapse;'>"
+    html += "<tr><th>종목</th><th>보유수량</th><th>현재가 (USD)</th><th>일일 손익</th><th>누적 손익</th><th>수익률</th></tr>"
+
+    for ticker, info in portfolio.items():
+        price_today, price_yesterday = get_stock_prices(ticker)
+        note = ""
+        if price_today is None:
+            price_today = info["avg_price"]
+            price_yesterday = info["avg_price"]
+            note = "※ 시세 없음"
+        elif price_yesterday is None:
+            price_yesterday = info["avg_price"]
+            note = "※ 어제 데이터 없음"
+
+        daily_profit = (price_today - price_yesterday) * info["shares"]
+        cost = info["avg_price"] * info["shares"]
+        value = price_today * info["shares"]
+        profit = value - cost
+        rate = (profit / cost) * 100 if cost != 0 else 0
+
+        total_usd += value
+        total_cost += cost
+        total_profit += profit
+        total_daily += daily_profit
+
+        html += (f"<tr><td>{ticker}</td><td>{info['shares']}</td><td>{price_today:.2f}$</td>"
+                 f"<td style='color:{'green' if daily_profit>=0 else 'red'}'>{daily_profit:+.2f}$ {note}</td>"
+                 f"<td style='color:{'green' if profit>=0 else 'red'}'>{profit:+.2f}$</td>"
+                 f"<td style='color:{'green' if rate>=0 else 'red'}'>{rate:+.2f}%</td></tr>")
+
+    total_with_cash = total_usd + CASH_BALANCE
+    cash_ratio = (CASH_BALANCE / total_with_cash) * 100 if total_with_cash > 0 else 0
+    total_rate = (total_profit / total_cost) * 100 if total_cost != 0 else 0
+
+    html += (f"<tr><td><strong>합계</strong></td><td>-</td><td>-</td>"
+             f"<td><strong>{total_daily:+.2f}$</strong></td>"
+             f"<td><strong>{total_profit:+.2f}$</strong></td>"
+             f"<td><strong>{total_rate:+.2f}%</strong></td></tr>")
+    html += "</table>"
+
+    html += f"<p>💰 계좌 현금: <strong>{CASH_BALANCE:,.2f}$</strong> (비중 {cash_ratio:.2f}%)</p>"
+    html += f"<p>총 평가금액 (현금 포함): <strong>{total_with_cash:,.2f}$</strong> / {total_with_cash * usd_to_cad:,.2f} CAD</p>"
+    return html
+
+def generate_profit_chart():
+    """Bar chart of per-stock profit -> returns base64 img tag"""
+    tickers = list(portfolio.keys())
+    profits = []
+    for t, info in portfolio.items():
+        price_today, _ = get_stock_prices(t)
+        if price_today is None:
+            price_today = info["avg_price"]
+        profit = (price_today - info["avg_price"]) * info["shares"]
+        profits.append(profit)
+
+    plt.figure(figsize=(8, 3))
+    bars = plt.bar(tickers, profits)
+    plt.axhline(0, color='gray', linestyle='--')
+    plt.title("종목별 손익")
+    plt.ylabel("손익 (USD)")
+    # color coding
+    for bar, val in zip(bars, profits):
+        bar.set_color('green' if val >= 0 else 'red')
+
+    buf = io.BytesIO()
+    plt.tight_layout()
+    plt.savefig(buf, format='png')
+    buf.seek(0)
+    img_b64 = base64.b64encode(buf.read()).decode('utf-8')
+    plt.close()
+    return f"<img src='data:image/png;base64,{img_b64}' alt='profit chart'/>"
+
+def get_alerts_html():
+    html = "<h3>🚨 수익률 경고</h3>"
+    items = []
+    for t, info in portfolio.items():
+        price_today, _ = get_stock_prices(t)
+        if price_today is None:
+            continue
+        rate = ((price_today - info["avg_price"]) / info["avg_price"]) * 100
+        if rate > 20:
+            items.append(f"<li><strong>{t}</strong>: 수익률 {rate:.2f}% → 수익 실현 고려</li>")
+    if not items:
+        return "<h3>🚨 수익률 경고</h3><p>현재 경고 조건에 해당하는 종목 없음</p>"
+    return "<h3>🚨 수익률 경고</h3><ul>" + "".join(items) + "</ul>"
+
+def get_market_icon_legend_html():
+    html = "<h4>아이콘 설명</h4><table border='1' cellpadding='5' style='border-collapse:collapse;'>"
+    html += "<tr><td>🚀</td><td>강한 상승 기대</td></tr>"
+    html += "<tr><td>📈</td><td>상승 기대</td></tr>"
+    html += "<tr><td>⚖️</td><td>중립</td></tr>"
+    html += "<tr><td>⚠️</td><td>하락 우려</td></tr>"
+    html += "</table>"
+    return html
+
+# ---------------------------
+# News summary
+# ---------------------------
+def get_news_summary_html():
+    """Fetch up to 3 news articles per ticker (NewsAPI) and summarize with GPT.
+       Titles are links; GPT produces numbered summaries + short term / long term points.
+    """
+    html = "<div>"
+    for ticker in portfolio.keys():
+        html += f"<div style='border:1px solid #ddd; padding:10px; margin:8px 0; border-radius:8px;'>"
+        html += f"<h4>{ticker} 관련 뉴스</h4>"
+
+        # fetch articles
+        articles = []
+        if NEWS_API_KEY:
+            try:
+                params = {
+                    "q": ticker,
+                    "pageSize": 3,
+                    "sortBy": "publishedAt",
+                    "language": "en",
+                    "apiKey": NEWS_API_KEY
+                }
+                r = requests.get("https://newsapi.org/v2/everything", params=params, timeout=10)
+                j = r.json()
+                articles = j.get("articles", [])[:3]
+            except Exception as e:
+                print(f"[NewsAPI] {ticker} 에러: {e}")
+        else:
+            # fallback: no NewsAPI key -> skip external fetch
+            articles = []
+
+        if not articles:
+            html += "<p style='color:gray;'>관련 뉴스 없음 또는 NEWS_API_KEY 미설정</p></div>"
+            continue
+
+        # list titles as links
+        html += "<ul>"
+        articles_text = ""
+        for idx, a in enumerate(articles, start=1):
+            title = a.get("title") or "제목 없음"
+            link = a.get("url") or "#"
+            desc = a.get("description") or ""
+            html += f"<li><a href='{link}' target='_blank'>{title}</a></li>"
+            articles_text += f"[{idx}] 제목: {title}\n설명: {desc}\n링크: {link}\n"
+        html += "</ul>"
+
+        # GPT prompt: numbered summary + short/long implication
+        prompt = f"""
+아래는 {ticker} 관련 최근 뉴스 3개(제목+설명)입니다:
+
+{articles_text}
+
+작업:
+1) 각 기사별로 [1], [2], [3] 번호를 붙여 한국어로 핵심을 bullet point로 정리하세요.
+2) 마지막에 '📌 단기 시사점' 과 '📌 장기 시사점'을 줄바꿈하여 제시하세요.
+3) 출력은 읽기 쉽게 줄바꿈/번호/불릿을 사용하세요.
+"""
+        summary = gpt_chat(prompt)
+        summary = summary.replace("```", "")
+        summary_html = summary.replace("\n", "<br>")
+        html += f"<div style='margin-left:12px; color:#333;'>{summary_html}</div>"
+        html += "</div>"
+
+    html += "</div>"
+    return html
+
+# ---------------------------
+# Indicators + GPT analysis incl. sell levels
+# ---------------------------
+def get_portfolio_indicators_html():
+    """Table of RSI/MACD and fundamentals + GPT-driven interpretation with 1st/2nd sell and stoploss"""
+    html = "<h4>📊 종목별 판단 지표</h4>"
+    html += "<table border='1' cellpadding='5' style='border-collapse:collapse;'>"
+    html += "<tr><th>종목</th><th>RSI</th><th>MACD(hist)</th><th>PER</th><th>Fwd PER</th><th>PBR</th><th>ROE</th><th>EPS</th><th>부채비율</th></tr>"
+
+    indicators_for_gpt = {}
     current_prices = {}
 
-    for ticker in portfolio.keys():
-        stock = yf.Ticker(ticker)
-        info = {}
+    for t, info in portfolio.items():
+        # fetch info safely
         try:
-            info = stock.info or {}
+            stock = yf.Ticker(t)
+            yinfo = stock.info or {}
         except Exception:
-            info = {}
+            yinfo = {}
 
-        # RSI & MACD 계산 (안정화)
-        rsi, macd = get_rsi_macd_values(ticker, period="365d")
+        per = yinfo.get("trailingPE", "N/A")
+        fwd_per = yinfo.get("forwardPE", "N/A")
+        pbr = yinfo.get("priceToBook", "N/A")
+        roe = yinfo.get("returnOnEquity", "N/A")
+        eps = yinfo.get("trailingEps", "N/A")
+        debt_to_equity = yinfo.get("debtToEquity", "N/A")
 
-        # 재무 지표
-        per = info.get("trailingPE", "N/A")
-        fwd_per = info.get("forwardPE", "N/A")
-        pbr = info.get("priceToBook", "N/A")
-        roe = info.get("returnOnEquity", "N/A")
-        eps = info.get("trailingEps", "N/A")
-        debt_to_equity = info.get("debtToEquity", "N/A")
-
+        rsi, macd = get_rsi_macd_values(t, period="365d")
         rsi_disp = f"{rsi:.2f}" if isinstance(rsi, (int, float)) else "데이터 부족"
         macd_disp = f"{macd:.4f}" if isinstance(macd, (int, float)) else "데이터 부족"
 
-        # 현재가 (목표가 계산에 활용)
-        try:
-            hist = stock.history(period="2d")["Close"]
-            if getattr(hist, "empty", True):
-                price = portfolio[ticker]["avg_price"]
-            else:
-                price = float(hist.iloc[-1])
-        except Exception:
-            price = portfolio[ticker]["avg_price"]
+        price_today, _ = get_stock_prices(t)
+        if price_today is None:
+            price_today = info["avg_price"]
 
-        current_prices[ticker] = price
-
-        html += (
-            f"<tr><td>{ticker}</td>"
-            f"<td>{rsi_disp}</td>"
-            f"<td>{macd_disp}</td>"
-            f"<td>{per}</td>"
-            f"<td>{fwd_per}</td>"
-            f"<td>{pbr}</td>"
-            f"<td>{roe}</td>"
-            f"<td>{eps}</td>"
-            f"<td>{debt_to_equity}</td></tr>"
-        )
-
-        indicators_data[ticker] = {
-            "현재가": price,
+        current_prices[t] = price_today
+        indicators_for_gpt[t] = {
+            "현재가": price_today,
             "RSI": rsi_disp,
             "MACD": macd_disp,
             "PER": per,
@@ -360,536 +391,227 @@ def get_portfolio_indicators_html():
             "PBR": pbr,
             "ROE": roe,
             "EPS": eps,
-            "부채비율": debt_to_equity,
+            "부채비율": debt_to_equity
         }
+
+        html += (f"<tr><td>{t}</td><td>{rsi_disp}</td><td>{macd_disp}</td>"
+                 f"<td>{per}</td><td>{fwd_per}</td><td>{pbr}</td><td>{roe}</td><td>{eps}</td><td>{debt_to_equity}</td></tr>")
 
     html += "</table>"
 
-    # GPT 해석 코멘트 (매도 목표가 + 손절가 포함)
-    try:
-        prompt = f"""
+    # GPT: interpret and give 1st/2nd sell and stoploss
+    prompt = f"""
 아래는 종목별 주요 지표와 현재가입니다:
 
-{indicators_data}
+{indicators_for_gpt}
 
-👉 작업:
-1. 각 종목별로 해석을 bullet point 형식으로 작성하세요.
-2. 종목명은 **굵게** 표시하고, 그 아래 줄바꿈 후 bullet point를 나열하세요.
-3. bullet point에는 반드시 다음을 포함하세요:
-   - RSI, MACD 등 기술적 지표 해석
-   - PER, PBR, ROE, EPS, 부채비율 등 재무 지표 해석
-   - 1차 매도 목표가 (현재가 대비 5~10% 상승 수준)
-   - 2차 매도 목표가 (현재가 대비 15~20% 상승 수준)
-   - 손절가 (현재가 대비 5~10% 하락 수준)
-   - 📌 투자자 시사점 (단기/장기 전략)
-4. 가격은 반드시 달러($)와 함께 표기하세요.
-5. 한국어로 간결하고 명료하게 작성하세요.
+작업:
+1) 각 종목별로 종목명을 굵게 표기한 뒤 bullet point로 다음을 정리하세요:
+   - 기술적 지표(RSI, MACD) 해석
+   - 재무 지표(PER, PBR, ROE, EPS, 부채비율) 해석
+   - 1차 매도 목표가: 현재가 대비 +5~10% 수준 (달러로 제시)
+   - 2차 매도 목표가: 현재가 대비 +15~20% 수준 (달러로 제시)
+   - 손절가(Stop-loss): 현재가 대비 -5~10% 수준 (달러로 제시)
+   - 📌 투자자 시사점 (단기/장기)
+2) 한국어로 간결하게 정리하세요. 가격은 달러 기호($) 포함.
 """
-        gpt_response = openai.ChatCompletion.create(
-            model="gpt-4o-mini",
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.6
-        )
-        comments = gpt_response.choices[0].message.content.strip()
-        if comments.startswith("```"):
-            comments = comments.replace("```html", "").replace("```", "").strip()
-
-        comments = comments.replace("\n", "<br>")  # 줄바꿈 → HTML
-        html += "<h4>🔎 종목별 지표 해석 + 매도/손절 전략</h4>"
-        html += f"<div style='margin-left:20px; color:#333;'>{comments}</div>"
-
-    except Exception as e:
-        html += f"<p style='color:gray;'>지표 해석 생성 실패: {e}</p>"
-
+    comments = gpt_chat(prompt)
+    comments = comments.replace("```", "")
+    comments_html = comments.replace("\n", "<br>")
+    html += "<h4>🔎 종목별 지표 해석 + 매도/손절 전략</h4>"
+    html += f"<div style='margin-left:12px; color:#333;'>{comments_html}</div>"
     return html
 
-# ====== 포트폴리오 전체 정리 (요약) ======
-def get_portfolio_summary_html():
-    usd_to_cad = get_usd_to_cad_rate()
-    total_usd = 0
-    total_cost = 0
-    total_profit = 0
-    total_daily_profit = 0
-
-    html = "<h4>📌 전체 포트폴리오 요약</h4>"
-    html += "<table border='1' cellpadding='5'>"
-    html += (
-        "<tr>"
-        "<th>종목</th><th>보유수량</th>"
-        "<th>현재가 (USD)</th><th>일일 손익 (USD)</th>"
-        "<th>누적 손익 (USD)</th><th>수익률</th>"
-        "</tr>"
-    )
-
-    for ticker, info in portfolio.items():
-        stock = yf.Ticker(ticker)
-        try:
-            hist = stock.history(period="5d")["Close"]
-        except Exception:
-            hist = []
-
-        note = ""
-        if getattr(hist, "empty", True) or len(hist) == 0:
-            price_today = info["avg_price"]
-            price_yesterday = info["avg_price"]
-            note = "※ 시세 데이터 없음, 평단가 기준"
-        elif len(hist) == 1:
-            price_today = float(hist.iloc[-1])
-            price_yesterday = info["avg_price"]
-            note = "※ 어제 데이터 없음, 평단가 기준"
-        else:
-            price_today = float(hist.iloc[-1])
-            price_yesterday = float(hist.iloc[-2])
-
-        daily_profit = (price_today - price_yesterday) * info["shares"]
-        cost = info["avg_price"] * info["shares"]
-        value_usd = price_today * info["shares"]
-        profit = value_usd - cost
-        rate = (profit / cost) * 100 if cost > 0 else 0
-
-        total_usd += value_usd
-        total_cost += cost
-        total_profit += profit
-        total_daily_profit += daily_profit
-
-        daily_color = "green" if daily_profit > 0 else "red"
-        profit_color = "green" if profit > 0 else "red"
-        rate_color = "green" if rate > 0 else "red"
-
-        html += (
-            f"<tr><td>{ticker}</td><td>{info['shares']}</td>"
-            f"<td>{price_today:.2f}$</td>"
-            f"<td><span style='color:{daily_color}'>{daily_profit:+,.2f}$</span> {note}</td>"
-            f"<td><span style='color:{profit_color}'>{profit:+,.2f}$</span></td>"
-            f"<td><span style='color:{rate_color}'>{rate:+.2f}%</span></td></tr>"
-        )
-
-    # 💰 계좌 현금 추가
-    total_with_cash = total_usd + CASH_BALANCE
-    cash_ratio = (CASH_BALANCE / total_with_cash) * 100 if total_with_cash > 0 else 0
-
-    total_rate = (total_profit / total_cost) * 100 if total_cost > 0 else 0
-    total_daily_color = "green" if total_daily_profit > 0 else "red"
-    total_profit_color = "green" if total_profit > 0 else "red"
-    total_rate_color = "green" if total_rate > 0 else "red"
-
-    # 합계 행
-    html += (
-        f"<tr><td><strong>합계</strong></td><td>-</td>"
-        f"<td>-</td>"
-        f"<td><span style='color:{total_daily_color}'><strong>{total_daily_profit:+,.2f}$</strong></td>"
-        f"<td><span style='color:{total_profit_color}'><strong>{total_profit:+,.2f}$</strong></td>"
-        f"<td><span style='color:{total_rate_color}'><strong>{total_rate:+.2f}%</strong></td></tr>"
-    )
-
-    html += "</table>"
-
-    # 💰 현금 정보 추가 출력
-    html += f"<p>💰 계좌 현금 잔고: <strong>{CASH_BALANCE:,.2f}$</strong> (포트폴리오 비중 {cash_ratio:.2f}%)</p>"
-    html += f"<p>총 평가금액 (현금 포함): <strong>{total_with_cash:,.2f}$</strong> / {total_with_cash * usd_to_cad:,.2f} CAD</p>"
-
-    return html
-
-# ====== 수익 추이 그래프 ======
-def generate_profit_chart():
-    tickers = list(portfolio.keys())
-    profits = []
-    for ticker, info in portfolio.items():
-        try:
-            hist = yf.Ticker(ticker).history(period="2d")["Close"]
-            if getattr(hist, "empty", True) or len(hist) == 0:
-                price = info["avg_price"]
-            else:
-                price = float(hist.iloc[-1])
-        except Exception:
-            price = info["avg_price"]
-
-        profit = (price - info["avg_price"]) * info["shares"]
-        profits.append(profit)
-
-    plt.figure(figsize=(8, 4))
-    bars = plt.bar(tickers, profits, color=["green" if p > 0 else "red" for p in profits])
-    plt.title("종목별 손익 추이")
-    plt.ylabel("손익 ($)")
-    plt.axhline(0, color='gray', linestyle='--')
-
-    buf = io.BytesIO()
-    plt.savefig(buf, format='png')
-    buf.seek(0)
-    img_base64 = base64.b64encode(buf.read()).decode("utf-8")
-    plt.close()
-    return f"<img src='data:image/png;base64,{img_base64}'/>"
-
-# ====== 수익률 경고 알림 ======
-def get_alerts_html():
-    html = "<h3>🚨 수익률 경고</h3><ul>"
-    any_item = False
-    for ticker, info in portfolio.items():
-        try:
-            hist = yf.Ticker(ticker).history(period="2d")["Close"]
-            if getattr(hist, "empty", True) or len(hist) == 0:
-                continue
-            price = float(hist.iloc[-1])
-            rate = ((price - info["avg_price"]) / info["avg_price"]) * 100
-            if rate > 20:
-                any_item = True
-                html += f"<li><strong>{ticker}</strong>: 수익률 {rate:.2f}% → 수익 실현 고려!</li>"
-        except Exception:
-            continue
-    if not any_item:
-        html += "</ul><p>⚠️ 현재 수익률 경고 조건에 해당하는 종목 없음</p>"
-    else:
-        html += "</ul>"
-    return html
-
-# ====== 뉴스 요약 및 번역 함수 (최적화 버전) ======
-def get_news_summary_html():
-    html = ""
-
-    for ticker in portfolio.keys():
-        html += f"<div style='border:1px solid #ccc; padding:12px; margin:12px 0; border-radius:10px;'>"
-        html += f"<h4>{ticker} 관련 뉴스</h4>"
-
-        try:
-            url = f"https://newsapi.org/v2/everything?q={ticker}&apiKey={NEWS_API_KEY}&pageSize=3&sortBy=publishedAt&language=en"
-            response = requests.get(url).json()
-            articles = response.get("articles", [])
-            if not articles:
-                html += "<p style='color:gray;'>관련 뉴스 없음</p>"
-                html += "</div>"
-                continue
-
-            # 기사 제목은 링크로만 표시
-            html += "<ul>"
-            articles_text = ""
-            for idx, article in enumerate(articles, 1):
-                title = article.get("title", "제목 없음")
-                description = article.get("description", "설명 없음")
-                link = article.get("url", "#")
-                html += f"<li><a href='{link}' target='_blank'>{title}</a></li>"
-                articles_text += f"\n[{idx}] 제목: {title}\n설명: {description}\n링크: {link}\n"
-            html += "</ul>"
-
-            # GPT 프롬프트
-            prompt = f"""
-아래는 {ticker} 관련 최근 뉴스 3개입니다:
-
-{articles_text}
-
-👉 작업:
-1. 각 기사별 요약은 [1], [2], [3] 번호를 붙여 구분하고, 핵심 내용을 bullet point로 정리하세요.
-2. 마지막에 📌 단기 시사점, 📌 장기 시사점을 줄바꿈해서 제시하세요.
-3. 한국어로 간단히 작성하세요.
-"""
-
-            gpt_response = openai.ChatCompletion.create(
-                model="gpt-4o-mini",
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0.7
-            )
-            summary = gpt_response.choices[0].message.content.strip()
-
-            if summary.startswith("```"):
-                summary = summary.replace("```html", "").replace("```", "").strip()
-
-            # 줄바꿈 처리
-            summary = summary.replace("\n", "<br>")
-
-            html += f"<div style='margin-left:20px; margin-top:8px; color:#444;'>{summary}</div>"
-
-        except Exception as e:
-            html += f"<p style='color:gray;'>요약 실패: {e}</p>"
-
-        html += "</div>"
-    return html
-
-# ====== 투자 전략 평가 ======
-def get_investment_assessment_html():
-    try:
-        # 현재가 가져오기 (목표가 계산에 활용)
-        current_prices = {}
-        for ticker in portfolio.keys():
-            try:
-                hist = yf.Ticker(ticker).history(period="2d")["Close"]
-                if getattr(hist, "empty", True):
-                    current_prices[ticker] = portfolio[ticker]["avg_price"]
-                else:
-                    current_prices[ticker] = float(hist.iloc[-1])
-            except Exception:
-                current_prices[ticker] = portfolio[ticker]["avg_price"]
-
-        # 리포트 시간대에 따른 맥락 설정 (MDT 기준, 서버가 UTC라면 조정 필요)
-        hour = datetime.now().hour
-        if 6 <= hour < 12:  # 오전 리포트
-            context = "지금은 MDT 오전, 시장 개장 전입니다. 오늘 장에서 주목할 포인트와 전략을 제안하세요."
-        else:  # 오후 리포트
-            context = "지금은 MDT 오후, 시장이 마감되었습니다. 오늘 하루 시장 변화를 요약하고, 내일 장에서 주의해야 할 점을 알려주세요."
-
-        prompt = f"""
-{context}
-
-📌 종목별 현재가:
-{current_prices}
-
-👉 작업:
-1. [포트폴리오 전략]을 먼저 bullet point로 정리하세요.
-2. [종목별 전략]을 종목 이름별로 bullet point로 정리하세요.
-3. 각 종목별 전략에 다음을 반드시 포함하세요:
-   - 1차 매도 목표가: 현재가보다 5~10% 높은 수준
-   - 2차 매도 목표가: 현재가보다 15~20% 높은 수준
-   - 손절가: 현재가보다 5~10% 낮은 수준
-   - 이유 (기술적 지표, 수익률, 최근 뉴스 등)
-   - 장기적 보유/매도 판단
-4. 가격은 반드시 달러($)와 함께 표기하세요.
-5. bullet point와 줄바꿈을 활용해 읽기 쉽게 정리하세요.
-6. 한국어로 간결하고 명료하게 작성하세요.
-"""
-
-        gpt_response = openai.ChatCompletion.create(
-            model="gpt-4o-mini",
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.6
-        )
-        assessment = gpt_response.choices[0].message.content.strip()
-
-        if assessment.startswith("```"):
-            assessment = assessment.replace("```html", "").replace("```", "").strip()
-
-        # 줄바꿈 처리 → HTML <br>
-        assessment = assessment.replace("\n", "<br>")
-
-        html = "<h3>🧐 투자 전략 종합 평가</h3>"
-        html += f"<div style='margin-left:20px; color:#333;'>{assessment}</div>"
-        return html
-
-    except Exception as e:
-        return f"<h3>🧐 투자 전략 종합 평가</h3><p style='color:gray;'>평가 생성 실패: {e}</p>"
-
-# ====== 주요 지수 HTML ======
+# ---------------------------
+# Indices & Economic table
+# ---------------------------
 def get_indices_status_html():
-    index_info = {
-        "^GSPC": ("S&P 500", "미국 대형주 500개로 구성된 대표적인 주가지수.", "미국 증시의 전반적인 흐름을 반영합니다."),
-        "^IXIC": ("NASDAQ", "기술주 중심의 지수.", "기술주가 강세일수록 상승 가능성이 높습니다."),
-        "^DJI": ("다우존스", "미국의 대표적인 30개 대기업 지수.", "전통 산업과 대형주의 흐름을 보여줍니다."),
-        "^VIX": ("VIX", "시장의 불안감 또는 공포 수준.", "높을수록 시장 불안, 낮을수록 안정입니다."),
-        "^TNX": ("미국 10년물 국채 수익률", "장기 금리의 기준.", "금리 상승은 부담, 하락은 완화 신호입니다."),
-        "GC=F": ("Gold", "안전자산으로서의 금 가격 지수.", "금값 상승은 시장 불안 또는 인플레이션 우려를 반영합니다.")
+    """Basic major indices snapshot"""
+    index_map = {
+        "^GSPC": "S&P 500",
+        "^IXIC": "NASDAQ",
+        "^DJI": "Dow Jones",
+        "^VIX": "VIX",
+        "^TNX": "US 10Y"
     }
-
-    html = "<h3 style='margin-left:20px;'>📈 주요 지수 및 시장 전망</h3>"
-    html += "<table border='1' cellpadding='5'><tr><th>지수</th><th>현재값</th><th>전일 대비</th><th>시장 전망</th><th>설명</th><th>현재 해석</th></tr>"
-
-    for symbol, (label, desc, insight) in index_info.items():
+    html = "<table border='1' cellpadding='5' style='border-collapse:collapse;'><tr><th>지수</th><th>현재값</th><th>전일대비</th><th>해석</th></tr>"
+    for symbol, name in index_map.items():
         try:
             hist = yf.Ticker(symbol).history(period="2d")["Close"]
-            if len(hist) < 2:
-                raise ValueError("데이터 부족")
-
-            today = hist.iloc[-1]
-            yesterday = hist.iloc[-2]
+            if getattr(hist, "empty", True) or len(hist) < 2:
+                html += f"<tr><td>{name}</td><td colspan='3'>데이터 부족</td></tr>"
+                continue
+            today = float(hist.iloc[-1])
+            yesterday = float(hist.iloc[-2])
             change = today - yesterday
-            change_rate = (change / yesterday) * 100
-            change_color = "green" if change > 0 else "red"
-
-            # 시장 전망 아이콘
-            if abs(change_rate) < 1:
-                outlook_icon = "⚖️"
-            elif change_rate >= 3:
-                outlook_icon = "🚀"
-            elif change_rate > 0:
-                outlook_icon = "📈"
-            elif change_rate <= -3:
-                outlook_icon = "📉"
-            else:
-                outlook_icon = "⚠️"
-
-            if symbol == "^VIX" and change > 0:
-                outlook_icon = "🌪️"
-            elif symbol == "^VIX" and change <= 0:
-                outlook_icon = "🧘"
-            elif symbol == "^TNX" and change > 0:
-                outlook_icon = "⚠️"
-            elif symbol == "^TNX" and change <= 0:
-                outlook_icon = "📈"
-
-            html += f"<tr><td>{label}</td><td>{today:.2f}</td>"
-            html += f"<td><span style='color:{change_color}'>{change:+.2f} ({change_rate:+.2f}%)</span></td>"
-            html += f"<td>{outlook_icon}</td><td>{desc}</td><td>{insight}</td></tr>"
-
+            pct = (change / yesterday) * 100
+            color = "green" if change >= 0 else "red"
+            html += f"<tr><td>{name}</td><td>{today:.2f}</td><td style='color:{color}'>{change:+.2f} ({pct:+.2f}%)</td><td>-</td></tr>"
         except Exception as e:
-            html += f"<tr><td>{label}</td><td colspan='5' style='color:gray;'>데이터 오류: {e}</td></tr>"
-
+            html += f"<tr><td>{name}</td><td colspan='3'>에러: {e}</td></tr>"
     html += "</table>"
     return html
 
-# ====== 경제지표 HTML 생성 ======
 def get_economic_table_html():
-    indicators = {
-        "FEDFUNDS": {
-            "label": "미국 기준금리 (%)",
-            "desc": "대출·소비·투자에 직접적인 영향을 미침.",
-            "direction": "down",
-            "insight": "금리가 낮아지면 주식시장에 긍정적입니다."
-        },
-        "CPIAUCSL": {
-            "label": "소비자물가지수 (CPI)",
-            "desc": "인플레이션 지표.",
-            "direction": "down",
-            "insight": "물가가 안정되면 금리 인상 부담이 줄어들어 주식에 긍정적입니다."
-        },
-        "UNRATE": {
-            "label": "실업률 (%)",
-            "desc": "경기 침체 또는 회복의 신호.",
-            "direction": "down",
-            "insight": "실업률이 낮아지면 경기 회복 신호로 주식시장에 긍정적입니다."
-        }
-    }
-
-    months = [str(m).zfill(2) for m in range(1, 13)]
-    month_labels = [f"{m}월" for m in months]
-    data = {}
-    icon_map = {}
-
-    # 데이터 수집 및 아이콘 판단
-    for series_id in indicators.keys():
-        url = f"https://api.stlouisfed.org/fred/series/observations?series_id={series_id}&api_key={FRED_API_KEY}&file_type=json"
-        res = requests.get(url).json()
-        obs = res.get("observations", [])
-        monthly_values = {o["date"][5:7]: o["value"] for o in obs if o["date"].startswith("2025")}
-        data[series_id] = monthly_values
-
-        recent_months = sorted(monthly_values.keys())[-3:]
-        recent_values = [float(monthly_values[m]) for m in recent_months if monthly_values.get(m, "-") != "-"]
-        icon = "⚖️"
-
-        if len(recent_values) >= 2:
-            delta = recent_values[-1] - recent_values[-2]
-            if indicators[series_id]["direction"] == "down":
-                if delta < -0.2:
-                    icon = "🚀"
-                elif delta < -0.01:
-                    icon = "📈"
-                elif abs(delta) <= 0.01:
-                    icon = "⚖️"
-                elif delta > 0.2:
-                    icon = "📉"
-                elif delta > 0.01:
-                    icon = "⚠️"
-            elif indicators[series_id]["direction"] == "up":
-                if delta > 0.2:
-                    icon = "🚀"
-                elif delta > 0.01:
-                    icon = "📈"
-                elif abs(delta) <= 0.01:
-                    icon = "⚖️"
-                elif delta < -0.2:
-                    icon = "📉"
-                elif delta < -0.01:
-                    icon = "⚠️"
-
-        icon_map[series_id] = icon
-
-    html = "<h3 style='margin-left:20px;'>📌 주요 경제지표 요약</h3>"
-    html += "<table border='1' cellpadding='5'><tr><th>지표</th><th>설명</th><th>현재 해석</th></tr>"
-
-    for series_id, info in indicators.items():
-        html += f"<tr><td>{info['label']}</td><td>{info['desc']}</td><td>{info['insight']}</td></tr>"
-    html += "</table><br>"
-
-    html += "<h3 style='margin-left:20px;'>📊 주요 경제지표 월별 변화 (2025년)</h3>"
-    html += "<table border='1' cellpadding='5'><tr><th>지표</th>"
-    for label in month_labels:
-        html += f"<th>{label}</th>"
-    html += "</tr>"
-
-    for series_id, info in indicators.items():
-        icon = icon_map.get(series_id, "⚖️")
-        html += f"<tr><td>{info['label']} {icon}</td>"
-        for m in months:
-            value = data.get(series_id, {}).get(m, "-")
-            html += f"<td>{value}</td>"
-        html += "</tr>"
-
-    html += "</table>"
+    """Simple placeholder economic indicators using FRED if available"""
+    html = "<h4>📊 주요 경제지표 (요약)</h4>"
+    try:
+        # If FRED key available, attempt a simple fetch for FEDFUNDS (as example)
+        if FRED_API_KEY:
+            url = f"https://api.stlouisfed.org/fred/series/observations?series_id=FEDFUNDS&api_key={FRED_API_KEY}&file_type=json"
+            r = requests.get(url, timeout=10).json()
+            obs = r.get("observations", [])
+            latest = obs[-1]["value"] if obs else "N/A"
+            html += f"<p>미국 기준금리 (FEDFUNDS): {latest}</p>"
+        else:
+            html += "<p>FRED API 키 미설정(또는 비공개) — 간단 요약만 표시합니다.</p>"
+    except Exception as e:
+        html += f"<p>경제지표 로드 실패: {e}</p>"
     return html
 
-# ====== 이메일 발송 함수 ======
-def send_email_html(subject, html_body):
+# ---------------------------
+# US Economic Calendar (TradingEconomics)
+# ---------------------------
+def get_us_economic_calendar_html():
+    try:
+        today = datetime.today()
+        start_date = today.replace(day=1).strftime("%Y-%m-%d")
+        # end of month
+        next_month = (today.replace(day=28) + timedelta(days=4)).replace(day=1)
+        end_date = (next_month - timedelta(days=1)).strftime("%Y-%m-%d")
+        url = f"https://api.tradingeconomics.com/calendar?country=united states&start={start_date}&end={end_date}&c={TRADING_API_KEY}"
+        r = requests.get(url, timeout=10)
+        if r.status_code != 200:
+            return "<p>경제 캘린더 로드 실패(TradingEconomics)</p>"
+        data = r.json()
+        if not data:
+            return "<p>이번 달 주요 경제 이벤트 없음</p>"
+
+        # Filter major events
+        keywords = ["CPI", "PPI", "GDP", "FOMC", "Payroll", "PCE", "Inflation", "Unemployment", "ISM", "Retail"]
+        major = [d for d in data if any(k.lower() in (d.get("Event","") or "").lower() for k in keywords)]
+        if not major:
+            return "<p>이번 달 주요 경제 이벤트 없음</p>"
+
+        prompt = f"""
+이번 달 미국 주요 경제 발표 일정입니다:
+{major}
+
+작업:
+- 각 이벤트에 대해 발표일, 지표명, 가능하면 예상치/이전값을 정리하세요.
+- 투자자 관점에서 어떤 점을 주목해야 하는지 간단히 작성하세요.
+- 출력은 한국어로 줄바꿈과 bullet point를 사용하여 보기 좋게 정리하세요.
+"""
+        gpt_out = gpt_chat(prompt)
+        gpt_out = gpt_out.replace("```", "")
+        html = "<div style='margin-left:12px;'>" + gpt_out.replace("\n", "<br>") + "</div>"
+        return html
+    except Exception as e:
+        return f"<p>경제 캘린더 로드 실패: {e}</p>"
+
+# ---------------------------
+# Email send
+# ---------------------------
+def send_email_html(subject: str, html_body: str):
+    if not EMAIL_SENDER or not EMAIL_PASSWORD or not EMAIL_RECEIVER:
+        print("메일 관련 환경변수(EMAIL_SENDER/EMAIL_PASSWORD/EMAIL_RECEIVER)가 설정되어 있지 않습니다. 메일 전송 생략.")
+        return
+
     msg = MIMEMultipart("alternative")
+    msg["Subject"] = subject
     msg["From"] = EMAIL_SENDER
     msg["To"] = EMAIL_RECEIVER
-    msg["Subject"] = subject
-    msg.attach(MIMEText(html_body, "html"))
-    with smtplib.SMTP("smtp.gmail.com", 587) as server:
-        server.starttls()
-        server.login(EMAIL_SENDER, EMAIL_PASSWORD)
-        server.sendmail(EMAIL_SENDER, EMAIL_RECEIVER, msg.as_string())
+    part = MIMEText(html_body, "html")
+    msg.attach(part)
+    try:
+        with smtplib.SMTP("smtp.gmail.com", 587) as server:
+            server.starttls()
+            server.login(EMAIL_SENDER, EMAIL_PASSWORD)
+            server.sendmail(EMAIL_SENDER, EMAIL_RECEIVER, msg.as_string())
+        print("이메일 발송 완료")
+    except Exception as e:
+        print(f"메일 전송 실패: {e}")
 
-# ====== 메인 리포트 생성 및 실행 ======
-from datetime import datetime
+# ---------------------------
+# Investment assessment (portfolio-level)
+# ---------------------------
+def get_investment_assessment_html():
+    # gather current prices
+    current_prices = {t: (get_stock_prices(t)[0] or portfolio[t]["avg_price"]) for t in portfolio.keys()}
+    cash_ratio = (CASH_BALANCE / (sum((current_prices[t]*portfolio[t]['shares'] for t in portfolio)) + CASH_BALANCE)) * 100
+    context = ("지금은 MDT 오전, 시장 개장 전" if 6 <= datetime.now().hour < 12 else "지금은 MDT 오후, 장 마감 후")
 
+    prompt = f"""
+{context}
+포트폴리오: {portfolio}
+현재가: {current_prices}
+계좌현금: ${CASH_BALANCE:.2f} (현금비중: {cash_ratio:.2f}%)
+
+작업:
+1) 포트폴리오 전체 전략(방어/공격/리밸런싱 권장 등)을 bullet point로 작성하세요.
+2) 각 종목별로 다음을 포함한 전략을 작성하세요:
+   - 간단한 지표 해석 요약
+   - 1차 매도 목표가(현재가 +5~10%), 2차 매도(현재가 +15~20%), 손절가(현재가 -5~10%)를 달러 단위로 제시
+   - 간단한 이유(기술적/재무/뉴스)
+3) 한국어로 간결하게 정리하세요.
+"""
+    out = gpt_chat(prompt)
+    out = out.replace("```", "")
+    return "<div style='margin-left:12px;'>" + out.replace("\n", "<br>") + "</div>"
+
+# ---------------------------
+# Main report assembly
+# ---------------------------
 def daily_report_html():
     today_str = datetime.today().strftime("%Y-%m-%d")
-
-    # ✅ 포트폴리오 / 지표 / 뉴스 / 전략 / 지수 / 경제지표 / 캘린더 불러오기
-    portfolio_summary_html = get_portfolio_summary_html()
-    portfolio_indicators_html = get_portfolio_indicators_html()
-    indices_html = get_indices_status_html()
-    news_summary_html = get_news_summary_html()
-    economic_html = get_economic_table_html()
-    economic_calendar_html = get_us_economic_calendar_html()  # 월간 미국 경제 일정 추가
-    chart_html = generate_profit_chart()
+    # Compose sections
     alerts_html = get_alerts_html()
-    icon_legend_html = get_market_icon_legend_html()
+    chart_html = generate_profit_chart()
+    portfolio_summary = get_portfolio_summary_html()
+    portfolio_status = get_portfolio_status_html()
+    portfolio_indicators = get_portfolio_indicators_html()
+    news_html = get_news_summary_html()
     assessment_html = get_investment_assessment_html()
+    indices_html = get_indices_status_html()
+    economic_html = get_economic_table_html()
+    calendar_html = get_us_economic_calendar_html()
+    icons_html = get_market_icon_legend_html()
 
-    # ✅ HTML 본문 조립
     body = f"""
-    <html>
-    <body style="font-family: Arial, sans-serif; line-height: 1.6;">
+    <html><body style="font-family: Arial, sans-serif; line-height:1.5;">
     <h2>📊 오늘의 투자 리포트 ({today_str})</h2>
-
     {alerts_html}
-
-    <h3>💹 포트폴리오 차트</h3>
+    <h3>💹 포트폴리오 손익 차트</h3>
     {chart_html}
-
-    <h3>💼 포트폴리오 현황</h3>
-    {portfolio_summary_html}
-
+    <h3>💼 포트폴리오 요약</h3>
+    {portfolio_summary}
+    <h3>📌 종목별 상세 현황</h3>
+    {portfolio_status}
     <h3>📊 종목별 판단 지표</h3>
-    {portfolio_indicators_html}
-
+    {portfolio_indicators}
     <h3>📰 종목별 뉴스 요약</h3>
-    {news_summary_html}
-
+    {news_html}
     <h3>🧐 투자 전략 종합 평가</h3>
     {assessment_html}
-
     <h3>📈 주요 지수</h3>
     {indices_html}
-
     <h3>📊 주요 경제지표</h3>
     {economic_html}
-
     <h3>🗓️ 이번 달 미국 경제 발표 일정</h3>
-    {economic_calendar_html}
-
+    {calendar_html}
     <hr>
-    {icon_legend_html}
-    </body>
-    </html>
+    {icons_html}
+    </body></html>
     """
+    send_email_html(f"오늘의 투자 리포트 - {today_str}", body)
+    print("리포트 생성 및 발송 시도 완료.")
 
-    # ✅ 이메일 발송
-    send_email_html("오늘의 투자 리포트", body)
-    print("✅ 이메일 발송 완료")
-
-
-# ====== 실행 트리거 ======
+# ---------------------------
+# Run guard (skip weekends)
+# ---------------------------
 if __name__ == "__main__":
-    today = datetime.now()
-    if today.weekday() >= 5:  # 토요일(5), 일요일(6)
-        print("📌 주말이므로 리포트를 생성하지 않습니다.")
-    else:
-        daily_report_html()
+    now = datetime.now()
+    if now.weekday() >= 5:  # Saturday=5, Sunday=6
+        print("주말이므로 리포트를 실행하지 않습니다.")
+        exit(0)
+    daily_report_html()
