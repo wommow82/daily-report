@@ -137,96 +137,107 @@ def get_rsi_macd_values(ticker: str, period: str = "365d"):
 # ---------------------------
 # Sections (HTML generators)
 # ---------------------------
-def get_portfolio_status_html():
-    """Detailed per-stock table (no totals)"""
-    html = "<h4>📌 종목별 현황 (상세)</h4>"
-    html += "<table border='1' cellpadding='5' style='border-collapse:collapse;'>"
-    html += "<tr><th>종목</th><th>보유수량</th><th>현재가 / 평단가 (USD)</th><th>일일 손익</th><th>누적 손익</th><th>수익률</th></tr>"
-
-    for ticker, info in portfolio.items():
-        price_today, price_yesterday = get_stock_prices(ticker)
-        note = ""
-        if price_today is None:
-            # no data -> use avg price as fallback
-            price_today = info["avg_price"]
-            price_yesterday = info["avg_price"]
-            note = "※ 시세 없음(평단 기준)"
-        elif price_yesterday is None:
-            price_yesterday = info["avg_price"]
-            note = "※ 어제 데이터 없음(평단 기준)"
-
-        daily_profit = (price_today - price_yesterday) * info["shares"]
-        cost = info["avg_price"] * info["shares"]
-        total_value = price_today * info["shares"]
-        profit = total_value - cost
-        rate = (profit / cost) * 100 if cost != 0 else 0
-
-        daily_color = "green" if daily_profit >= 0 else "red"
-        profit_color = "green" if profit >= 0 else "red"
-        rate_color = "green" if rate >= 0 else "red"
-
-        html += (f"<tr><td>{ticker}</td>"
-                 f"<td>{info['shares']}</td>"
-                 f"<td>{price_today:.2f}$ / {info['avg_price']:.2f}$</td>"
-                 f"<td style='color:{daily_color};'>{daily_profit:+.2f}$ {note}</td>"
-                 f"<td style='color:{profit_color};'>{profit:+.2f}$</td>"
-                 f"<td style='color:{rate_color};'>{rate:+.2f}%</td></tr>")
-
-    html += "</table>"
-    return html
-
-def get_portfolio_summary_html():
-    """Summary table + cash info"""
+def get_portfolio_overview_html():
+    """종목별 현황 + 합계 + 현금비중 한 테이블로 표시"""
     usd_to_cad = get_usd_to_cad_rate()
-    total_usd = 0.0
-    total_cost = 0.0
-    total_profit = 0.0
-    total_daily = 0.0
+    total_value = 0
+    total_cost = 0
+    total_profit = 0
+    total_daily = 0
 
-    html = "<h4>📌 전체 포트폴리오 요약</h4>"
+    html = "<h3>💼 전체 포트폴리오 현황</h3>"
     html += "<table border='1' cellpadding='5' style='border-collapse:collapse;'>"
-    html += "<tr><th>종목</th><th>보유수량</th><th>현재가 (USD)</th><th>일일 손익</th><th>누적 손익</th><th>수익률</th></tr>"
+    html += "<tr><th>종목</th><th>보유수량</th><th>현재가(USD)</th><th>평단가</th><th>일일손익</th><th>누적손익</th><th>수익률</th></tr>"
 
     for ticker, info in portfolio.items():
         price_today, price_yesterday = get_stock_prices(ticker)
-        note = ""
         if price_today is None:
             price_today = info["avg_price"]
             price_yesterday = info["avg_price"]
-            note = "※ 시세 없음"
-        elif price_yesterday is None:
-            price_yesterday = info["avg_price"]
-            note = "※ 어제 데이터 없음"
 
         daily_profit = (price_today - price_yesterday) * info["shares"]
         cost = info["avg_price"] * info["shares"]
         value = price_today * info["shares"]
         profit = value - cost
-        rate = (profit / cost) * 100 if cost != 0 else 0
+        rate = (profit / cost) * 100 if cost > 0 else 0
 
-        total_usd += value
+        total_value += value
         total_cost += cost
         total_profit += profit
         total_daily += daily_profit
 
-        html += (f"<tr><td>{ticker}</td><td>{info['shares']}</td><td>{price_today:.2f}$</td>"
-                 f"<td style='color:{'green' if daily_profit>=0 else 'red'}'>{daily_profit:+.2f}$ {note}</td>"
-                 f"<td style='color:{'green' if profit>=0 else 'red'}'>{profit:+.2f}$</td>"
+        html += (f"<tr><td>{ticker}</td><td>{info['shares']}</td>"
+                 f"<td>{price_today:.2f}</td><td>{info['avg_price']:.2f}</td>"
+                 f"<td style='color:{'green' if daily_profit>=0 else 'red'}'>{daily_profit:+.2f}</td>"
+                 f"<td style='color:{'green' if profit>=0 else 'red'}'>{profit:+.2f}</td>"
                  f"<td style='color:{'green' if rate>=0 else 'red'}'>{rate:+.2f}%</td></tr>")
 
-    total_with_cash = total_usd + CASH_BALANCE
+    total_with_cash = total_value + CASH_BALANCE
     cash_ratio = (CASH_BALANCE / total_with_cash) * 100 if total_with_cash > 0 else 0
-    total_rate = (total_profit / total_cost) * 100 if total_cost != 0 else 0
+    total_rate = (total_profit / total_cost) * 100 if total_cost > 0 else 0
 
-    html += (f"<tr><td><strong>합계</strong></td><td>-</td><td>-</td>"
-             f"<td><strong>{total_daily:+.2f}$</strong></td>"
-             f"<td><strong>{total_profit:+.2f}$</strong></td>"
+    html += (f"<tr><td><strong>합계</strong></td><td>-</td><td>-</td><td>-</td>"
+             f"<td><strong>{total_daily:+.2f}</strong></td>"
+             f"<td><strong>{total_profit:+.2f}</strong></td>"
              f"<td><strong>{total_rate:+.2f}%</strong></td></tr>")
     html += "</table>"
-
-    html += f"<p>💰 계좌 현금: <strong>{CASH_BALANCE:,.2f}$</strong> (비중 {cash_ratio:.2f}%)</p>"
-    html += f"<p>총 평가금액 (현금 포함): <strong>{total_with_cash:,.2f}$</strong> / {total_with_cash * usd_to_cad:,.2f} CAD</p>"
+    html += f"<p>💰 현금 보유액: <strong>{CASH_BALANCE:,.2f}$</strong> (비중 {cash_ratio:.2f}%)</p>"
+    html += f"<p>총 평가금액: <strong>{total_with_cash:,.2f}$</strong> ({total_with_cash * usd_to_cad:,.2f} CAD)</p>"
     return html
+
+def get_monthly_economic_indicators_html():
+    """FRED에서 CPI, UNRATE 등 주요 지표 월별 데이터 가져와 차트 + GPT 해석"""
+    indicators = {
+        "CPIAUCSL": "미국 소비자물가(CPI)",
+        "UNRATE": "실업률",
+        "FEDFUNDS": "연준 기준금리"
+    }
+    data_frames = []
+    for series_id, name in indicators.items():
+        try:
+            if not FRED_API_KEY:
+                continue
+            url = f"https://api.stlouisfed.org/fred/series/observations?series_id={series_id}&api_key={FRED_API_KEY}&file_type=json"
+            r = requests.get(url, timeout=10)
+            obs = pd.DataFrame(r.json().get("observations", []))
+            obs["value"] = pd.to_numeric(obs["value"], errors="coerce")
+            obs["date"] = pd.to_datetime(obs["date"])
+            obs = obs.dropna().tail(12)
+            data_frames.append((name, obs))
+        except Exception as e:
+            print(f"[FRED] {name} 로드 실패: {e}")
+
+    if not data_frames:
+        return "<p>FRED API 키 없음 또는 지표 로드 실패</p>"
+
+    # GPT 해석
+    gpt_input = {name: df[["date", "value"]].to_dict(orient="records") for name, df in data_frames}
+    prompt = f"""
+다음은 최근 12개월 미국 경제지표 데이터입니다:
+{gpt_input}
+
+작업:
+- 각 지표별 월별 변화 방향을 bullet point로 설명
+- 인플레이션 압력, 경기 둔화/회복, 금리 전망 등 투자 관점 코멘트 추가
+- 한국어로 정리
+"""
+    gpt_out = gpt_chat(prompt)
+    return "<h4>📊 주요 경제지표 월별 변화</h4><div>" + gpt_out.replace("\n", "<br>") + "</div>"
+
+def get_market_outlook_html():
+    indices_html = get_indices_status_html()
+    # GPT 해석
+    prompt = f"""
+오늘 주요 지수 현황:
+{indices_html}
+
+작업:
+- 전일 대비 상승/하락을 간단히 분석
+- 단기 시장 심리 (위험선호 / 위험회피) 평가
+- 기술주/배당주/채권시장 투자 전략 제안
+"""
+    gpt_out = gpt_chat(prompt)
+    return "<h4>📈 주요 지수 및 시장 전망</h4><div>" + gpt_out.replace("\n", "<br>") + "</div>"
 
 def generate_profit_chart():
     """Bar chart of per-stock profit -> returns base64 img tag"""
