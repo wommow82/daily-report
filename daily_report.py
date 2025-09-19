@@ -8,6 +8,7 @@ import yfinance as yf
 import openai
 import pandas as pd
 import matplotlib.pyplot as plt
+import matplotlib
 import io
 import base64
 from datetime import datetime, timedelta
