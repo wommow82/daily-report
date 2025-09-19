@@ -68,6 +68,71 @@ def get_usd_to_cad_rate():
         print(f"환율 가져오기 실패: {e}")
         return 1.3829  # 실패 시 기본값
 
+
+
+# ====== 경제 달력 가져오기 ======
+def get_us_economic_calendar_html():
+    try:
+        # 📅 이번 달 시작~끝 날짜 계산
+        today = datetime.today()
+        start_date = today.replace(day=1).strftime("%Y-%m-%d")
+        next_month = today.replace(day=28) + timedelta(days=4)  # 다음 달로 넘어감
+        end_date = next_month.replace(day=1) - timedelta(days=1)
+        end_date = end_date.strftime("%Y-%m-%d")
+
+        # 📊 TradingEconomics API 호출 (공개 guest key 사용)
+        url = f"https://api.tradingeconomics.com/calendar?country=united states&start={start_date}&end={end_date}&c=guest:guest"
+        response = requests.get(url)
+        if response.status_code != 200:
+            return "<p>경제 일정 데이터를 가져올 수 없습니다.</p>"
+
+        data = response.json()
+        if not data:
+            return "<p>이번 달 미국 경제 발표 일정이 없습니다.</p>"
+
+        # 주요 이벤트만 필터 (CPI, PPI, GDP, FOMC, Payroll, PCE 등)
+        keywords = ["CPI", "PPI", "GDP", "FOMC", "Payroll", "PCE", "Inflation", "Unemployment", "ISM", "Retail"]
+        major_events = [item for item in data if any(k.lower() in item.get("Event", "").lower() for k in keywords)]
+
+        if not major_events:
+            return "<p>이번 달 주요 경제 이벤트가 없습니다.</p>"
+
+        # GPT에게 요약 + 투자 관점 요청
+        prompt = f"""
+아래는 이번 달 미국 주요 경제 발표 일정입니다:
+
+{major_events}
+
+👉 작업:
+1. 각 이벤트를 날짜순으로 정리하세요.
+2. 각 이벤트별로 아래 항목을 bullet point로 작성하세요:
+   - 발표일
+   - 지표 이름
+   - 예상치 / 이전 값 (있으면)
+   - 투자자 관점에서 주목할 포인트
+   - 예상되는 시장 반응 (긍정적/부정적)
+3. 한국어로 간결하고 읽기 좋게 정리하세요.
+4. 한눈에 보기 좋도록 줄바꿈과 bullet point를 적절히 활용하세요.
+"""
+
+        gpt_response = openai.ChatCompletion.create(
+            model="gpt-4o-mini",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.5
+        )
+
+        summary = gpt_response.choices[0].message.content.strip()
+        summary = summary.replace("```", "").replace("html", "")
+        summary = summary.replace("\n", "<br>")
+
+        html = "<h3>🗓️ 이번 달 미국 경제 발표 일정</h3>"
+        html += f"<div style='margin-left:20px;'>{summary}</div>"
+        return html
+
+    except Exception as e:
+        return f"<h3>🗓️ 이번 달 미국 경제 발표 일정</h3><p>데이터 불러오기 실패: {e}</p>"
+
+
 # ====== 아이콘 설명 ======
 def get_market_icon_legend_html():
     html = "<h3 style='margin-left:20px;'>📊 시장 전망 아이콘 설명</h3>"
@@ -761,45 +826,70 @@ def send_email_html(subject, html_body):
         server.sendmail(EMAIL_SENDER, EMAIL_RECEIVER, msg.as_string())
 
 # ====== 메인 리포트 생성 및 실행 ======
+from datetime import datetime
+
 def daily_report_html():
     today_str = datetime.today().strftime("%Y-%m-%d")
+
+    # ✅ 포트폴리오 / 지표 / 뉴스 / 전략 / 지수 / 경제지표 / 캘린더 불러오기
     portfolio_summary_html = get_portfolio_summary_html()
     portfolio_indicators_html = get_portfolio_indicators_html()
     indices_html = get_indices_status_html()
     news_summary_html = get_news_summary_html()
     economic_html = get_economic_table_html()
+    economic_calendar_html = get_us_economic_calendar_html()  # 월간 미국 경제 일정 추가
     chart_html = generate_profit_chart()
     alerts_html = get_alerts_html()
     icon_legend_html = get_market_icon_legend_html()
     assessment_html = get_investment_assessment_html()
 
+    # ✅ HTML 본문 조립
     body = f"""
-    <html><body>
+    <html>
+    <body style="font-family: Arial, sans-serif; line-height: 1.6;">
     <h2>📊 오늘의 투자 리포트 ({today_str})</h2>
+
     {alerts_html}
+
+    <h3>💹 포트폴리오 차트</h3>
     {chart_html}
+
     <h3>💼 포트폴리오 현황</h3>
     {portfolio_summary_html}
+
+    <h3>📊 종목별 판단 지표</h3>
     {portfolio_indicators_html}
+
     <h3>📰 종목별 뉴스 요약</h3>
     {news_summary_html}
+
+    <h3>🧐 투자 전략 종합 평가</h3>
     {assessment_html}
-    {icon_legend_html}
+
     <h3>📈 주요 지수</h3>
     {indices_html}
+
     <h3>📊 주요 경제지표</h3>
     {economic_html}
-    </body></html>
+
+    <h3>🗓️ 이번 달 미국 경제 발표 일정</h3>
+    {economic_calendar_html}
+
+    <hr>
+    {icon_legend_html}
+    </body>
+    </html>
     """
+
+    # ✅ 이메일 발송
     send_email_html("오늘의 투자 리포트", body)
     print("✅ 이메일 발송 완료")
 
+
 # ====== 실행 트리거 ======
 if __name__ == "__main__":
-    from datetime import datetime
     today = datetime.now()
-    if today.weekday() >= 5:  # 토(5), 일(6)
-        print("📌 주말이므로 리포트를 실행하지 않습니다.")
-        exit(0)  # ✅ 여기서 스크립트 자체 종료
-
-    daily_report_html()  # 평일에만 실행
+    if today.weekday() >= 5:  # 토요일(5), 일요일(6)
+        print("📌 주말이므로 리포트를 생성하지 않습니다.")
+    else:
+        daily_report_html()
