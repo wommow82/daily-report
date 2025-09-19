@@ -45,7 +45,7 @@ if not OPENAI_API_KEY:
     raise RuntimeError("OPENAI_API_KEY 환경변수가 필요합니다.")
 openai.api_key = OPENAI_API_KEY
 OPENAI_MODEL = "gpt-4o-mini"
-
+matplotlib.rc('font', family='NanumGothic')  # 또는 AppleGothic, Malgun Gothic
 # ---------------------------
 # Helpers
 # ---------------------------
@@ -575,16 +575,16 @@ def get_investment_assessment_html():
 # ---------------------------
 def daily_report_html():
     today_str = datetime.today().strftime("%Y-%m-%d")
-    # Compose sections
     alerts_html = get_alerts_html()
     chart_html = generate_profit_chart()
-    portfolio_summary = get_portfolio_summary_html()
-    portfolio_status = get_portfolio_status_html()
+    portfolio_overview = get_portfolio_overview_html()  # ✅ 통합 버전
     portfolio_indicators = get_portfolio_indicators_html()
     news_html = get_news_summary_html()
     assessment_html = get_investment_assessment_html()
     indices_html = get_indices_status_html()
     economic_html = get_economic_table_html()
+    monthly_economic_html = get_monthly_economic_indicators_html()
+    market_outlook_html = get_market_outlook_html()
     calendar_html = get_us_economic_calendar_html()
     icons_html = get_market_icon_legend_html()
 
@@ -594,10 +594,8 @@ def daily_report_html():
     {alerts_html}
     <h3>💹 포트폴리오 손익 차트</h3>
     {chart_html}
-    <h3>💼 포트폴리오 요약</h3>
-    {portfolio_summary}
-    <h3>📌 종목별 상세 현황</h3>
-    {portfolio_status}
+    <h3>💼 전체 포트폴리오 현황</h3>
+    {portfolio_overview}
     <h3>📊 종목별 판단 지표</h3>
     {portfolio_indicators}
     <h3>📰 종목별 뉴스 요약</h3>
@@ -608,6 +606,10 @@ def daily_report_html():
     {indices_html}
     <h3>📊 주요 경제지표</h3>
     {economic_html}
+    <h3>📊 주요 경제지표 월별 변화 (2025년)</h3>
+    {monthly_economic_html}
+    <h3>📈 주요 지수 및 시장 전망</h3>
+    {market_outlook_html}
     <h3>🗓️ 이번 달 미국 경제 발표 일정</h3>
     {calendar_html}
     <hr>
