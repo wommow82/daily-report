@@ -33,13 +33,12 @@ setup_matplotlib_korean_font()
 # 환경 변수 & 포트폴리오 설정
 # ============================
 portfolio = {
-    "NVDA": {"shares": 50, "avg_price": 820.35},
-    "PLTR": {"shares": 300, "avg_price": 22.15},
-    "RGTI": {"shares": 500, "avg_price": 1.85},
-    "SCHD": {"shares": 214, "avg_price": 74.30},
-    "TSLA": {"shares": 10, "avg_price": 255.70},
+    "NVDA": {"shares": 50, "avg_price": 123.971},
+    "PLTR": {"shares": 10, "avg_price": 151.60},
+    "SCHD": {"shares": 2140, "avg_price": 24.3777},
+    "TSLA": {"shares": 10, "avg_price": 320.745},
 }
-CASH_BALANCE = 3854.54
+CASH_BALANCE = 16684.93
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 NEWS_API_KEY = os.getenv("NEWS_API_KEY")
