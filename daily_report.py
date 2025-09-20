@@ -179,19 +179,29 @@ def get_news_summary_html():
             html += "<p>NEWS_API_KEY 없음 → 뉴스 생략</p>"
             continue
         try:
-            r = requests.get("https://newsapi.org/v2/everything", params={"q": t,"apiKey":NEWS_API_KEY,"pageSize":3,"sortBy":"publishedAt"}, timeout=10)
+            r = requests.get(
+                "https://newsapi.org/v2/everything",
+                params={"q": t, "apiKey": NEWS_API_KEY, "pageSize": 3, "sortBy": "publishedAt"},
+                timeout=10,
+            )
             articles = r.json().get("articles", [])[:3]
             if not articles:
                 html += "<p>뉴스 없음</p>"
                 continue
+
             text = ""
             html += "<ul>"
             for i, a in enumerate(articles, 1):
-                html += f"<li><a href='{a.get('url','#')}'>{i}. {a.get('title')}</a></li>"
-                text += f"[{i}] {a.get('title']} - {a.get('description')}\n"
+                # 🔧 괄호 버그 수정됨
+                html += f"<li><a href='{a.get('url', '#')}'>{i}. {a.get('title')}</a></li>"
+                text += f"[{i}] {a.get('title')} - {a.get('description')}\n"
             html += "</ul>"
+
+            # GPT 요약 + 시사점
             summary = gpt_chat(f"{t} 관련 뉴스:\n{text}\n각 기사 bullet + 단기/장기 시사점 작성 (• 아이콘 사용)")
-            gpt_html = "<ul>" + "".join([f"<li>{line.strip('• ')}</li>" for line in summary.splitlines() if line.strip()]) + "</ul>"
+            gpt_html = "<ul>" + "".join(
+                [f"<li>{line.strip('• ')}</li>" for line in summary.splitlines() if line.strip()]
+            ) + "</ul>"
             html += f"<div style='background:#eef;padding:6px;'>{gpt_html}</div>"
         except Exception as e:
             html += f"<p>뉴스 로드 실패: {e}</p>"
