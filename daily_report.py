@@ -130,7 +130,12 @@ def get_portfolio_overview_html():
         rate = (profit / cost) * 100
         total_value += value; total_cost += cost
         total_profit += profit; total_daily += daily_profit
-        html += f"<tr><td>{t}</td><td>{info['shares']}</td><td>{price_today:.2f}</td><td>{info['avg_price']:.2f}</td><td style='color:{'green' if daily_profit>=0 else 'red'}'>{daily_profit:+.2f}</td><td style='color:{'green' if profit>=0 else 'red'}'>{profit:+.2f}</td><td style='color:{'green' if rate>=0 else 'red'}'>{rate:+.2f}%</td></tr>"
+
+        # 수익률 강조 색상
+        rate_color = "green" if rate >= 0 else "red"
+        rate_icon = "🟢" if rate >= 10 else ("🟠" if abs(rate) >= 5 else "")
+        html += f"<tr><td>{t}</td><td>{info['shares']}</td><td>{price_today:.2f}</td><td>{info['avg_price']:.2f}</td><td style='color:{'green' if daily_profit>=0 else 'red'}'>{daily_profit:+.2f}</td><td style='color:{'green' if profit>=0 else 'red'}'>{profit:+.2f}</td><td style='color:{rate_color}'>{rate_icon} {rate:+.2f}%</td></tr>"
+
     html += f"<tr><td><b>합계</b></td><td>-</td><td>-</td><td>-</td><td>{total_daily:+.2f}</td><td>{total_profit:+.2f}</td><td>{(total_profit/total_cost)*100:.2f}%</td></tr></table>"
     html += f"<p>💰 현금 보유액: {CASH_BALANCE:.2f}$ (비중 {(CASH_BALANCE/(total_value+CASH_BALANCE))*100:.2f}%)</p>"
     html += f"<p>총 평가금액: {total_value + CASH_BALANCE:.2f}$ / {(total_value + CASH_BALANCE)*usd_to_cad:.2f} CAD</p>"
@@ -181,56 +186,76 @@ def get_news_summary_html():
                 continue
             text = ""
             html += "<ul>"
-            for i,a in enumerate(articles,1):
-                html += f"<li><a href='{a.get('url','#')}'>{a.get('title')}</a></li>"
-                text += f"[{i}] {a.get('title')} - {a.get('description')}\n"
+            for i, a in enumerate(articles, 1):
+                html += f"<li><a href='{a.get('url','#')}'>{i}. {a.get('title')}</a></li>"
+                text += f"[{i}] {a.get('title']} - {a.get('description')}\n"
             html += "</ul>"
-            summary = gpt_chat(f"{t} 관련 뉴스:\n{text}\n각 기사 핵심 bullet + 단기/장기 시사점 작성")
-            html += f"<div style='background:#eef;padding:6px;'>{summary.replace(chr(10),'<br>')}</div>"
+            summary = gpt_chat(f"{t} 관련 뉴스:\n{text}\n각 기사 bullet + 단기/장기 시사점 작성 (• 아이콘 사용)")
+            gpt_html = "<ul>" + "".join([f"<li>{line.strip('• ')}</li>" for line in summary.splitlines() if line.strip()]) + "</ul>"
+            html += f"<div style='background:#eef;padding:6px;'>{gpt_html}</div>"
         except Exception as e:
             html += f"<p>뉴스 로드 실패: {e}</p>"
     return html
 
 def get_market_outlook_html():
-    indices = {"^GSPC":"S&P500","^IXIC":"NASDAQ","^DJI":"DowJones"}
-    html = "<h4>📈 주요 지수</h4><table border='1'><tr><th>지수</th><th>현재</th><th>전일대비</th></tr>"
+    indices = {
+        "^GSPC": "S&P500",
+        "^IXIC": "NASDAQ",
+        "^DJI": "DowJones",
+        "^VIX": "VIX (공포지수)",
+        "^TNX": "미국 10년물 국채",
+        "GC=F": "Gold"
+    }
+    html = "<h4>📈 주요 지수 및 시장 전망</h4><table border='1'><tr><th>지수</th><th>현재</th><th>전일대비</th></tr>"
+    idx_data = {}
     for sym, name in indices.items():
         try:
             hist = yf.Ticker(sym).history(period="2d")["Close"]
             today, yesterday = hist.iloc[-1], hist.iloc[-2]
             change = today - yesterday
+            idx_data[name] = {"today": float(today), "change": float(change)}
             html += f"<tr><td>{name}</td><td>{today:.2f}</td><td style='color:{'green' if change>=0 else 'red'}'>{change:+.2f}</td></tr>"
         except:
             html += f"<tr><td>{name}</td><td colspan='2'>데이터 없음</td></tr>"
     html += "</table>"
-    outlook = gpt_chat("위 지수 변화를 보고 오늘 시장 심리와 투자 전략 bullet point로 제시")
-    return html + f"<div style='background:#f0f0f0;padding:6px;'>{outlook.replace(chr(10),'<br>')}</div>"
+
+    # GPT 해석
+    gpt_out = gpt_chat(f"오늘 주요 지수: {idx_data} 투자 전략 bullet point 작성 (• 아이콘 사용)")
+    gpt_html = "<ul>" + "".join([f"<li>{line.strip('• ')}</li>" for line in gpt_out.splitlines() if line.strip()]) + "</ul>"
+    return html + f"<div style='background:#f0f0f0;padding:6px;'>{gpt_html}</div>"
 
 def get_monthly_economic_indicators_html():
-    indicators = {"CPIAUCSL":"CPI","UNRATE":"실업률"}
+    indicators = {"CPIAUCSL": "CPI", "UNRATE": "실업률"}
     frames = {}
-    for s,n in indicators.items():
+    for s, n in indicators.items():
         try:
             if not FRED_API_KEY: continue
             url = f"https://api.stlouisfed.org/fred/series/observations?series_id={s}&api_key={FRED_API_KEY}&file_type=json"
-            obs = pd.DataFrame(requests.get(url,timeout=10).json().get("observations",[]))
+            obs = pd.DataFrame(requests.get(url, timeout=10).json().get("observations", []))
             obs["value"] = pd.to_numeric(obs["value"], errors="coerce")
             obs["date"] = pd.to_datetime(obs["date"])
-            frames[n] = obs.dropna().tail(12)
+            frames[n] = obs.dropna().tail(6)
         except: pass
-    if not frames: return "<p>경제지표 로드 실패</p>"
-    html = "<h4>📊 경제지표 월별 변화</h4>"
-    for n,df in frames.items():
-        html += f"<h5>{n}</h5><table border='1'><tr><th>월</th><th>값</th><th>전월</th></tr>"
-        prev=None
-        for _,r in df.iterrows():
-            diff=""; color="black"
-            if prev: diff=f"{r['value']-prev:+.2f}"; color="red" if r['value']>prev else "blue"
-            html += f"<tr><td>{r['date'].strftime('%Y-%m')}</td><td>{r['value']:.2f}</td><td style='color:{color}'>{diff}</td></tr>"
-            prev=r['value']
-        html+="</table>"
-    gpt_out=gpt_chat(f"최근 경제지표 변화: {frames} 해석 bullet point")
-    html+=f"<div style='background:#f6f6f6;padding:6px;'>{gpt_out.replace(chr(10),'<br>')}</div>"
+    if not frames:
+        return "<p>경제지표 로드 실패</p>"
+
+    html = "<h4>📊 경제지표 월별 변화</h4><table border='1'><tr><th>지표</th>"
+    # 가로 테이블 헤더
+    months = frames[list(frames.keys())[0]]["date"].dt.strftime("%Y-%m").tolist()
+    for m in months:
+        html += f"<th>{m}</th>"
+    html += "</tr>"
+
+    for name, df in frames.items():
+        html += f"<tr><td>{name}</td>"
+        for val in df["value"]:
+            html += f"<td>{val:.2f}</td>"
+        html += "</tr>"
+    html += "</table>"
+
+    gpt_out = gpt_chat(f"최근 경제지표: {frames} 투자자 해석 bullet point 작성 (• 아이콘 사용)")
+    gpt_html = "<ul>" + "".join([f"<li>{line.strip('• ')}</li>" for line in gpt_out.splitlines() if line.strip()]) + "</ul>"
+    html += f"<div style='background:#f6f6f6;padding:6px;'>{gpt_html}</div>"
     return html
 
 def get_us_economic_calendar_html():
