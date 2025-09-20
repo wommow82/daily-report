@@ -15,6 +15,27 @@ from datetime import datetime, timedelta
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 import smtplib
+import matplotlib.font_manager as fm
+import os, subprocess
+
+# ----- matplotlib 한글 폰트 설정 -----
+
+def setup_matplotlib_korean_font():
+    try:
+        # check if NanumGothic exists
+        fonts = [f.name for f in fm.fontManager.ttflist]
+        if not any("NanumGothic" in f for f in fonts):
+            print("한글 폰트(NanumGothic) 설치 중...")
+            subprocess.run(["sudo", "apt-get", "install", "-y", "fonts-nanum"], check=False)
+            matplotlib.font_manager._rebuild()
+        matplotlib.rc('font', family='NanumGothic')
+        matplotlib.rcParams['axes.unicode_minus'] = False
+        print("한글 폰트 설정 완료")
+    except Exception as e:
+        print(f"폰트 설정 실패: {e} (영문 폰트 사용)")
+        matplotlib.rc('font', family='DejaVu Sans')
+
+setup_matplotlib_korean_font()
 
 # ---------------------------
 # Configuration / Globals
@@ -187,59 +208,73 @@ def get_portfolio_overview_html():
     return html
 
 def get_monthly_economic_indicators_html():
-    """FRED에서 CPI, UNRATE 등 주요 지표 월별 데이터 가져와 차트 + GPT 해석"""
+    """최근 12개월 주요 경제지표 표 + GPT 해석"""
     indicators = {
-        "CPIAUCSL": "미국 소비자물가(CPI)",
+        "CPIAUCSL": "소비자물가(CPI)",
         "UNRATE": "실업률",
-        "FEDFUNDS": "연준 기준금리"
+        "FEDFUNDS": "기준금리"
     }
-    data_frames = []
-    for series_id, name in indicators.items():
+    frames = {}
+    for series, name in indicators.items():
         try:
             if not FRED_API_KEY:
                 continue
-            url = f"https://api.stlouisfed.org/fred/series/observations?series_id={series_id}&api_key={FRED_API_KEY}&file_type=json"
+            url = f"https://api.stlouisfed.org/fred/series/observations?series_id={series}&api_key={FRED_API_KEY}&file_type=json"
             r = requests.get(url, timeout=10)
             obs = pd.DataFrame(r.json().get("observations", []))
             obs["value"] = pd.to_numeric(obs["value"], errors="coerce")
             obs["date"] = pd.to_datetime(obs["date"])
             obs = obs.dropna().tail(12)
-            data_frames.append((name, obs))
+            frames[name] = obs
         except Exception as e:
             print(f"[FRED] {name} 로드 실패: {e}")
 
-    if not data_frames:
-        return "<p>FRED API 키 없음 또는 지표 로드 실패</p>"
+    if not frames:
+        return "<p>📊 주요 경제지표 데이터를 불러올 수 없습니다 (FRED 키 필요)</p>"
+
+    html = "<h4>📊 주요 경제지표 월별 변화</h4>"
+    for name, df in frames.items():
+        html += f"<h5>{name}</h5><table border='1' cellpadding='5' style='border-collapse:collapse;'><tr><th>월</th><th>값</th><th>전월 대비</th></tr>"
+        prev_val = None
+        for _, row in df.iterrows():
+            val = row["value"]
+            diff = ""
+            color = "black"
+            if prev_val is not None:
+                delta = val - prev_val
+                diff = f"{delta:+.2f}"
+                color = "red" if delta > 0 else "blue"
+            html += f"<tr><td>{row['date'].strftime('%Y-%m')}</td><td>{val:.2f}</td><td style='color:{color}'>{diff}</td></tr>"
+            prev_val = val
+        html += "</table>"
 
     # GPT 해석
-    gpt_input = {name: df[["date", "value"]].to_dict(orient="records") for name, df in data_frames}
-    prompt = f"""
-다음은 최근 12개월 미국 경제지표 데이터입니다:
-{gpt_input}
+    gpt_prompt = f"""
+최근 12개월 미국 경제지표입니다:
+{ {name: df[['date','value']].to_dict(orient='records') for name, df in frames.items()} }
 
-작업:
-- 각 지표별 월별 변화 방향을 bullet point로 설명
-- 인플레이션 압력, 경기 둔화/회복, 금리 전망 등 투자 관점 코멘트 추가
-- 한국어로 정리
+각 지표별로 변화 추세를 분석하고, 투자자 입장에서 인플레이션 압력, 경기 둔화/회복, 금리 전망을 bullet point로 제시하세요.
 """
-    gpt_out = gpt_chat(prompt)
-    return "<h4>📊 주요 경제지표 월별 변화</h4><div>" + gpt_out.replace("\n", "<br>") + "</div>"
+    gpt_out = gpt_chat(gpt_prompt)
+    html += "<div style='margin-top:10px; padding:8px; background:#f6f6f6; border-radius:8px;'>"
+    html += gpt_out.replace("\n", "<br>")
+    html += "</div>"
+    return html
 
 def get_market_outlook_html():
     indices_html = get_indices_status_html()
-    # GPT 해석
-    prompt = f"""
+    gpt_prompt = f"""
 오늘 주요 지수 현황:
 {indices_html}
 
 작업:
 - 전일 대비 상승/하락을 간단히 분석
 - 단기 시장 심리 (위험선호 / 위험회피) 평가
-- 기술주/배당주/채권시장 투자 전략 제안
+- 기술주, 배당주, 채권시장 투자 전략 bullet point 제안
 """
-    gpt_out = gpt_chat(prompt)
-    return "<h4>📈 주요 지수 및 시장 전망</h4><div>" + gpt_out.replace("\n", "<br>") + "</div>"
-
+    gpt_out = gpt_chat(gpt_prompt)
+    return f"<h4>📈 주요 지수 및 시장 전망</h4>{indices_html}<div style='margin-top:8px; background:#f0f0f0; padding:6px; border-radius:8px;'>{gpt_out.replace('\n','<br>')}</div>"
+    
 def generate_profit_chart():
     """Bar chart of per-stock profit -> returns base64 img tag"""
     tickers = list(portfolio.keys())
@@ -488,35 +523,23 @@ def get_us_economic_calendar_html():
     try:
         today = datetime.today()
         start_date = today.replace(day=1).strftime("%Y-%m-%d")
-        # end of month
         next_month = (today.replace(day=28) + timedelta(days=4)).replace(day=1)
         end_date = (next_month - timedelta(days=1)).strftime("%Y-%m-%d")
         url = f"https://api.tradingeconomics.com/calendar?country=united states&start={start_date}&end={end_date}&c={TRADING_API_KEY}"
         r = requests.get(url, timeout=10)
-        if r.status_code != 200:
-            return "<p>경제 캘린더 로드 실패(TradingEconomics)</p>"
-        data = r.json()
+        data = r.json() if r.status_code == 200 else []
+
         if not data:
-            return "<p>이번 달 주요 경제 이벤트 없음</p>"
+            gpt_fallback = gpt_chat("""
+이번 달 미국 주요 경제 이벤트 예상 (CPI, PPI, FOMC, 실업률 발표 등)에 대해
+투자자가 주의할 포인트를 bullet point로 작성해 주세요.
+""")
+            return f"<p>TradingEconomics 데이터 없음</p><div style='background:#f6f6f6;padding:8px;border-radius:8px;'>{gpt_fallback.replace('\n','<br>')}</div>"
 
-        # Filter major events
-        keywords = ["CPI", "PPI", "GDP", "FOMC", "Payroll", "PCE", "Inflation", "Unemployment", "ISM", "Retail"]
-        major = [d for d in data if any(k.lower() in (d.get("Event","") or "").lower() for k in keywords)]
-        if not major:
-            return "<p>이번 달 주요 경제 이벤트 없음</p>"
-
-        prompt = f"""
-이번 달 미국 주요 경제 발표 일정입니다:
-{major}
-
-작업:
-- 각 이벤트에 대해 발표일, 지표명, 가능하면 예상치/이전값을 정리하세요.
-- 투자자 관점에서 어떤 점을 주목해야 하는지 간단히 작성하세요.
-- 출력은 한국어로 줄바꿈과 bullet point를 사용하여 보기 좋게 정리하세요.
-"""
-        gpt_out = gpt_chat(prompt)
-        gpt_out = gpt_out.replace("```", "")
-        html = "<div style='margin-left:12px;'>" + gpt_out.replace("\n", "<br>") + "</div>"
+        html = "<h4>🗓️ 이번 달 미국 경제 발표 일정</h4><table border='1' cellpadding='5' style='border-collapse:collapse;'><tr><th>날짜</th><th>이벤트</th><th>실제/예상</th></tr>"
+        for ev in data:
+            html += f"<tr><td>{ev.get('Date','')}</td><td>{ev.get('Event','')}</td><td>{ev.get('Actual','')} / {ev.get('Forecast','')}</td></tr>"
+        html += "</table>"
         return html
     except Exception as e:
         return f"<p>경제 캘린더 로드 실패: {e}</p>"
@@ -578,12 +601,10 @@ def daily_report_html():
     today_str = datetime.today().strftime("%Y-%m-%d")
     alerts_html = get_alerts_html()
     chart_html = generate_profit_chart()
-    portfolio_overview = get_portfolio_overview_html()  # ✅ 통합 버전
+    portfolio_overview = get_portfolio_overview_html()
     portfolio_indicators = get_portfolio_indicators_html()
     news_html = get_news_summary_html()
     assessment_html = get_investment_assessment_html()
-    indices_html = get_indices_status_html()
-    economic_html = get_economic_table_html()
     monthly_economic_html = get_monthly_economic_indicators_html()
     market_outlook_html = get_market_outlook_html()
     calendar_html = get_us_economic_calendar_html()
@@ -603,11 +624,7 @@ def daily_report_html():
     {news_html}
     <h3>🧐 투자 전략 종합 평가</h3>
     {assessment_html}
-    <h3>📈 주요 지수</h3>
-    {indices_html}
-    <h3>📊 주요 경제지표</h3>
-    {economic_html}
-    <h3>📊 주요 경제지표 월별 변화 (2025년)</h3>
+    <h3>📊 주요 경제지표 월별 변화</h3>
     {monthly_economic_html}
     <h3>📈 주요 지수 및 시장 전망</h3>
     {market_outlook_html}
