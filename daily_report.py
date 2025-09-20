@@ -21,13 +21,14 @@ def setup_matplotlib_korean_font():
         if not any("NanumGothic" in f for f in fonts):
             print("한글 폰트(NanumGothic) 설치 중...")
             subprocess.run(["sudo", "apt-get", "install", "-y", "fonts-nanum"], check=False)
-            matplotlib.font_manager._rebuild()
-        matplotlib.rc('font', family='NanumGothic')
-        matplotlib.rcParams['axes.unicode_minus'] = False
-    except:
-        matplotlib.rc('font', family='DejaVu Sans')
-
-setup_matplotlib_korean_font()
+            matplotlib.font_manager._rebuild()  # 🔧 폰트 캐시 갱신
+        # 🔧 NanumGothic 적용
+        matplotlib.rcParams["font.family"] = "NanumGothic"
+        matplotlib.rcParams["axes.unicode_minus"] = False
+        print("✅ NanumGothic 폰트 적용 완료")
+    except Exception as e:
+        print(f"⚠️ 폰트 설정 실패: {e} → DejaVu Sans 사용")
+        matplotlib.rcParams["font.family"] = "DejaVu Sans"
 
 # ============================
 # 환경 변수 & 포트폴리오 설정
@@ -262,10 +263,15 @@ def send_email_html(subject, html_body):
     msg = MIMEMultipart("alternative")
     msg["Subject"], msg["From"], msg["To"] = subject, EMAIL_SENDER, EMAIL_RECEIVER
     msg.attach(MIMEText(html_body, "html"))
-    with smtplib.SMTP("smtp.gmail.com", 587) as server:
-        server.starttls()
-        server.login(EMAIL_SENDER, EMAIL_PASSWORD)
-        server.sendmail(EMAIL_SENDER, EMAIL_RECEIVER)
+    try:
+        with smtplib.SMTP("smtp.gmail.com", 587) as server:
+            server.starttls()
+            server.login(EMAIL_SENDER, EMAIL_PASSWORD)
+            # 🔧 여기서 msg.as_string() 추가
+            server.sendmail(EMAIL_SENDER, EMAIL_RECEIVER, msg.as_string())
+        print("메일 발송 완료")
+    except Exception as e:
+        print(f"메일 전송 실패: {e}")
 
 # ============================
 # 리포트 조립
