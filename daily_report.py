@@ -265,4 +265,4 @@ def send_email_html(subject, html_body):
     with smtplib.SMTP("smtp.gmail.com", 587) as server:
         server.starttls()
         server.login(EMAIL_SENDER, EMAIL_PASSWORD)
-        server.sendmail(EMAIL_SENDER, EMAIL_RECEIVER
+        server.sendmail(EMAIL_SENDER, EMAIL_RECEIVER)
