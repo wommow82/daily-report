@@ -266,3 +266,34 @@ def send_email_html(subject, html_body):
         server.starttls()
         server.login(EMAIL_SENDER, EMAIL_PASSWORD)
         server.sendmail(EMAIL_SENDER, EMAIL_RECEIVER)
+
+# ============================
+# 리포트 조립
+# ============================
+def daily_report_html():
+    today = datetime.today()
+    today_str = today.strftime("%Y-%m-%d")
+
+    html = f"""
+    <html><body style="font-family:Arial, sans-serif;">
+    <h2>📊 오늘의 투자 리포트 ({today_str})</h2>
+    {get_portfolio_overview_html()}
+    {generate_profit_chart()}
+    {get_portfolio_indicators_html()}
+    {get_news_summary_html()}
+    {get_market_outlook_html()}
+    {get_monthly_economic_indicators_html()}
+    {get_us_economic_calendar_html()}
+    </body></html>
+    """
+    send_email_html(f"오늘의 투자 리포트 - {today_str}", html)
+    print("✅ 리포트 생성 및 메일 발송 완료")
+
+# ============================
+# 메인 실행
+# ============================
+if __name__ == "__main__":
+    if datetime.now().weekday() >= 5:
+        print("주말이므로 리포트 실행 안 함")
+    else:
+        daily_report_html()
