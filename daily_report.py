@@ -292,8 +292,12 @@ def daily_report_html():
 # ============================
 # 메인 실행
 # ============================
+# if __name__ == "__main__":
+#     if datetime.now().weekday() >= 5:
+#         print("주말이므로 리포트 실행 안 함")
+#     else:
+#         daily_report_html()
+
 if __name__ == "__main__":
-    if datetime.now().weekday() >= 5:
-        print("주말이므로 리포트 실행 안 함")
-    else:
-        daily_report_html()
+    # 주말에도 실행 → 조건 제거
+    daily_report_html()
