@@ -182,20 +182,49 @@ def get_portfolio_indicators_html():
     for t, info in portfolio.items():
         t_upper = t.upper()
         yinfo = yf.Ticker(t).info or {}
-        rsi, macd = get_rsi_macd_values(t)
-        rsi_text = "과매수" if rsi and rsi > 70 else ("과매도" if rsi and rsi < 30 else "중립")
-        macd_text = "상승 추세" if macd and macd > 0 else ("하락 추세" if macd and macd < 0 else "중립")
 
-        # GPT에게 종목별 매매 전략 한 줄 요약 요청
-        strategy = gpt_chat(
-            f"{t_upper}의 RSI {rsi:.2f if rsi else 'N/A'} ({rsi_text}), MACD {macd:.2f if macd else 'N/A'} ({macd_text})를 기반으로 "
-            "짧은 매매 전략을 작성해줘. (1차 매도 +5%, 2차 매도 +15%, 손절 -7% 기준 포함)"
+        # --- 기술적 지표 ---
+        rsi, macd = get_rsi_macd_values(t)
+        rsi_val = f"{rsi:.2f}" if rsi is not None else "N/A"
+        macd_val = f"{macd:.2f}" if macd is not None else "N/A"
+        rsi_text = "과매수" if rsi and rsi > 70 else ("과매도" if rsi and rsi < 30 else "중립")
+        macd_text = "상승" if macd and macd > 0 else ("하락" if macd and macd < 0 else "중립")
+
+        # --- 재무 지표 ---
+        per = yinfo.get("trailingPE")
+        pbr = yinfo.get("priceToBook")
+        roe = yinfo.get("returnOnEquity")
+        eps = yinfo.get("trailingEps")
+        debt_ratio = (yinfo.get("totalDebt") / yinfo.get("totalAssets") * 100) if yinfo.get("totalDebt") and yinfo.get("totalAssets") else None
+        fwd_per = yinfo.get("forwardPE")
+
+        # 포맷팅
+        per_val = f"{per:.2f}" if per else "N/A"
+        pbr_val = f"{pbr:.2f}" if pbr else "N/A"
+        roe_val = f"{roe*100:.2f}%" if roe else "N/A"
+        eps_val = f"{eps:.2f}" if eps else "N/A"
+        debt_val = f"{debt_ratio:.2f}%" if debt_ratio else "N/A"
+        fwd_per_val = f"{fwd_per:.2f}" if fwd_per else "N/A"
+
+        # --- GPT 매매 전략 추천 ---
+        strategy_prompt = (
+            f"{t_upper} 기술적 지표: RSI {rsi_val} ({rsi_text}), MACD {macd_val} ({macd_text})\n"
+            f"재무 지표: PER {per_val}, PBR {pbr_val}, ROE {roe_val}, EPS {eps_val}, 부채비율 {debt_val}, Forward PER {fwd_per_val}\n"
+            "위 정보를 종합해 짧고 명확한 매매 전략을 작성해줘. "
+            "(예: 단기 보유, 1차 매도 +5%, 2차 매도 +15%, 손절 -7% 기준)"
         )
+        strategy = gpt_chat(strategy_prompt)
 
         rows.append({
             "종목": f"<b>{t_upper}</b>",
-            "RSI": f"{rsi:.2f} ({rsi_text})" if rsi else "N/A",
-            "MACD": f"{macd:.2f} ({macd_text})" if macd else "N/A",
+            "RSI": f"{rsi_val} ({rsi_text})",
+            "MACD": f"{macd_val} ({macd_text})",
+            "PER": per_val,
+            "PBR": pbr_val,
+            "ROE": roe_val,
+            "EPS": eps_val,
+            "부채비율": debt_val,
+            "Fwd PER": fwd_per_val,
             "1차 매도": "+5%",
             "2차 매도": "+15%",
             "손절": "-7%",
@@ -204,13 +233,14 @@ def get_portfolio_indicators_html():
 
     df = pd.DataFrame(rows)
     table_html = df.to_html(escape=False, index=False, justify="center", border=1)
+
     return f"""
     <div style='background:#f9f9f9;padding:10px;border-radius:8px;'>
-        <h4>📊 종목별 판단 지표</h4>
+        <h4>📊 종목별 판단 지표 (기술 + 재무 + 전략)</h4>
         {table_html}
     </div>
     """
-
+    
 def get_news_summary_html():
     html = "<h3>📰 종목별 뉴스</h3>"
     for t in portfolio:
