@@ -163,20 +163,40 @@ def get_portfolio_indicators_html():
     for t, info in portfolio.items():
         yinfo = yf.Ticker(t).info or {}
         rsi, macd = get_rsi_macd_values(t)
-        indicators[t] = {"RSI": rsi, "MACD": macd, "PER": yinfo.get("trailingPE"), "PBR": yinfo.get("priceToBook"), "ROE": yinfo.get("returnOnEquity")}
-        html += f"<tr><td>{t}</td><td>{'%.2f'%rsi if rsi else 'N/A'}</td><td>{'%.4f'%macd if macd else 'N/A'}</td><td>{yinfo.get('trailingPE')}</td><td>{yinfo.get('priceToBook')}</td><td>{yinfo.get('returnOnEquity')}</td></tr>"
+        indicators[t] = {
+            "RSI": rsi,
+            "MACD": macd,
+            "PER": yinfo.get("trailingPE"),
+            "PBR": yinfo.get("priceToBook"),
+            "ROE": yinfo.get("returnOnEquity"),
+        }
+        html += "<tr>"
+        html += f"<td>{t}</td>"
+        html += f"<td>{rsi:.2f}</td>" if rsi else "<td>N/A</td>"
+        html += f"<td>{macd:.2f}</td>" if macd else "<td>N/A</td>"
+        html += f"<td>{yinfo.get('trailingPE'):.2f}</td>" if yinfo.get("trailingPE") else "<td>N/A</td>"
+        html += f"<td>{yinfo.get('priceToBook'):.2f}</td>" if yinfo.get("priceToBook") else "<td>N/A</td>"
+        html += f"<td>{yinfo.get('returnOnEquity'):.2f}</td>" if yinfo.get("returnOnEquity") else "<td>N/A</td>"
+        html += "</tr>"
     html += "</table>"
-    prompt = f"종목별 지표: {indicators}\n각 종목마다 RSI/MACD 해석 + 1차/2차 매도 목표가(+5%,+15%)와 손절가(-7%) 추천 bullet point로 제시"
-    comments = gpt_chat(prompt)
-    html += f"<div style='background:#f6f6f6;padding:6px;'>{comments.replace(chr(10),'<br>')}</div>"
+
+    # GPT 해석 + 투자전략 코멘트
+    gpt_out = gpt_chat(
+        f"종목별 지표: {indicators}\n"
+        f"각 종목의 RSI/MACD 해석 + 1차/2차 매도 목표가(+5%, +15%)와 손절가(-7%) 추천 bullet point 작성"
+    )
+    gpt_html = "<ul>" + "".join(
+        [f"<li>{line.strip('-• ').capitalize()}</li>" for line in gpt_out.splitlines() if line.strip()]
+    ) + "</ul>"
+    html += f"<div style='background:#f6f6f6;padding:8px;border-radius:8px;'>{gpt_html}</div>"
     return html
 
 def get_news_summary_html():
     html = "<h3>📰 종목별 뉴스</h3>"
     for t in portfolio:
-        html += f"<h4>{t}</h4>"
+        html += f"<h4>📌 {t}</h4>"
         if not NEWS_API_KEY:
-            html += "<p>NEWS_API_KEY 없음 → 뉴스 생략</p>"
+            html += "<p style='color:gray;'>NEWS_API_KEY 없음 → 뉴스 생략</p>"
             continue
         try:
             r = requests.get(
@@ -186,25 +206,28 @@ def get_news_summary_html():
             )
             articles = r.json().get("articles", [])[:3]
             if not articles:
-                html += "<p>뉴스 없음</p>"
+                html += "<p style='color:gray;'>뉴스 없음</p>"
                 continue
 
-            text = ""
+            # 뉴스 제목 + 요약 텍스트
+            news_text = ""
             html += "<ul>"
             for i, a in enumerate(articles, 1):
-                # 🔧 괄호 버그 수정됨
-                html += f"<li><a href='{a.get('url', '#')}'>{i}. {a.get('title')}</a></li>"
-                text += f"[{i}] {a.get('title')} - {a.get('description')}\n"
+                title = a.get("title", "제목 없음")
+                url = a.get("url", "#")
+                desc = a.get("description", "")
+                html += f"<li><a href='{url}'>{i}. {title}</a></li>"
+                news_text += f"[{i}] {title} - {desc}\n"
             html += "</ul>"
 
-            # GPT 요약 + 시사점
-            summary = gpt_chat(f"{t} 관련 뉴스:\n{text}\n각 기사 bullet + 단기/장기 시사점 작성 (• 아이콘 사용)")
+            # GPT 요약
+            summary = gpt_chat(f"{t} 관련 뉴스:\n{news_text}\n각 기사 핵심 bullet + 단기/장기 시사점 작성")
             gpt_html = "<ul>" + "".join(
-                [f"<li>{line.strip('• ')}</li>" for line in summary.splitlines() if line.strip()]
+                [f"<li>{line.strip('-• ').capitalize()}</li>" for line in summary.splitlines() if line.strip()]
             ) + "</ul>"
-            html += f"<div style='background:#eef;padding:6px;'>{gpt_html}</div>"
+            html += f"<div style='background:#eef;padding:8px;border-radius:8px;'>{gpt_html}</div>"
         except Exception as e:
-            html += f"<p>뉴스 로드 실패: {e}</p>"
+            html += f"<p style='color:red;'>뉴스 로드 실패: {e}</p>"
     return html
 
 def get_market_outlook_html():
@@ -230,27 +253,33 @@ def get_market_outlook_html():
     html += "</table>"
 
     # GPT 해석
-    gpt_out = gpt_chat(f"오늘 주요 지수: {idx_data} 투자 전략 bullet point 작성 (• 아이콘 사용)")
-    gpt_html = "<ul>" + "".join([f"<li>{line.strip('• ')}</li>" for line in gpt_out.splitlines() if line.strip()]) + "</ul>"
-    return html + f"<div style='background:#f0f0f0;padding:6px;'>{gpt_html}</div>"
+    gpt_out = gpt_chat(f"오늘 주요 지수: {idx_data} 투자 전략 bullet point 작성")
+    gpt_html = "<ul>" + "".join(
+        [f"<li>{line.strip('-• ').capitalize()}</li>" for line in gpt_out.splitlines() if line.strip()]
+    ) + "</ul>"
+    html += f"<div style='background:#f0f0f0;padding:8px;border-radius:8px;'>{gpt_html}</div>"
+    return html
 
 def get_monthly_economic_indicators_html():
     indicators = {"CPIAUCSL": "CPI", "UNRATE": "실업률"}
     frames = {}
     for s, n in indicators.items():
         try:
-            if not FRED_API_KEY: continue
+            if not FRED_API_KEY:
+                continue
             url = f"https://api.stlouisfed.org/fred/series/observations?series_id={s}&api_key={FRED_API_KEY}&file_type=json"
             obs = pd.DataFrame(requests.get(url, timeout=10).json().get("observations", []))
             obs["value"] = pd.to_numeric(obs["value"], errors="coerce")
             obs["date"] = pd.to_datetime(obs["date"])
             frames[n] = obs.dropna().tail(6)
-        except: pass
-    if not frames:
-        return "<p>경제지표 로드 실패</p>"
+        except:
+            pass
 
+    if not frames:
+        return "<p style='color:gray;'>📊 경제지표 로드 실패</p>"
+
+    # 가로 테이블 구성
     html = "<h4>📊 경제지표 월별 변화</h4><table border='1'><tr><th>지표</th>"
-    # 가로 테이블 헤더
     months = frames[list(frames.keys())[0]]["date"].dt.strftime("%Y-%m").tolist()
     for m in months:
         html += f"<th>{m}</th>"
@@ -263,30 +292,37 @@ def get_monthly_economic_indicators_html():
         html += "</tr>"
     html += "</table>"
 
-    gpt_out = gpt_chat(f"최근 경제지표: {frames} 투자자 해석 bullet point 작성 (• 아이콘 사용)")
-    gpt_html = "<ul>" + "".join([f"<li>{line.strip('• ')}</li>" for line in gpt_out.splitlines() if line.strip()]) + "</ul>"
-    html += f"<div style='background:#f6f6f6;padding:6px;'>{gpt_html}</div>"
+    # GPT 해석
+    gpt_out = gpt_chat(f"최근 경제지표: {frames} 투자자 관점에서 bullet point로 해석")
+    gpt_html = "<ul>" + "".join(
+        [f"<li>{line.strip('-• ').capitalize()}</li>" for line in gpt_out.splitlines() if line.strip()]
+    ) + "</ul>"
+    html += f"<div style='background:#f6f6f6;padding:8px;border-radius:8px;'>{gpt_html}</div>"
     return html
 
 def get_us_economic_calendar_html():
     try:
-        today=datetime.today()
-        start=today.replace(day=1).strftime("%Y-%m-%d")
-        next_month=(today.replace(day=28)+timedelta(days=4)).replace(day=1)
-        end=(next_month - timedelta(days=1)).strftime("%Y-%m-%d")
-        url=f"https://api.tradingeconomics.com/calendar?country=united states&start={start}&end={end}&c={TRADING_API_KEY}"
-        r=requests.get(url,timeout=10)
-        data=r.json() if r.status_code==200 else []
+        today = datetime.today()
+        start = today.replace(day=1).strftime("%Y-%m-%d")
+        next_month = (today.replace(day=28) + timedelta(days=4)).replace(day=1)
+        end = (next_month - timedelta(days=1)).strftime("%Y-%m-%d")
+        url = f"https://api.tradingeconomics.com/calendar?country=united states&start={start}&end={end}&c={TRADING_API_KEY}"
+        r = requests.get(url, timeout=10)
+        data = r.json() if r.status_code == 200 else []
         if not data:
-            fallback=gpt_chat("이번 달 미국 주요 경제 이벤트 예상 bullet point")
-            return f"<p>캘린더 데이터 없음</p><div>{fallback.replace(chr(10),'<br>')}</div>"
-        html="<h4>🗓️ 경제 일정</h4><table border='1'><tr><th>날짜</th><th>이벤트</th><th>예상</th></tr>"
+            fallback = gpt_chat("이번 달 미국 주요 경제 이벤트 예상 bullet point 작성")
+            fallback_html = "<ul>" + "".join(
+                [f"<li>{line.strip('-• ').capitalize()}</li>" for line in fallback.splitlines() if line.strip()]
+            ) + "</ul>"
+            return f"<h4>🗓️ 경제 일정</h4><p style='color:gray;'>TradingEconomics 데이터 없음</p><div style='background:#f8f8f8;padding:8px;border-radius:8px;'>{fallback_html}</div>"
+
+        html = "<h4>🗓️ 이번 달 미국 경제 발표 일정</h4><table border='1'><tr><th>날짜</th><th>이벤트</th><th>예상</th></tr>"
         for ev in data:
-            html+=f"<tr><td>{ev.get('Date')}</td><td>{ev.get('Event')}</td><td>{ev.get('Forecast')}</td></tr>"
-        html+="</table>"
+            html += f"<tr><td>{ev.get('Date')}</td><td>{ev.get('Event')}</td><td>{ev.get('Forecast')}</td></tr>"
+        html += "</table>"
         return html
     except Exception as e:
-        return f"<p>경제 일정 로드 실패: {e}</p>"
+        return f"<p style='color:red;'>경제 일정 로드 실패: {e}</p>"
 
 # ============================
 # 메일 전송
@@ -318,13 +354,20 @@ def daily_report_html():
     html = f"""
     <html><body style="font-family:Arial, sans-serif;">
     <h2>📊 오늘의 투자 리포트 ({today_str})</h2>
+
     {get_portfolio_overview_html()}
     {generate_profit_chart()}
+
     {get_portfolio_indicators_html()}
+
     {get_news_summary_html()}
+
     {get_market_outlook_html()}
+
     {get_monthly_economic_indicators_html()}
+
     {get_us_economic_calendar_html()}
+
     </body></html>
     """
     send_email_html(f"오늘의 투자 리포트 - {today_str}", html)
