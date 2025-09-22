@@ -178,7 +178,9 @@ def generate_profit_chart():
 import pandas as pd
 
 def get_portfolio_indicators_html():
-    rows = []
+    rows_indicators = []
+    rows_strategies = []
+
     for t, info in portfolio.items():
         t_upper = t.upper()
         yinfo = yf.Ticker(t).info or {}
@@ -197,36 +199,39 @@ def get_portfolio_indicators_html():
         eps = yinfo.get("trailingEps")
         total_debt = yinfo.get("totalDebt")
         total_assets = yinfo.get("totalAssets")
-
-        # 부채비율 계산 (데이터 없을 시 "N/A")
         debt_ratio = (total_debt / total_assets * 100) if total_debt and total_assets else None
+        fwd_per = yinfo.get("forwardPE")
 
-        # 포맷팅
         per_val = f"{per:.2f}" if per else "N/A"
         pbr_val = f"{pbr:.2f}" if pbr else "N/A"
         roe_val = f"{roe*100:.2f}%" if roe else "N/A"
         eps_val = f"{eps:.2f}" if eps else "N/A"
         debt_val = f"{debt_ratio:.2f}%" if debt_ratio else "N/A"
-        fwd_per_val = f"{yinfo.get('forwardPE'):.2f}" if yinfo.get("forwardPE") else "N/A"
+        fwd_per_val = f"{fwd_per:.2f}" if fwd_per else "N/A"
 
-        # --- GPT 매매 전략 요청 ---
+        # --- 매도/손절 가격 계산 ---
+        avg_price = info.get("avg_price", 0)
+        sell_1 = f"${avg_price*1.05:.2f}" if avg_price else "N/A"
+        sell_2 = f"${avg_price*1.15:.2f}" if avg_price else "N/A"
+        stop_loss = f"${avg_price*0.93:.2f}" if avg_price else "N/A"
+
+        # --- GPT 매매 전략 ---
         strategy_prompt = (
             f"{t_upper} 기술적 지표: RSI {rsi_val} ({rsi_text}), MACD {macd_val} ({macd_text})\n"
             f"재무 지표: PER {per_val}, PBR {pbr_val}, ROE {roe_val}, EPS {eps_val}, 부채비율 {debt_val}, Forward PER {fwd_per_val}\n"
-            "기본전략(단기/중기/장기)과 추가 고려사항을 분리해서 한국어로 작성. "
-            "출력 형식은 '● 기본전략: ...\\n   + 세부내용...\\n● 추가 고려사항: ...\\n   + 세부내용...'"
+            "기본전략과 추가 고려사항을 분리해 간단히 작성해줘."
         )
-        strategy_text = gpt_chat(strategy_prompt)
+        strategy_raw = gpt_chat(strategy_prompt)
 
-        # HTML 포맷팅
         formatted_strategy = ""
-        for line in strategy_text.splitlines():
+        for line in strategy_raw.splitlines():
             if line.strip().startswith("●"):
                 formatted_strategy += f"<b>{line.strip()}</b><br>"
             elif line.strip().startswith("+"):
                 formatted_strategy += f"<span style='margin-left:20px;'>{line.strip()}</span><br>"
 
-        rows.append({
+        # 표 1 (지표용)
+        rows_indicators.append({
             "종목": f"<b>{t_upper}</b>",
             "RSI": f"{rsi_val} ({rsi_text})",
             "MACD": f"{macd_val} ({macd_text})",
@@ -235,20 +240,32 @@ def get_portfolio_indicators_html():
             "ROE": roe_val,
             "EPS": eps_val,
             "부채비율": debt_val,
-            "Fwd PER": fwd_per_val,
-            "1차 매도": "+5%",
-            "2차 매도": "+15%",
-            "손절": "-7%",
+            "Fwd PER": fwd_per_val
+        })
+
+        # 표 2 (전략용)
+        rows_strategies.append({
+            "종목": f"<b>{t_upper}</b>",
+            "1차 매도": sell_1,
+            "2차 매도": sell_2,
+            "손절": stop_loss,
             "매매 전략": formatted_strategy
         })
 
-    df = pd.DataFrame(rows)
-    table_html = df.to_html(escape=False, index=False, justify="center", border=1)
+    # 두 개의 표 생성
+    df_indicators = pd.DataFrame(rows_indicators)
+    df_strategies = pd.DataFrame(rows_strategies)
+
+    table1_html = df_indicators.to_html(escape=False, index=False, justify="center", border=1)
+    table2_html = df_strategies.to_html(escape=False, index=False, justify="center", border=1)
 
     return f"""
     <div style='background:#f9f9f9;padding:10px;border-radius:8px;'>
-        <h4>📊 종목별 판단 지표 (기술 + 재무 + 전략)</h4>
-        {table_html}
+        <h4>📊 종목별 판단 지표</h4>
+        {table1_html}
+        <br><br>
+        <h4>📈 종목별 매매 전략</h4>
+        {table2_html}
     </div>
     """
     
