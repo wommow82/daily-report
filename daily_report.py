@@ -219,16 +219,20 @@ def get_portfolio_indicators_html():
         strategy_prompt = (
             f"{t_upper} 기술적 지표: RSI {rsi_val} ({rsi_text}), MACD {macd_val} ({macd_text})\n"
             f"재무 지표: PER {per_val}, PBR {pbr_val}, ROE {roe_val}, EPS {eps_val}, 부채비율 {debt_val}, Forward PER {fwd_per_val}\n"
-            "기본전략과 추가 고려사항을 분리해 간단히 작성해줘."
+            "기본전략과 추가 고려사항을 분리해 한국어로 작성. "
+            "출력은 ● 기본전략 / + 세부내용, ● 추가 고려사항 / + 세부내용 형식으로."
         )
         strategy_raw = gpt_chat(strategy_prompt)
 
+        # 줄바꿈 + HTML 포맷
         formatted_strategy = ""
         for line in strategy_raw.splitlines():
             if line.strip().startswith("●"):
                 formatted_strategy += f"<b>{line.strip()}</b><br>"
             elif line.strip().startswith("+"):
                 formatted_strategy += f"<span style='margin-left:20px;'>{line.strip()}</span><br>"
+            else:
+                formatted_strategy += f"{line.strip()}<br>"
 
         # 표 1 (지표용)
         rows_indicators.append({
@@ -240,16 +244,16 @@ def get_portfolio_indicators_html():
             "ROE": roe_val,
             "EPS": eps_val,
             "부채비율": debt_val,
-            "Fwd PER": fwd_per_val
+            "Fwd PER": fwd_per_val,
+            "1차 매도": sell_1,
+            "2차 매도": sell_2,
+            "손절": stop_loss
         })
 
         # 표 2 (전략용)
         rows_strategies.append({
             "종목": f"<b>{t_upper}</b>",
-            "1차 매도": sell_1,
-            "2차 매도": sell_2,
-            "손절": stop_loss,
-            "매매 전략": formatted_strategy
+            "매매 전략": formatted_strategy if formatted_strategy else "N/A"
         })
 
     # 두 개의 표 생성
