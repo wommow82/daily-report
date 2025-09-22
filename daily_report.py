@@ -195,8 +195,11 @@ def get_portfolio_indicators_html():
         pbr = yinfo.get("priceToBook")
         roe = yinfo.get("returnOnEquity")
         eps = yinfo.get("trailingEps")
-        debt_ratio = (yinfo.get("totalDebt") / yinfo.get("totalAssets") * 100) if yinfo.get("totalDebt") and yinfo.get("totalAssets") else None
-        fwd_per = yinfo.get("forwardPE")
+        total_debt = yinfo.get("totalDebt")
+        total_assets = yinfo.get("totalAssets")
+
+        # 부채비율 계산 (데이터 없을 시 "N/A")
+        debt_ratio = (total_debt / total_assets * 100) if total_debt and total_assets else None
 
         # 포맷팅
         per_val = f"{per:.2f}" if per else "N/A"
@@ -204,16 +207,24 @@ def get_portfolio_indicators_html():
         roe_val = f"{roe*100:.2f}%" if roe else "N/A"
         eps_val = f"{eps:.2f}" if eps else "N/A"
         debt_val = f"{debt_ratio:.2f}%" if debt_ratio else "N/A"
-        fwd_per_val = f"{fwd_per:.2f}" if fwd_per else "N/A"
+        fwd_per_val = f"{yinfo.get('forwardPE'):.2f}" if yinfo.get("forwardPE") else "N/A"
 
-        # --- GPT 매매 전략 추천 ---
+        # --- GPT 매매 전략 요청 ---
         strategy_prompt = (
             f"{t_upper} 기술적 지표: RSI {rsi_val} ({rsi_text}), MACD {macd_val} ({macd_text})\n"
             f"재무 지표: PER {per_val}, PBR {pbr_val}, ROE {roe_val}, EPS {eps_val}, 부채비율 {debt_val}, Forward PER {fwd_per_val}\n"
-            "위 정보를 종합해 짧고 명확한 매매 전략을 작성해줘. "
-            "(예: 단기 보유, 1차 매도 +5%, 2차 매도 +15%, 손절 -7% 기준)"
+            "기본전략(단기/중기/장기)과 추가 고려사항을 분리해서 한국어로 작성. "
+            "출력 형식은 '● 기본전략: ...\\n   + 세부내용...\\n● 추가 고려사항: ...\\n   + 세부내용...'"
         )
-        strategy = gpt_chat(strategy_prompt)
+        strategy_text = gpt_chat(strategy_prompt)
+
+        # HTML 포맷팅
+        formatted_strategy = ""
+        for line in strategy_text.splitlines():
+            if line.strip().startswith("●"):
+                formatted_strategy += f"<b>{line.strip()}</b><br>"
+            elif line.strip().startswith("+"):
+                formatted_strategy += f"<span style='margin-left:20px;'>{line.strip()}</span><br>"
 
         rows.append({
             "종목": f"<b>{t_upper}</b>",
@@ -228,7 +239,7 @@ def get_portfolio_indicators_html():
             "1차 매도": "+5%",
             "2차 매도": "+15%",
             "손절": "-7%",
-            "매매 전략": strategy
+            "매매 전략": formatted_strategy
         })
 
     df = pd.DataFrame(rows)
@@ -307,25 +318,35 @@ def get_market_outlook_html():
                 price_yesterday = hist["Close"].iloc[-2]
                 change = ((price_today - price_yesterday) / price_yesterday) * 100
 
-                # GPT로 전략 작성
-                strategy = gpt_chat(f"{name} 현재 {price_today:.2f}, 전일대비 {change:+.2f}% 변동 → 짧은 투자 전략 작성")
+                strategy_raw = gpt_chat(
+                    f"{name} 현재 {price_today:.2f}, 전일 대비 {change:+.2f}% 변동 "
+                    "→ 2줄로 나누어 '● 단기전략', '● 중기전략' 형태로 작성해줘."
+                )
+
+                # 줄바꿈 적용
+                formatted_strategy = ""
+                for line in strategy_raw.splitlines():
+                    if line.strip().startswith("●"):
+                        formatted_strategy += f"<b>{line.strip()}</b><br>"
+                    elif line.strip().startswith("+"):
+                        formatted_strategy += f"<span style='margin-left:20px;'>{line.strip()}</span><br>"
+
                 data.append({
                     "지수": name,
                     "현재": f"{price_today:,.2f}",
                     "변동률": f"{change:+.2f}%",
-                    "전략": strategy
+                    "전략": formatted_strategy
                 })
         except Exception as e:
             data.append({"지수": name, "현재": "N/A", "변동률": "N/A", "전략": f"로드 실패: {e}"})
 
     df = pd.DataFrame(data)
-    table_html = df.to_html(index=False, justify="center", escape=False, border=1)
+    table_html = df.to_html(index=False, escape=False, justify="center", border=1)
 
-    gpt_out = gpt_chat("위 시장 데이터를 종합하여 전반적 투자 전략 한 줄 작성")
     return f"""
     <div style='background:#f9f9f9;padding:10px;border-radius:8px;'>
+        <h4>📈 주요 지수 및 시장 전망</h4>
         {table_html}
-        <p><b>📌 전반적 전략:</b> {gpt_out}</p>
     </div>
     """
 
