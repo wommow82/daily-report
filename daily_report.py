@@ -49,6 +49,8 @@ EMAIL_SENDER = os.getenv("EMAIL_SENDER")
 EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD")
 EMAIL_RECEIVER = os.getenv("EMAIL_RECEIVER")
 
+FRED_API_BASE = "https://api.stlouisfed.org/fred/series/observations"
+
 if not OPENAI_API_KEY:
     raise RuntimeError("OPENAI_API_KEY 환경변수가 필요합니다.")
 openai.api_key = OPENAI_API_KEY
@@ -184,33 +186,28 @@ def get_portfolio_indicators_html():
         rsi_text = "과매수" if rsi and rsi > 70 else ("과매도" if rsi and rsi < 30 else "중립")
         macd_text = "상승 추세" if macd and macd > 0 else ("하락 추세" if macd and macd < 0 else "중립")
 
+        # GPT에게 종목별 매매 전략 한 줄 요약 요청
+        strategy = gpt_chat(
+            f"{t_upper}의 RSI {rsi:.2f if rsi else 'N/A'} ({rsi_text}), MACD {macd:.2f if macd else 'N/A'} ({macd_text})를 기반으로 "
+            "짧은 매매 전략을 작성해줘. (1차 매도 +5%, 2차 매도 +15%, 손절 -7% 기준 포함)"
+        )
+
         rows.append({
             "종목": f"<b>{t_upper}</b>",
             "RSI": f"{rsi:.2f} ({rsi_text})" if rsi else "N/A",
             "MACD": f"{macd:.2f} ({macd_text})" if macd else "N/A",
             "1차 매도": "+5%",
             "2차 매도": "+15%",
-            "손절": "-7%"
+            "손절": "-7%",
+            "매매 전략": strategy
         })
 
     df = pd.DataFrame(rows)
     table_html = df.to_html(escape=False, index=False, justify="center", border=1)
-
-    # GPT 해석 (추가 코멘트)
-    gpt_out = gpt_chat(
-        "다음 종목별 RSI와 MACD를 기반으로 간단한 해석과 매매 전략 코멘트를 작성해줘. "
-        "각 종목별로 핵심 포인트는 굵게 표시하고, 추가 설명은 줄바꿈 + 들여쓰기."
-    )
-    strategy_html = "".join(
-        f"<p style='margin-left:15px;'>{line}</p>" for line in gpt_out.splitlines() if line.strip()
-    )
-
     return f"""
     <div style='background:#f9f9f9;padding:10px;border-radius:8px;'>
         <h4>📊 종목별 판단 지표</h4>
         {table_html}
-        <h4>📌 해석 및 전략</h4>
-        {strategy_html}
     </div>
     """
 
@@ -241,17 +238,17 @@ def get_news_summary_html():
                     html += f"<p style='margin-left:20px;color:#555;'>{desc}</p>"
                 news_text += f"[{i}] {title} - {desc}\n"
 
-            # GPT 번역 요약
             summary = gpt_chat(
                 f"{t_upper} 관련 뉴스:\n{news_text}\n"
-                "위 기사 내용을 한국어로 요약하고, 기사 주제는 굵게 표시, 세부내용은 들여쓰기 + 불릿으로 정리."
+                "뉴스 요약을 한국어로 작성하고, 각 주제는 ● 로 시작, 세부내용은 + 기호로 시작해 들여쓰기 해줘."
             )
+
             formatted = ""
             for line in summary.splitlines():
-                if line.strip().startswith("**"):  # 대주제
-                    formatted += f"<p><b>{line.strip('**')}</b></p>"
-                elif line.strip():
-                    formatted += f"<p style='margin-left:20px;'>• {line.strip()}</p>"
+                if line.strip().startswith("●"):
+                    formatted += f"<p><b>{line.strip()}</b></p>"
+                elif line.strip().startswith("+"):
+                    formatted += f"<p style='margin-left:20px;'>{line.strip()}</p>"
 
             html += f"<div style='background:#eef;padding:8px;border-radius:8px;'>{formatted}</div>"
 
@@ -259,8 +256,6 @@ def get_news_summary_html():
             html += f"<p style='color:red;'>뉴스 로드 실패: {e}</p>"
 
     return html
-
-import yfinance as yf
 
 def get_market_outlook_html():
     tickers = {
@@ -281,19 +276,22 @@ def get_market_outlook_html():
                 price_today = hist["Close"].iloc[-1]
                 price_yesterday = hist["Close"].iloc[-2]
                 change = ((price_today - price_yesterday) / price_yesterday) * 100
+
+                # GPT로 전략 작성
+                strategy = gpt_chat(f"{name} 현재 {price_today:.2f}, 전일대비 {change:+.2f}% 변동 → 짧은 투자 전략 작성")
                 data.append({
                     "지수": name,
                     "현재": f"{price_today:,.2f}",
                     "변동률": f"{change:+.2f}%",
-                    "전략": "기술적 분석에 기반한 전략 작성 예정"
+                    "전략": strategy
                 })
         except Exception as e:
-            data.append({"지수": name, "현재": "N/A", "변동률": "N/A", "전략": f"데이터 로드 실패: {e}"})
+            data.append({"지수": name, "현재": "N/A", "변동률": "N/A", "전략": f"로드 실패: {e}"})
 
     df = pd.DataFrame(data)
     table_html = df.to_html(index=False, justify="center", escape=False, border=1)
 
-    gpt_out = gpt_chat("위 지수 데이터를 기반으로 전반적인 투자 전략을 한 줄로 작성해줘.")
+    gpt_out = gpt_chat("위 시장 데이터를 종합하여 전반적 투자 전략 한 줄 작성")
     return f"""
     <div style='background:#f9f9f9;padding:10px;border-radius:8px;'>
         {table_html}
@@ -408,7 +406,7 @@ def daily_report_html():
     <h3>💼 포트폴리오 요약</h3>
     {get_portfolio_overview_html()}
 
-    <h3>📊 종목별 판단 지표</h3>
+    <h3>📊 종목별 판단 지표 및 전략</h3>
     {get_portfolio_indicators_html()}
 
     <h3>📰 종목별 뉴스</h3>
