@@ -184,7 +184,7 @@ def main():
     df_timing, df_fund = build_report()
     html = f"""
     <html><body>
-    <h2 style='text-align:center;'>📌 Daily Recommendation Report with ETFs ({REPORT_DATE})</h2>
+    <h2 style='text-align:center;'>📌 오늘의 추천 종목 / ETF ({REPORT_DATE})</h2>
     <hr>
     {to_html_table(df_timing.head(30), "① 매수 타이밍 양호 종목/ETF (상위 30)")}
     <br>
