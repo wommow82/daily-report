@@ -454,17 +454,13 @@ def daily_report_html():
     <h2 style="text-align:center;">📊 오늘의 투자 리포트 ({today})</h2>
     <hr>
 
-     """
-    <h3>💼 포트폴리오 요약</h3>
-     """
+    <h3></h3>
     {get_portfolio_overview_html()}
 
     <h3>📊 종목별 판단 지표 및 전략</h3>
     {get_portfolio_indicators_html()}
 
-     """
-    <h3>📰 종목별 뉴스</h3>
-     """
+    <h3></h3>
     {get_news_summary_html()}
 
     <h3>📉 주요 지수 및 시장 전망</h3>
