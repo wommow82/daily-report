@@ -174,46 +174,52 @@ def generate_profit_chart():
     return f"<img src='data:image/png;base64,{img}'/>"
 
 def get_portfolio_indicators_html():
-    html = "<h4>📊 종목별 판단 지표</h4><table border='1'><tr><th>종목</th><th>RSI</th><th>MACD</th><th>PER</th><th>PBR</th><th>ROE</th></tr>"
+    html = "<h4>📊 종목별 판단 지표</h4>"
+    rows = []
     indicators = {}
+
     for t, info in portfolio.items():
         t_upper = t.upper()
         yinfo = yf.Ticker(t).info or {}
         rsi, macd = get_rsi_macd_values(t)
-        indicators[t_upper] = {
-            "RSI": rsi,
-            "MACD": macd,
-            "PER": yinfo.get("trailingPE"),
-            "PBR": yinfo.get("priceToBook"),
-            "ROE": yinfo.get("returnOnEquity"),
-        }
-        html += "<tr>"
-        html += f"<td><b>{t_upper}</b></td>"
-        html += f"<td>{rsi:.2f}</td>" if rsi else "<td>N/A</td>"
-        html += f"<td>{macd:.2f}</td>" if macd else "<td>N/A</td>"
-        html += f"<td>{yinfo.get('trailingPE'):.2f}</td>" if yinfo.get("trailingPE") else "<td>N/A</td>"
-        html += f"<td>{yinfo.get('priceToBook'):.2f}</td>" if yinfo.get("priceToBook") else "<td>N/A</td>"
-        html += f"<td>{yinfo.get('returnOnEquity'):.2f}</td>" if yinfo.get("returnOnEquity") else "<td>N/A</td>"
-        html += "</tr>"
-    html += "</table>"
 
+        row = {
+            "종목": f"<b>{t_upper}</b>",
+            "RSI": f"{rsi:.2f}" if rsi else "N/A",
+            "MACD": f"{macd:.2f}" if macd else "N/A",
+            "PER": f"{yinfo.get('trailingPE'):.2f}" if yinfo.get("trailingPE") else "N/A",
+            "PBR": f"{yinfo.get('priceToBook'):.2f}" if yinfo.get("priceToBook") else "N/A",
+            "ROE": f"{yinfo.get('returnOnEquity'):.2f}" if yinfo.get("returnOnEquity") else "N/A",
+        }
+        rows.append(row)
+        indicators[t_upper] = row
+
+    df = pd.DataFrame(rows)
+    table_html = df.to_html(escape=False, index=False, justify="center", border=1)
+
+    # GPT 해석 (대주제 Bold, 세부내용 들여쓰기)
     gpt_out = gpt_chat(
         f"종목별 지표: {indicators}\n"
-        "각 종목의 RSI/MACD 해석, 1차/2차 매도 목표가(+5%, +15%), 손절가(-7%)를 짧게 정리."
-        "대주제는 굵게 표시하고, 세부항목은 줄바꿈으로 구분해 가독성을 높여줘."
+        "각 종목별 매매 전략을 표로 정리하고, 1차/2차 매도 목표(+5%, +15%), 손절(-7%)을 제안."
+        "대주제(종목명)는 굵게, 전략은 줄바꿈 + 들여쓰기 + 불릿으로 정리."
     )
-    formatted = "".join([f"<p>{line}</p>" for line in gpt_out.splitlines() if line.strip()])
-    html += f"<div style='background:#f6f6f6;padding:8px;border-radius:8px;'>{formatted}</div>"
-    return html
+    strategy_html = "".join(
+        f"<p style='margin-bottom:4px;'>{line}</p>" for line in gpt_out.splitlines() if line.strip()
+    )
+
+    return f"""
+    <div style='background:#f9f9f9;padding:10px;border-radius:8px;'>
+        {table_html}
+        <h4>📌 종목별 지표 해석 및 매매 전략</h4>
+        <div style='margin-left:10px;'>{strategy_html}</div>
+    </div>
+    """
 
 def get_news_summary_html():
     html = "<h3>📰 종목별 뉴스</h3>"
     for t in portfolio:
         t_upper = t.upper()
         html += f"<h4>📌 <b>{t_upper}</b></h4>"
-        if not NEWS_API_KEY:
-            html += "<p style='color:gray;'>NEWS_API_KEY 없음 → 뉴스 생략</p>"
-            continue
         try:
             r = requests.get(
                 "https://newsapi.org/v2/everything",
@@ -221,35 +227,38 @@ def get_news_summary_html():
                 timeout=10,
             )
             articles = r.json().get("articles", [])
-            # 종목명 필터링 (연관도 낮은 기사 제외)
             filtered = [
                 a for a in articles
-                if a.get("title") and t_upper in a.get("title").upper() + (a.get("description") or "").upper()
+                if t_upper in (a.get("title","") + a.get("description","")).upper()
             ][:3]
+
             if not filtered:
                 html += "<p style='color:gray;'>관련 뉴스 없음</p>"
                 continue
 
             news_text = ""
-            html += "<ul>"
             for i, a in enumerate(filtered, 1):
                 title = a.get("title", "제목 없음")
-                url = a.get("url", "#")
                 desc = a.get("description", "")
-                html += f"<li><a href='{url}'>{i}. {title}</a></li>"
+                url = a.get("url", "#")
+                html += f"<p><b>{i}. <a href='{url}'>{title}</a></b></p>"
+                if desc:
+                    html += f"<p style='margin-left:20px;color:#555;'>{desc}</p>"
                 news_text += f"[{i}] {title} - {desc}\n"
-            html += "</ul>"
 
-            # GPT 요약 (연관성 체크 추가)
             summary = gpt_chat(
                 f"{t_upper} 관련 뉴스:\n{news_text}\n"
-                "뉴스 내용 중 종목과 직접적으로 관련 없는 내용은 제외하고, "
-                "핵심 포인트만 굵게 표시하고 세부 설명은 줄바꿈으로 정리."
+                "뉴스 주제를 굵게 표시하고, 세부내용은 들여쓰기 + 불릿으로 정리."
+                "무관한 뉴스는 제외."
             )
-            formatted = "".join([f"<p>{line}</p>" for line in summary.splitlines() if line.strip()])
-            html += f"<div style='background:#eef;padding:8px;border-radius:8px;'>{formatted}</div>"
+            summary_html = "".join(
+                f"<p style='margin-left:20px;'>{line}</p>" for line in summary.splitlines() if line.strip()
+            )
+            html += f"<div style='background:#eef;padding:8px;border-radius:8px;'>{summary_html}</div>"
+
         except Exception as e:
             html += f"<p style='color:red;'>뉴스 로드 실패: {e}</p>"
+
     return html
 
 def get_market_outlook_html():
@@ -281,6 +290,54 @@ def get_market_outlook_html():
     ) + "</ul>"
     html += f"<div style='background:#f0f0f0;padding:8px;border-radius:8px;'>{gpt_html}</div>"
     return html
+
+import pandas as pd
+import requests
+from datetime import datetime, timedelta
+
+FRED_API_BASE = "https://api.stlouisfed.org/fred/series/observations"
+
+def fetch_economic_indicators():
+    indicators = {
+        "CPI": "CPIAUCSL",
+        "Unemployment Rate": "UNRATE",
+        "GDP Growth": "A191RL1Q225SBEA",
+        "Retail Sales": "RSAFS"
+    }
+
+    end_date = datetime.today().strftime("%Y-%m-%d")
+    start_date = (datetime.today() - timedelta(days=180)).strftime("%Y-%m-%d")
+
+    data = {"Indicator": []}
+    months = []
+
+    for name, code in indicators.items():
+        url = (
+            f"{FRED_API_BASE}?series_id={code}&api_key={FRED_API_KEY}"
+            f"&file_type=json&observation_start={start_date}&observation_end={end_date}"
+        )
+        try:
+            r = requests.get(url, timeout=10)
+            observations = r.json().get("observations", [])
+            monthly_values = {}
+            for obs in observations:
+                date = obs["date"][:7]  # YYYY-MM
+                monthly_values[date] = float(obs["value"]) if obs["value"] != "." else None
+
+            if not months:
+                months = sorted(list(monthly_values.keys())[-6:])  # 최근 6개월
+                for m in months:
+                    data[m] = []
+
+            data["Indicator"].append(name)
+            for m in months:
+                data[m].append(monthly_values.get(m, None))
+
+        except Exception as e:
+            print(f"❌ {name} 로드 실패: {e}")
+
+    df = pd.DataFrame(data)
+    return df
 
 def get_monthly_economic_indicators_html():
     """
