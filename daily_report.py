@@ -189,7 +189,7 @@ def get_portfolio_indicators_html():
         # --- 기술적 지표 ---
         rsi, macd = get_rsi_macd_values(t)
 
-        # RSI
+        # RSI 색깔 강조
         if rsi is not None:
             if rsi > 70:
                 rsi_val = f"🔴 {rsi:.2f} (과매수)"
@@ -200,7 +200,7 @@ def get_portfolio_indicators_html():
         else:
             rsi_val = "N/A"
 
-        # MACD
+        # MACD 색깔 강조
         if macd is not None:
             if macd > 0:
                 macd_val = f"🔴 {macd:.2f} (상승)"
@@ -237,11 +237,23 @@ def get_portfolio_indicators_html():
             print(f"❌ {t_upper} 부채비율 계산 실패: {e}")
         debt_val = f"{debt_ratio:.2f}%" if debt_ratio is not None else "N/A"
 
+        # --- 변동성(β)에 따른 손절 조정 ---
+        beta = yinfo.get("beta")
+        if beta:
+            if beta < 0.8:
+                stop_loss_val = 0.95  # -5%
+            elif beta <= 1.2:
+                stop_loss_val = 0.93  # -7%
+            else:
+                stop_loss_val = 0.90  # -10%
+        else:
+            stop_loss_val = 0.93  # 기본값 -7%
+
         # --- 매도/손절 가격 계산 ---
         avg_price = info.get("avg_price", 0)
         sell_1 = f"${avg_price*1.05:.2f}" if avg_price else "N/A"
         sell_2 = f"${avg_price*1.15:.2f}" if avg_price else "N/A"
-        stop_loss = f"${avg_price*0.93:.2f}" if avg_price else "N/A"
+        stop_loss = f"${avg_price*stop_loss_val:.2f}" if avg_price else "N/A"
 
         # --- GPT 매매 전략 ---
         strategy_prompt = (
@@ -452,17 +464,46 @@ def fetch_economic_indicators():
 
 def get_monthly_economic_indicators_html():
     """
-    📊 주요 경제지표 월별 변화를 HTML 표로 반환
+    📊 주요 경제지표 월별 변화를 HTML 표 + 설명 + GPT 요약으로 반환
     """
     try:
         df = fetch_economic_indicators()
         if df.empty:
             return "<p style='color:red;'>⚠️ 경제지표 데이터를 불러오지 못했습니다. (API 키/범위 확인 필요)</p>"
 
+        explanations = {
+            "소비자물가지수(CPI)": "소비자가 지불하는 물가 수준, 인플레이션의 핵심 지표.",
+            "실업률": "경제 내 고용 상황을 나타내는 지표, 낮을수록 고용 시장이 양호.",
+            "GDP 성장률": "국내총생산의 성장률, 경제 전반의 성장 속도를 보여줌.",
+            "개인소비지출(PCE)": "소비자의 지출을 측정, 연준이 선호하는 인플레이션 지표.",
+            "연방기금금리": "미국 기준금리, 금융시장과 경기 전반에 직접 영향.",
+            "신규실업수당청구": "실업급여 신규 신청 건수, 경기 둔화 여부를 조기 반영."
+        }
+
+        # 표 HTML
+        table_html = df.to_html(index=False, justify="center", border=1, na_rep='-')
+
+        # 기본 설명
+        explanation_html = "<ul>"
+        for indicator, desc in explanations.items():
+            explanation_html += f"<li><b>{indicator}</b>: {desc}</li>"
+        explanation_html += "</ul>"
+
+        # GPT 자동 요약 (투자 관점 해석)
+        gpt_summary = gpt_chat(
+            "다음은 최근 6개월간 주요 미국 경제지표(CPI, 실업률, GDP, PCE, 금리, 신규실업수당청구) 데이터입니다.\n"
+            "각 지표가 투자자에게 어떤 의미를 가지는지, 그리고 향후 시장에 미칠 영향을 한국어로 5줄 이내로 요약해줘."
+        )
+        gpt_html = "".join([f"<p>{line}</p>" for line in gpt_summary.splitlines() if line.strip()])
+
         return f"""
         <div style='background:#f9f9f9;padding:10px;border-radius:8px;overflow-x:auto;'>
             <h4>📊 주요 경제지표 (최근 6개월)</h4>
-            {df.to_html(index=False, justify="center", border=1, na_rep='-')}
+            {table_html}
+            <h5>ℹ️ 지표 설명</h5>
+            {explanation_html}
+            <h5>💡 투자자 관점 요약</h5>
+            {gpt_html}
         </div>
         """
     except Exception as e:
