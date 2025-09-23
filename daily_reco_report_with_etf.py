@@ -397,7 +397,7 @@ def main():
     df_news, df_time_stock, df_time_etf, df_fund_stock = build_report()
 
     sections = []
-    sections.append("<h2 style='text-align:center'>📌 Daily Recommendation Report (Stocks & ETFs) - {}</h2>".format(REPORT_DATE))
+    sections.append("<h2 style='text-align:center'>📌 오늘의 추천 종목 (Stocks & ETFs) - {}</h2>".format(REPORT_DATE))
     sections.append("<p style='text-align:center;color:#666'>분리: STOCK vs ETF ｜ 카테고리 라벨 ｜ 모든 수치 소수점 2자리</p>")
     sections.append("<hr>")
 
