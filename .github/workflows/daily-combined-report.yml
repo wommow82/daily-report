@@ -2,8 +2,6 @@
 name: Daily Combined Reports
 
 on:
-  schedule:
-    - cron: '0 11 * * *'   # 매일 오전 11시 UTC 실행 (한국 20시, 캘거리 05시)
   workflow_dispatch:        # 수동 실행 가능
 
 jobs:
