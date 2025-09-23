@@ -38,8 +38,9 @@ portfolio = {
     "PLTR": {"shares": 10, "avg_price": 151.60},
     "SCHD": {"shares": 2140, "avg_price": 24.3777},
     "TSLA": {"shares": 10, "avg_price": 320.745},
+    "CRCL": {"shares": 20, "avg_price": 137.32},
 }
-CASH_BALANCE = 16684.93
+CASH_BALANCE = 13925.60
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 NEWS_API_KEY = os.getenv("NEWS_API_KEY")
