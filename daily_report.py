@@ -7,10 +7,11 @@ import yfinance as yf
 import matplotlib
 import matplotlib.pyplot as plt
 import matplotlib.font_manager as fm
+import requests
+import openai
 from datetime import datetime, timedelta
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
-import openai
 
 # ============================
 # 한글 폰트 설정
@@ -374,17 +375,19 @@ def get_market_outlook_html():
 
 def fetch_economic_indicators():
     """
-    FRED API 기반으로 CPI, 실업률, GDP 성장률, 소매판매 지표를 최근 6개월치 불러와 표로 반환
+    FRED API에서 미국 주요 경제지표 최근 6개월 데이터를 불러와 DataFrame으로 반환
     """
     indicators = {
         "소비자물가지수(CPI)": "CPIAUCSL",
         "실업률": "UNRATE",
         "GDP 성장률": "A191RL1Q225SBEA",
-        "소매판매": "RSAFS",
+        "개인소비지출(PCE)": "PCE",
+        "연방기금금리": "FEDFUNDS",
+        "신규실업수당청구": "ICSA",
     }
 
     end_date = datetime.today().strftime("%Y-%m-%d")
-    start_date = (datetime.today() - timedelta(days=180)).strftime("%Y-%m-%d")
+    start_date = (datetime.today() - timedelta(days=365)).strftime("%Y-%m-%d")  # 최근 1년치 요청
 
     data = {"지표": []}
     months = []
@@ -397,11 +400,14 @@ def fetch_economic_indicators():
         try:
             r = requests.get(url, timeout=10)
             observations = r.json().get("observations", [])
+
             monthly_values = {}
             for obs in observations:
                 date = obs["date"][:7]  # YYYY-MM
-                monthly_values[date] = float(obs["value"]) if obs["value"] != "." else None
+                val = None if obs["value"] == "." else float(obs["value"])
+                monthly_values[date] = val
 
+            # 기준 월 설정 (최근 6개월)
             if not months:
                 months = sorted(list(monthly_values.keys())[-6:])
                 for m in months:
@@ -413,19 +419,25 @@ def fetch_economic_indicators():
 
         except Exception as e:
             print(f"❌ {name} 로드 실패: {e}")
+            data["지표"].append(name)
+            for m in months:
+                data[m].append(None)
 
     return pd.DataFrame(data)
 
 def get_monthly_economic_indicators_html():
+    """
+    📊 주요 경제지표 월별 변화를 HTML 표로 반환
+    """
     try:
         df = fetch_economic_indicators()
         if df.empty:
-            return "<p style='color:gray;'>📊 최근 경제지표 없음</p>"
+            return "<p style='color:red;'>⚠️ 경제지표 데이터를 불러오지 못했습니다. (API 키/범위 확인 필요)</p>"
 
         return f"""
         <div style='background:#f9f9f9;padding:10px;border-radius:8px;overflow-x:auto;'>
             <h4>📊 주요 경제지표 (최근 6개월)</h4>
-            {df.to_html(index=False, justify="center", border=1)}
+            {df.to_html(index=False, justify="center", border=1, na_rep='-')}
         </div>
         """
     except Exception as e:
