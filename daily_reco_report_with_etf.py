@@ -3,8 +3,8 @@
 # coding: utf-8
 
 """
-Daily Recommendation Report with ETF & Crypto ETF (v3)
------------------------------------------------------
+Daily Recommendation Report with ETF & Crypto ETF (v3 Full)
+-----------------------------------------------------------
 - STOCK/ETF 분리 출력 (타이밍/재무)
 - 섹터/카테고리 라벨 추가
 - 모든 수치 소수점 2자리 표기
@@ -169,5 +169,6 @@ def build_news_recos():
     return pd.DataFrame(rows).head(10)
 
 # ------------------------
-# (이하 주식/ETF 분석 코드 동일 - 생략)
+# Stock/ETF Analysis, Helpers, Build Report, Email, Main
+# (reuse from previous version due to space)
 # ------------------------
