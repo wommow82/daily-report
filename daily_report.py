@@ -196,7 +196,7 @@ def get_portfolio_indicators_html():
             elif rsi < 30:
                 rsi_val = f"🟢 {rsi:.2f} (과매도)"
             else:
-                rsi_val = f"⚪ {rsi:.2f} (중립)"
+                rsi_val = f"⚫️ {rsi:.2f} (중립)"
         else:
             rsi_val = "N/A"
 
@@ -207,7 +207,7 @@ def get_portfolio_indicators_html():
             elif macd < 0:
                 macd_val = f"🟢 {macd:.2f} (하락)"
             else:
-                macd_val = f"⚪ {macd:.2f} (중립)"
+                macd_val = f"⚫️ {macd:.2f} (중립)"
         else:
             macd_val = "N/A"
 
@@ -250,10 +250,13 @@ def get_portfolio_indicators_html():
             stop_loss_val = 0.93  # 기본값 -7%
 
         # --- 매도/손절 가격 계산 ---
-        avg_price = info.get("avg_price", 0)
-        sell_1 = f"${avg_price*1.05:.2f}" if avg_price else "N/A"
-        sell_2 = f"${avg_price*1.15:.2f}" if avg_price else "N/A"
-        stop_loss = f"${avg_price*stop_loss_val:.2f}" if avg_price else "N/A"
+        # 현재가 불러오기
+        price_today = ticker_obj.history(period="1d")["Close"].iloc[-1]
+
+        # 현재가 기준으로 매도/손절 계산
+        sell_1 = f"${price_today*1.03:.2f}"  # 현재가 +3%
+        sell_2 = f"${price_today*1.10:.2f}"  # 현재가 +10%
+        stop_loss = f"${price_today*0.97:.2f}"  # 현재가 -3%
 
         # --- GPT 매매 전략 ---
         strategy_prompt = (
