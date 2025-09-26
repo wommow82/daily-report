@@ -1,24 +1,7 @@
-
 #!/usr/bin/env python3
 # coding: utf-8
 
-"""
-Daily Recommendation Report with ETF & Crypto ETF (v4 Full)
------------------------------------------------------------
-- STOCK/ETF 분리 출력 (타이밍/재무)
-- 섹터/카테고리 라벨 추가
-- 모든 수치 소수점 2자리 표기
-- 최근 7일 뉴스 기반 추천 섹션(종목 | 짧은 설명)
-- 이메일 발송 (SMTP) - 제목: "📊 주식·ETF 추천 리포트 - YYYY-MM-DD"
-
-환경 변수(Secrets):
-- EMAIL_SENDER, EMAIL_PASSWORD, EMAIL_RECEIVER (필수: 앱 비밀번호)
-- NEWS_API_KEY (선택: 뉴스 기반 추천 활성화)
-- UNIVERSE_TICKERS (선택: 콤마 구분 사용자 유니버스)
-- SMTP_HOST, SMTP_PORT (선택, 기본 gmail 587)
-"""
-
-import os, smtplib, html
+import os, smtplib, html, math
 import pandas as pd
 import yfinance as yf
 import requests
@@ -26,9 +9,16 @@ from datetime import datetime, timedelta
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 
-# ------------------------
-# Config
-# ------------------------
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY","")
+try:
+    if OPENAI_API_KEY:
+        from openai import OpenAI
+        _openai_client = OpenAI(api_key=OPENAI_API_KEY)
+    else:
+        _openai_client = None
+except Exception:
+    _openai_client = None
+
 NEWS_API_KEY   = os.getenv("NEWS_API_KEY", "")
 EMAIL_SENDER   = os.getenv("EMAIL_SENDER", "")
 EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD", "")
@@ -37,17 +27,21 @@ SMTP_HOST      = os.getenv("SMTP_HOST", "smtp.gmail.com")
 SMTP_PORT      = int(os.getenv("SMTP_PORT", "587"))
 REPORT_DATE    = datetime.now().strftime("%Y-%m-%d")
 
-# ------------------------
-# Universe & Classification
-# ------------------------
-DEFAULT_STOCKS = ["AAPL","MSFT","GOOGL","AMZN","NVDA","META","TSLA","JPM","V","MA",
-    "UNH","HD","PG","XOM","CVX","LLY","JNJ","MRK","KO","PEP","DIS","INTC","AMD","QCOM","AVGO",
-    "TXN","IBM","ORCL","ADBE","CRM","NOW","PFE","BMY","ABT","TMO","DHR","ISRG","GE","CAT","DE",
-    "NKE","WMT","COST","BAC","GS","MS","WFC","C","NFLX","SHOP","PYPL","NEE","DUK","SO",
-    "LMT","RTX","NOC","BA","GD"]
-DEFAULT_ETFS = ["SPY","VOO","IVV","VTI","QQQ","DIA","IWM","XLK","XLF","XLE","XLV","XLY","XLP","XLU",
-    "XLI","XLB","XLRE","XLC","ARKK","ARKW","SMH","SOXX","IBB","TAN","HACK","CIBR"]
+DEFAULT_STOCKS = [
+    "AAPL","MSFT","GOOGL","AMZN","NVDA","META","TSLA","JPM","V","MA","UNH","HD","PG","XOM","CVX",
+    "LLY","JNJ","MRK","KO","PEP","DIS","INTC","AMD","QCOM","AVGO","TXN","IBM","ORCL","ADBE","CRM",
+    "NOW","PFE","BMY","ABT","TMO","DHR","ISRG","GE","CAT","DE","NKE","WMT","COST","BAC","GS","MS",
+    "WFC","C","NFLX","SHOP","PYPL","NEE","DUK","SO","LMT","RTX","NOC","BA","GD"
+]
+DEFAULT_ETFS = [
+    "SPY","VOO","IVV","VTI","QQQ","DIA","IWM",
+    "XLK","XLF","XLE","XLV","XLY","XLP","XLU","XLI","XLB","XLRE","XLC",
+    "ARKK","ARKW","SMH","SOXX","IBB","TAN","HACK","CIBR"
+]
 CRYPTO_ETFS = ["BITO","IBIT","FBTC","ARKB","BRRR","EETH","ETHE"]
+
+UNIVERSE = [t.strip().upper() for t in os.getenv("UNIVERSE_TICKERS","").split(",") if t.strip()] \
+            or DEFAULT_STOCKS + DEFAULT_ETFS + CRYPTO_ETFS
 
 ETF_GROUPS = {
     "Broad Market": {"SPY","VOO","IVV","VTI","QQQ","DIA","IWM"},
@@ -56,8 +50,9 @@ ETF_GROUPS = {
     "Crypto ETF": set(CRYPTO_ETFS),
 }
 
-UNIVERSE = [t.strip().upper() for t in os.getenv("UNIVERSE_TICKERS","").split(",") if t.strip()] \
-            or DEFAULT_STOCKS + DEFAULT_ETFS + CRYPTO_ETFS
+DOW30 = {"AAPL","MSFT","AMZN","GS","JPM","V","MA","NKE","DIS","IBM","INTC","CAT","BA","HD","WMT","UNH","CVX","JNJ","KO","PG","MCD","TRV","MRK","AXP","CSCO","CRM","VZ","WBA","MMM","DOW"}
+NASDAQ100_SAMPLE = {"AAPL","MSFT","GOOGL","AMZN","NVDA","META","TSLA","PEP","COST","NFLX","AVGO","ADBE","CSCO","AMD","INTC","QCOM","AMAT","PYPL","BKNG","MRVL","GILD","CHTR","VRTX","REGN","LRCX","MU","ADI","ABNB","MELI","PANW","FTNT"}
+SP500_SAMPLE = set(DEFAULT_STOCKS)
 
 def is_etf(ticker: str) -> bool:
     return ticker in (DEFAULT_ETFS + CRYPTO_ETFS)
@@ -99,84 +94,96 @@ def classify_etf_group(ticker: str) -> str:
         return "Crypto ETF"
     return "ETF"
 
-# ------------------------
-# News-based Recommendation (7 days, short reasons)
-# ------------------------
-TOPIC_REASON_MAP = {
-    "White House policy": "백악관 정책 뉴스 → 정치 불확실성 관련 종목 주목",
-    "President remarks": "대통령 발언 관련 → 정책 수혜 기대 종목 주목",
-    "executive order": "행정명령 발동 → 빅테크/방위산업 관련 수혜 가능",
-    "tariffs": "관세 관련 뉴스 → 제조업/수출주 영향",
-    "defense budget": "국방 예산 확대 → 방위산업주(LMT, RTX, NOC 등) 수혜",
-    "NATO": "NATO 이슈 → 국방주, 방위산업주 주목",
-    "healthcare policy": "헬스케어 정책 변화 → 제약/보험주 영향",
-    "drug pricing": "약가 규제 뉴스 → 제약/바이오주 관심",
-    "energy policy": "에너지 정책 발표 → 정유/에너지주 수혜",
-    "OPEC": "OPEC 관련 뉴스 → 원유·에너지 섹터 영향",
-    "semiconductor subsidies": "반도체 보조금 정책 → NVDA/AMD/SMH 수혜",
-    "CHIPS Act": "CHIPS Act → 미국 반도체 산업 수혜 기대",
-    "AI regulation": "AI 규제 논의 → Big Tech (MSFT, GOOGL, META) 주목",
-    "crypto ETF flows": "비트코인 ETF 자금 유입 → Crypto ETF 강세 기대",
-    "bitcoin inflows": "BTC 자금 유입 증가 → 비트코인 ETF 관심",
-    "ethereum ETF": "이더리움 ETF 이슈 → ETH ETF 강세 가능성",
+TOPIC_QUERIES = [
+    "White House policy","President remarks","executive order","tariffs","defense budget","NATO",
+    "healthcare policy","drug pricing","energy policy","OPEC","semiconductor subsidies","CHIPS Act",
+    "AI regulation","crypto ETF flows","bitcoin inflows","ethereum ETF"
+]
+
+KEYWORD_TO_TICKERS = {
+    "defense": ["LMT","RTX","NOC","GD","BA"],
+    "pentagon": ["LMT","RTX","NOC","GD","BA"],
+    "semiconductor": ["NVDA","AMD","QCOM","INTC","AVGO","TXN","SMH","SOXX"],
+    "chip": ["NVDA","AMD","QCOM","INTC","AVGO","TXN","SMH","SOXX"],
+    "tariff": ["AAPL","CAT","DE","GM","F"],
+    "drug": ["LLY","PFE","MRK","BMY","JNJ","IBB"],
+    "medicare": ["UNH","CI","HUM","CVS"],
+    "energy": ["XOM","CVX","COP","XLE"],
+    "opec": ["XOM","CVX","COP","XLE"],
+    "ai": ["NVDA","MSFT","GOOGL","META","ADBE","CRM","NOW","ARKK"],
+    "executive order": ["NVDA","MSFT","GOOGL","META","LMT","RTX"],
+    "crypto": ["IBIT","FBTC","ARKB","BITO","BRRR","EETH","ETHE"],
+    "bitcoin": ["IBIT","FBTC","ARKB","BITO","BRRR"],
+    "ethereum": ["EETH","ETHE"]
 }
 
-def fetch_news(query, from_days=7, page_size=30):
-    if not NEWS_API_KEY:
+def fetch_news(query, from_days=7, page_size=25):
+    api = NEWS_API_KEY
+    if not api:
         return []
     try:
         from_date = (datetime.utcnow() - timedelta(days=from_days)).strftime("%Y-%m-%dT%H:%M:%SZ")
         url = "https://newsapi.org/v2/everything"
         params = {"q": query, "from": from_date, "sortBy": "publishedAt", "language": "en",
-                  "pageSize": page_size, "apiKey": NEWS_API_KEY}
+                  "pageSize": page_size, "apiKey": api}
         r = requests.get(url, params=params, timeout=12)
         data = r.json()
         return data.get("articles", [])
     except Exception:
         return []
 
-def build_news_recos():
-    topics = list(TOPIC_REASON_MAP.keys())
-    keyword_map = {
-        "defense": ["LMT","RTX","NOC","GD","BA"],
-        "semiconductor": ["NVDA","AMD","QCOM","INTC","AVGO","TXN","SMH","SOXX"],
-        "chip": ["NVDA","AMD","QCOM","INTC","AVGO","TXN","SMH","SOXX"],
-        "tariff": ["AAPL","CAT","DE","GM","F"],
-        "drug": ["LLY","PFE","MRK","BMY","JNJ","IBB"],
-        "medicare": ["UNH","CI","HUM","CVS"],
-        "energy": ["XOM","CVX","COP","XLE"],
-        "opec": ["XOM","CVX","COP","XLE"],
-        "ai": ["NVDA","MSFT","GOOGL","META","ADBE","CRM","NOW","ARKK"],
-        "executive order": ["NVDA","MSFT","GOOGL","META","LMT","RTX"],
-        "crypto": ["IBIT","FBTC","ARKB","BITO","BRRR","EETH","ETHE"],
-        "bitcoin": ["IBIT","FBTC","ARKB","BITO","BRRR"],
-        "ethereum": ["EETH","ETHE"]
-    }
+def gpt_summarize_reason(ticker, snippets):
+    if not OPENAI_API_KEY or not snippets:
+        return f"{ticker}: 최근 7일 정책/섹터 뉴스 이슈로 관심."
+    try:
+        from openai import OpenAI
+        client = OpenAI(api_key=OPENAI_API_KEY)
+        prompt = (
+            "당신은 투자 애널리스트입니다. 아래 헤드라인/요약을 바탕으로 "
+            f"티커 {ticker}에 대한 투자 관점 한글 요약을 1~2문장으로 작성하세요. "
+            "핵심 트리거와 기대/리스크를 간결하게. 과도한 확정적 표현 금지.\n\n- "
+            + "\n- ".join(snippets[:6])
+        )
+        resp = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[{"role":"user","content":prompt}],
+            temperature=0.3,
+            max_tokens=120
+        )
+        return resp.choices[0].message.content.strip()
+    except Exception:
+        return f"{ticker}: 최근 7일 관련 뉴스 모니터링 결과 관심 증가."
 
+def build_news_recos():
     articles = []
-    for q in topics:
-        arts = fetch_news(q, from_days=7, page_size=30)
+    for q in TOPIC_QUERIES:
+        arts = fetch_news(q, from_days=7, page_size=25)
         for a in arts:
             a["_topic"] = q
         articles.extend(arts)
 
-    scores, reasons = {}, {}
+    scores, buckets = {}, {}
     for a in articles:
-        content = ((a.get("title") or "") + " " + (a.get("description") or "")).lower()
-        topic = a.get("_topic","")
-        for key, tickers in keyword_map.items():
+        title = a.get("title") or ""
+        desc  = a.get("description") or ""
+        content = (title + " " + desc).lower()
+        snippet = title if title else desc
+        for key, tickers in KEYWORD_TO_TICKERS.items():
             if key in content:
                 for t in tickers:
                     scores[t] = scores.get(t, 0.0) + 1.0
-                    if t not in reasons:
-                        reasons[t] = TOPIC_REASON_MAP.get(topic, f"{topic} 관련 뉴스")
+                    buckets.setdefault(t, []).append(snippet)
 
-    rows = [{"종목":k, "설명":reasons.get(k,"")} for k,v in sorted(scores.items(), key=lambda x: x[1], reverse=True)]
-    return pd.DataFrame(rows).head(10)
+    if not scores:
+        return pd.DataFrame(columns=["종목","설명"])
 
-# ------------------------
-# Stock/ETF Analysis
-# ------------------------
+    ranked = sorted(scores.items(), key=lambda x: x[1], reverse=True)[:10]
+    rows = []
+    for t,_ in ranked:
+        reason = gpt_summarize_reason(t, buckets.get(t, []) )
+        rows.append({"종목": t, "설명": html.escape(reason)})
+    return pd.DataFrame(rows)
+
 def fetch_prices(ticker, period="1y", interval="1d"):
     try:
         df = yf.Ticker(ticker).history(period=period, interval=interval)
@@ -195,9 +202,7 @@ def compute_technicals(df):
     delta = close.diff()
     gain = delta.where(delta>0,0)
     loss = -delta.where(delta<0,0)
-    avg_gain = gain.rolling(14).mean()
-    avg_loss = loss.rolling(14).mean()
-    rs = avg_gain / avg_loss
+    rs = (gain.rolling(14).mean()) / (loss.rolling(14).mean())
     rsi = 100 - (100/(1+rs))
     out["RSI14"] = float(rsi.dropna().iloc[-1]) if rsi.dropna().size else None
     ema12 = close.ewm(span=12, adjust=False).mean()
@@ -208,12 +213,18 @@ def compute_technicals(df):
     out["MACD_Hist"] = float(hist.dropna().iloc[-1]) if hist.dropna().size else None
     out["High52w"] = float(close.max())
     out["Low52w"]  = float(close.min())
+    last7 = close.tail(7)
+    if len(last7) >= 3:
+        change = (last7.iloc[-1] - last7.iloc[0]) / last7.iloc[0]
+        out["Trend7d"] = "▲" if change > 0.02 else ("▼" if change < -0.02 else "▬")
+    else:
+        out["Trend7d"] = "▬"
     return out
 
 def timing_score(tech):
     if not tech: return 0.0
-    p,s50,s200,rsi,macdh,h52 = tech.get("Price"), tech.get("SMA50"), tech.get("SMA200"), tech.get("RSI14"), tech.get("MACD_Hist"), tech.get("High52w")
-    if None in (p,s50,s200,rsi,macdh,h52): return 0.0
+    p,s50,s200,rsi,macdh,h52,l52 = tech.get("Price"), tech.get("SMA50"), tech.get("SMA200"), tech.get("RSI14"), tech.get("MACD_Hist"), tech.get("High52w"), tech.get("Low52w")
+    if None in (p,s50,s200,rsi,macdh,h52,l52): return 0.0
     score = 0.0
     if p > s200: score += 1
     if p > s50:  score += 1
@@ -227,124 +238,112 @@ def fetch_fundamentals(ticker):
     try:
         y = yf.Ticker(ticker)
         i = y.info or {}
-        per = i.get("trailingPE") or i.get("forwardPE")
-        pbr = i.get("priceToBook")
-        roe = i.get("returnOnEquity")
-        eps = i.get("trailingEps") or i.get("forwardEps")
-        info.update({
-            "PER": float(per) if per is not None else None,
-            "PBR": float(pbr) if pbr is not None else None,
-            "ROE": float(roe) if roe is not None else None,
-            "EPS": float(eps) if eps is not None else None,
-        })
-        sector = i.get("sector") or ""
-        industry = i.get("industry") or ""
-        info["Sector"] = sector
-        info["Industry"] = industry
+        info["Sector"] = i.get("sector") or ""
+        info["Industry"] = i.get("industry") or ""
     except Exception:
         pass
     return info
 
-def fundamental_pass(f):
-    if not f: return False
-    conditions = [
-        (f.get("PER") is not None and 5 <= f["PER"] <= 40),
-        (f.get("PBR") is not None and f["PBR"] < 10),
-        (f.get("ROE") is not None and f["ROE"] > 0.08),
-        (f.get("EPS") is not None and f["EPS"] > 0),
-    ]
-    return all(conditions)
-
-# ------------------------
-# Helpers
-# ------------------------
-def format_two_decimals(df: pd.DataFrame) -> pd.DataFrame:
-    if df is None or df.empty:
+def near_bottom_candidates(universe):
+    rows = []
+    for t in universe:
+        if is_etf(t):
+            continue
+        df = fetch_prices(t, "1y", "1d")
+        tech = compute_technicals(df)
+        if not tech:
+            continue
+        price, low = tech.get("Price"), tech.get("Low52w")
+        if not price or not low or low <= 0:
+            continue
+        dist = (price - low) / low
+        if dist <= 0.03 or (dist <= 0.06 and tech.get("Trend7d") == "▼"):
+            info = fetch_fundamentals(t)
+            cat = classify_stock_category(info.get("Sector"), info.get("Industry"), t)
+            idx_tag = []
+            if t in DOW30: idx_tag.append("DOW30")
+            if t in NASDAQ100_SAMPLE: idx_tag.append("NASDAQ100")
+            if t in SP500_SAMPLE: idx_tag.append("S&P500")
+            if not idx_tag:
+                continue
+            rows.append({
+                "Ticker": t,
+                "Index": ",".join(idx_tag),
+                "Category": cat,
+                "Price": tech.get("Price"),
+                "Low52w": tech.get("Low52w"),
+                "DistFromLow(%)": dist*100.0,
+                "Trend7d": tech.get("Trend7d")
+            })
+    df = pd.DataFrame(rows)
+    if df.empty:
         return df
-    df = df.copy()
-    for col in df.columns:
-        if pd.api.types.is_numeric_dtype(df[col]):
-            df[col] = df[col].apply(lambda x: f"{x:.2f}" if pd.notna(x) else "")
+    df = df.sort_values(["DistFromLow(%)","Price"], ascending=[True,True]).head(40)
+    for col in ["Price","Low52w","DistFromLow(%)"]:
+        if col in df.columns:
+            df[col] = df[col].apply(lambda x: f"{x:.2f}")
+    df["Ticker"] = df["Ticker"].apply(lambda t: f"<b>{html.escape(t)}</b>")
     return df
 
-def to_html_table(df, title):
-    if df is None or df.empty:
-        return f"<h3>{title}</h3><p style='color:gray;'>조건 충족 없음</p>"
-    styled = df.copy()
-    html_table = styled.to_html(index=False, escape=False, border=1, justify="center")
-    return f"<h3>{title}</h3><div style='overflow:auto'>{html_table}</div>"
-
-def bold_ticker(t):
-    return f"<b>{html.escape(str(t))}</b>"
-
-# ------------------------
-# Build Report
-# ------------------------
 def build_report():
     timing_rows_stock, timing_rows_etf = [], []
-    fund_rows_stock = []
-
     for t in UNIVERSE:
-        tech = compute_technicals(fetch_prices(t, "1y", "1d"))
+        df = fetch_prices(t, "1y", "1d")
+        tech = compute_technicals(df)
+        if not tech: continue
         base = {"Ticker": t, **tech}
-        f = fetch_fundamentals(t)
-        ts = timing_score(tech)
-
+        finfo = fetch_fundamentals(t)
         if is_etf(t):
             base["Group"] = classify_etf_group(t)
         else:
-            base["Category"] = classify_stock_category(f.get("Sector"), f.get("Industry"), t)
-
+            base["Category"] = classify_stock_category(finfo.get("Sector"), finfo.get("Industry"), t)
+        ts = timing_score(tech)
         if ts >= 4:
-            base_ts = {**base, "TimingScore": ts}
+            base["TimingScore"] = ts
             if is_etf(t):
-                timing_rows_etf.append(base_ts)
+                timing_rows_etf.append(base)
             else:
-                timing_rows_stock.append(base_ts)
+                timing_rows_stock.append(base)
 
-        if (not is_etf(t)) and fundamental_pass(f):
-            fund_rows_stock.append({
-                "Ticker": t,
-                "Category": classify_stock_category(f.get("Sector"), f.get("Industry"), t),
-                "PER": f.get("PER"),
-                "PBR": f.get("PBR"),
-                "ROE": f.get("ROE"),
-                "EPS": f.get("EPS"),
-            })
-
-    df_time_stock = pd.DataFrame(timing_rows_stock).sort_values(["TimingScore","Price"], ascending=[False,False]) if timing_rows_stock else pd.DataFrame()
-    df_time_etf   = pd.DataFrame(timing_rows_etf).sort_values(["TimingScore","Price"], ascending=[False,False]) if timing_rows_etf else pd.DataFrame()
-    df_fund_stock = pd.DataFrame(fund_rows_stock).sort_values(["ROE","PER"], ascending=[False,True]) if fund_rows_stock else pd.DataFrame()
+    df_time_stock = pd.DataFrame(timing_rows_stock)
+    df_time_etf   = pd.DataFrame(timing_rows_etf)
 
     def reorder(cols, df):
         return df[[c for c in cols if c in df.columns]] if not df.empty else df
 
-    df_time_stock = reorder(["Ticker","Category","Price","SMA50","SMA200","RSI14","MACD_Hist","High52w","TimingScore"], df_time_stock)
-    df_time_etf   = reorder(["Ticker","Group","Price","SMA50","SMA200","RSI14","MACD_Hist","High52w","TimingScore"], df_time_etf)
-    df_fund_stock = reorder(["Ticker","Category","PER","PBR","ROE","EPS"], df_fund_stock)
+    df_time_stock = reorder(["Ticker","Category","Trend7d","Price","SMA50","SMA200","RSI14","MACD_Hist","High52w","TimingScore"], df_time_stock)
+    df_time_etf   = reorder(["Ticker","Group","Trend7d","Price","SMA50","SMA200","RSI14","MACD_Hist","High52w","TimingScore"], df_time_etf)
 
-    df_time_stock = format_two_decimals(df_time_stock)
-    df_time_etf   = format_two_decimals(df_time_etf)
-    df_fund_stock = format_two_decimals(df_fund_stock)
+    def fmt2(df):
+        if df is None or df.empty: return df
+        df = df.copy()
+        for col in df.columns:
+            if pd.api.types.is_numeric_dtype(df[col]):
+                df[col] = df[col].apply(lambda x: f"{x:.2f}")
+        df["Ticker"] = df["Ticker"].apply(lambda t: f"<b>{html.escape(str(t))}</b>")
+        return df
 
-    for df in [df_time_stock, df_time_etf, df_fund_stock]:
-        if not df.empty and "Ticker" in df.columns:
-            df["Ticker"] = df["Ticker"].apply(bold_ticker)
+    df_time_stock = fmt2(df_time_stock).sort_values(["TimingScore","Price"], ascending=[False,False]).head(40)
+    df_time_etf   = fmt2(df_time_etf).sort_values(["TimingScore","Price"], ascending=[False,False]).head(40)
 
-    # News Recommendations
     df_news = build_news_recos() if NEWS_API_KEY else pd.DataFrame(columns=["종목","설명"])
+    df_bottom = near_bottom_candidates(set(UNIVERSE))
 
-    return df_news, df_time_stock, df_time_etf, df_fund_stock
+    return df_news, df_time_stock, df_time_etf, df_bottom
 
-# ------------------------
-# Email
-# ------------------------
+def to_html_table(df, title):
+    if df is None or df.empty:
+        return f"<h3>{title}</h3><p style='color:gray;'>조건 충족 없음</p>"
+    return f"<h3>{title}</h3>" + df.to_html(index=False, escape=False, border=1, justify='center')
+
 def send_email_html(subject, html_body):
     if not (EMAIL_SENDER and EMAIL_PASSWORD and EMAIL_RECEIVER):
         print("⚠️ 메일 설정 없음 → 메일 전송 생략")
         return
     msg = MIMEMultipart("alternative")
-    msg["Subject"], msg["From"], msg["To"] = subject, EMAIL_SENDER, EMAIL_RECEIVER
+    msg["Subject"] = subject
+    msg["From"] = EMAIL_SENDER
+    msg["To"] = EMAIL_RECEIVER
     msg.attach(MIMEText(html_body, "html"))
     try:
         with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=20) as server:
@@ -353,35 +352,29 @@ def send_email_html(subject, html_body):
             server.sendmail(EMAIL_SENDER, EMAIL_RECEIVER, msg.as_string())
         print("✅ 메일 발송 완료:", EMAIL_RECEIVER)
     except Exception as e:
-        print(f"❌ 메일 전송 실패: {e}")
+        print("❌ 메일 전송 실패:", e)
 
-# ------------------------
-# Main
-# ------------------------
 def main():
-    df_news, df_time_stock, df_time_etf, df_fund_stock = build_report()
+    df_news, df_time_stock, df_time_etf, df_bottom = build_report()
 
     sections = []
-    sections.append("<h2 style='text-align:center'>📌 Daily Recommendation Report (Stocks & ETFs) - {}</h2>".format(REPORT_DATE))
-    sections.append("<p style='text-align:center;color:#666'>분리: STOCK vs ETF ｜ 카테고리 라벨 ｜ 모든 수치 소수점 2자리</p>")
+    sections.append(f"<h2 style='text-align:center'>📌 Daily Recommendation Report - {REPORT_DATE}</h2>")
+    sections.append("<p style='text-align:center;color:#666'>뉴스 요약은 GPT(옵션), 추세 아이콘(▲/▼/▬), TimingScore=5조건 합계</p>")
     sections.append("<hr>")
 
-    # News
-    if df_news is not None and not df_news.empty:
-        news_html = df_news.to_html(index=False, escape=False, border=1, justify="center")
-    else:
-        news_html = "<p style='color:gray;'>최근 7일 뉴스 기반 추천 결과가 없습니다.</p>"
-    sections.append(f"<h3>① 최근 뉴스 기반 추천 (종목 | 짧은 설명)</h3><div style='overflow:auto'>{news_html}</div>")
+    news_html = df_news.to_html(index=False, escape=False, border=1, justify='center') if not df_news.empty else "<p style='color:gray;'>최근 7일 뉴스 기반 추천 없음</p>"
+    sections.append(f"<h3>① 최근 뉴스 기반 추천 (종목 | 설명)</h3>{news_html}")
 
-    # Timing
-    sections.append("<br>")
-    sections.append(to_html_table(df_time_stock.head(40), "② 매수 타이밍 양호 - STOCK"))
-    sections.append(to_html_table(df_time_etf.head(40), "③ 매수 타이밍 양호 - ETF"))
+    sections.append(to_html_table(df_time_stock, "② 매수 타이밍 양호 - STOCK"))
+    sections.append(to_html_table(df_time_etf,   "③ 매수 타이밍 양호 - ETF"))
 
-    # Fundamentals
-    sections.append("<br>")
-    sections.append(to_html_table(df_fund_stock.head(40), "④ 재무 우량 - STOCK"))
-    sections.append("<p style='color:#888;'>참고: ETF는 재무 필드가 비어있는 경우가 많아 재무 우량 표에 포함되지 않을 수 있습니다.</p>")
+    sections.append("""
+    <p style='color:#777;font-size:12px'>
+    <b>TimingScore</b> = (1) Price>SMA200, (2) Price>SMA50, (3) RSI 35~60, (4) MACD 히스토그램>0, (5) 52주 고가의 85% 이상. 합계 0~5.
+    </p>
+    """)
+
+    sections.append(to_html_table(df_bottom, "④ 지수 구성종목 중 52주 저점 인근 후보 (NASDAQ/S&P500/DOW 교집합)"))
 
     html_doc = f"""
     <html><head>
@@ -404,7 +397,6 @@ def main():
         f.write(html_doc)
     print("📄 Report saved:", html_path)
 
-    # 🔔 Korean subject with emoji
     send_email_html(f"📊 주식·ETF 추천 리포트 - {REPORT_DATE}", html_doc)
 
 if __name__ == "__main__":
