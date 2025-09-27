@@ -216,9 +216,9 @@ def compute_technicals(df):
     last7 = close.tail(7)
     if len(last7) >= 3:
         change = (last7.iloc[-1] - last7.iloc[0]) / last7.iloc[0]
-        out["Trend7d"] = "▲" if change > 0.02 else ("▼" if change < -0.02 else "▬")
+        out["Trend30d"] = "▲" if change > 0.02 else ("▼" if change < -0.02 else "▬")
     else:
-        out["Trend7d"] = "▬"
+        out["Trend30d"] = "▬"
     return out
 
 def timing_score(tech):
@@ -257,7 +257,7 @@ def near_bottom_candidates(universe):
         if not price or not low or low <= 0:
             continue
         dist = (price - low) / low
-        if dist <= 0.03 or (dist <= 0.06 and tech.get("Trend7d") == "▼"):
+        if dist <= 0.03 or (dist <= 0.06 and tech.get("Trend30d") == "▼"):
             info = fetch_fundamentals(t)
             cat = classify_stock_category(info.get("Sector"), info.get("Industry"), t)
             idx_tag = []
@@ -273,7 +273,7 @@ def near_bottom_candidates(universe):
                 "Price": tech.get("Price"),
                 "Low52w": tech.get("Low52w"),
                 "DistFromLow(%)": dist*100.0,
-                "Trend7d": tech.get("Trend7d")
+                "Trend30d": tech.get("Trend30d")
             })
     df = pd.DataFrame(rows)
     if df.empty:
@@ -311,8 +311,8 @@ def build_report():
     def reorder(cols, df):
         return df[[c for c in cols if c in df.columns]] if not df.empty else df
 
-    df_time_stock = reorder(["Ticker","Category","Trend7d","Price","SMA50","SMA200","RSI14","MACD_Hist","High52w","TimingScore"], df_time_stock)
-    df_time_etf   = reorder(["Ticker","Group","Trend7d","Price","SMA50","SMA200","RSI14","MACD_Hist","High52w","TimingScore"], df_time_etf)
+    df_time_stock = reorder(["Ticker","Category","Trend30d","Price","SMA50","SMA200","RSI14","MACD_Hist","High52w","TimingScore"], df_time_stock)
+    df_time_etf   = reorder(["Ticker","Group","Trend30d","Price","SMA50","SMA200","RSI14","MACD_Hist","High52w","TimingScore"], df_time_etf)
 
     def fmt2(df):
         if df is None or df.empty: return df
