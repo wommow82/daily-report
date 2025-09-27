@@ -133,28 +133,51 @@ def fetch_news(query, from_days=7, page_size=25):
         return []
 
 def gpt_summarize_reason(ticker, snippets):
+    """
+    뉴스 스니펫을 기반으로 GPT가 1~2문장 요약과 Sentiment(긍정/부정/중립)를 반환.
+    Sentiment는 아이콘 🟢/🔴/⚫ 으로 변환.
+    """
     if not OPENAI_API_KEY or not snippets:
-        return f"{ticker}: 최근 7일 정책/섹터 뉴스 이슈로 관심."
+        return f"{ticker}: 최근 7일 정책/섹터 뉴스 이슈로 관심.", "⚫"
     try:
         from openai import OpenAI
         client = OpenAI(api_key=OPENAI_API_KEY)
         prompt = (
-            "당신은 투자 애널리스트입니다. 아래 헤드라인/요약을 바탕으로 "
-            f"티커 {ticker}에 대한 투자 관점 한글 요약을 1~2문장으로 작성하세요. "
-            "핵심 트리거와 기대/리스크를 간결하게. 과도한 확정적 표현 금지.\n\n- "
+            "당신은 투자 애널리스트입니다. "
+            f"아래 뉴스 헤드라인을 바탕으로 티커 {ticker}에 대해 "
+            "1~2문장 한국어 요약과 투자심리를 함께 분석하세요.\n\n"
+            "출력 형식:\n"
+            "요약: ...\n"
+            "Sentiment: 긍정/부정/중립\n\n- "
             + "\n- ".join(snippets[:6])
         )
         resp = client.chat.completions.create(
             model="gpt-4o-mini",
-            messages=[{"role":"user","content":prompt}],
+            messages=[{"role": "user", "content": prompt}],
             temperature=0.3,
-            max_tokens=120
+            max_tokens=150
         )
-        return resp.choices[0].message.content.strip()
+        text = resp.choices[0].message.content.strip()
+
+        # 기본값
+        summary, sentiment = text, "중립"
+
+        # 파싱
+        if "Sentiment:" in text:
+            parts = text.split("Sentiment:")
+            summary = parts[0].replace("요약:", "").strip()
+            sentiment = parts[1].strip()
+
+        # 아이콘 변환
+        icon = "🟢" if "긍정" in sentiment else ("🔴" if "부정" in sentiment else "⚫")
+        return summary, icon
     except Exception:
-        return f"{ticker}: 최근 7일 관련 뉴스 모니터링 결과 관심 증가."
+        return f"{ticker}: 최근 7일 관련 뉴스 모니터링 결과 관심 증가.", "⚫"
 
 def build_news_recos():
+    """
+    최근 7일 뉴스 기반 종목 추천 (GPT 요약 + Sentiment 아이콘)
+    """
     articles = []
     for q in TOPIC_QUERIES:
         arts = fetch_news(q, from_days=7, page_size=25)
@@ -165,7 +188,7 @@ def build_news_recos():
     scores, buckets = {}, {}
     for a in articles:
         title = a.get("title") or ""
-        desc  = a.get("description") or ""
+        desc = a.get("description") or ""
         content = (title + " " + desc).lower()
         snippet = title if title else desc
         for key, tickers in KEYWORD_TO_TICKERS.items():
@@ -175,13 +198,18 @@ def build_news_recos():
                     buckets.setdefault(t, []).append(snippet)
 
     if not scores:
-        return pd.DataFrame(columns=["종목","설명"])
+        return pd.DataFrame(columns=["종목", "설명", "분석"])
 
     ranked = sorted(scores.items(), key=lambda x: x[1], reverse=True)[:10]
     rows = []
-    for t,_ in ranked:
-        reason = gpt_summarize_reason(t, buckets.get(t, []) )
-        rows.append({"종목": t, "설명": html.escape(reason)})
+    for t, _ in ranked:
+        reason, sentiment_icon = gpt_summarize_reason(t, buckets.get(t, []))
+        rows.append({
+            "종목": t,
+            "설명": html.escape(reason),
+            "분석": sentiment_icon
+        })
+
     return pd.DataFrame(rows)
 
 def fetch_prices(ticker, period="1y", interval="1d"):
