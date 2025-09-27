@@ -316,6 +316,9 @@ def get_portfolio_indicators_html():
     """
     
 def get_news_summary_html():
+    """
+    포트폴리오 종목별 뉴스를 가져와 요약 후 HTML로 출력
+    """
     html = "<h3>📰 종목별 뉴스</h3>"
     for t in portfolio:
         t_upper = t.upper()
@@ -323,25 +326,40 @@ def get_news_summary_html():
         try:
             r = requests.get(
                 "https://newsapi.org/v2/everything",
-                params={"q": t, "apiKey": NEWS_API_KEY, "pageSize": 6, "sortBy": "publishedAt"},
+                params={
+                    "q": t,
+                    "apiKey": NEWS_API_KEY,
+                    "pageSize": 6,
+                    "sortBy": "publishedAt",
+                    "language": "en",  # 언어 고정 (필요시 조정)
+                },
                 timeout=10,
             )
             articles = r.json().get("articles", [])
-            filtered = [a for a in articles if t_upper in (a.get("title","")+a.get("description","")).upper()][:3]
+
+            # 안전하게 title/description 기본값 처리
+            filtered = [
+                a for a in articles
+                if t_upper in ((a.get("title") or "") + (a.get("description") or "")).upper()
+            ][:3]
+
             if not filtered:
-                html += "<p style='color:gray;'>관련 뉴스 없음</p>"
+                html += "<p style='color:gray;'>⚠️ 관련 뉴스 없음</p>"
                 continue
 
             news_text = ""
             for i, a in enumerate(filtered, 1):
-                title = a.get("title", "제목 없음")
-                desc = a.get("description", "")
-                url = a.get("url", "#")
-                html += f"<p><b>{i}. <a href='{url}'>{title}</a></b></p>"
+                title = a.get("title") or "제목 없음"
+                desc = a.get("description") or ""
+                url = a.get("url") or "#"
+
+                html += f"<p><b>{i}. <a href='{url}' target='_blank'>{title}</a></b></p>"
                 if desc:
                     html += f"<p style='margin-left:20px;color:#555;'>{desc}</p>"
+
                 news_text += f"[{i}] {title} - {desc}\n"
 
+            # GPT 요약
             summary = gpt_chat(
                 f"{t_upper} 관련 뉴스:\n{news_text}\n"
                 "뉴스 요약을 한국어로 작성하고, 각 주제는 ● 로 시작, 세부내용은 + 기호로 시작해 들여쓰기 해줘."
@@ -357,61 +375,9 @@ def get_news_summary_html():
             html += f"<div style='background:#eef;padding:8px;border-radius:8px;'>{formatted}</div>"
 
         except Exception as e:
-            html += f"<p style='color:red;'>뉴스 로드 실패: {e}</p>"
+            html += f"<p style='color:red;'>❌ 뉴스 로드 실패: {e}</p>"
 
     return html
-
-def get_market_outlook_html():
-    tickers = {
-        "S&P 500": "^GSPC",
-        "Nasdaq": "^IXIC",
-        "Dow Jones": "^DJI",
-        "VIX": "^VIX",
-        "US 10Y": "^TNX",
-        "Gold": "GC=F",
-    }
-    data = []
-
-    for name, symbol in tickers.items():
-        try:
-            t = yf.Ticker(symbol)
-            hist = t.history(period="2d")
-            if len(hist) >= 2:
-                price_today = hist["Close"].iloc[-1]
-                price_yesterday = hist["Close"].iloc[-2]
-                change = ((price_today - price_yesterday) / price_yesterday) * 100
-
-                strategy_raw = gpt_chat(
-                    f"{name} 현재 {price_today:.2f}, 전일 대비 {change:+.2f}% 변동 "
-                    "→ 2줄로 나누어 '● 단기전략', '● 중기전략' 형태로 작성해줘."
-                )
-
-                # 줄바꿈 적용
-                formatted_strategy = ""
-                for line in strategy_raw.splitlines():
-                    if line.strip().startswith("●"):
-                        formatted_strategy += f"<b>{line.strip()}</b><br>"
-                    elif line.strip().startswith("+"):
-                        formatted_strategy += f"<span style='margin-left:20px;'>{line.strip()}</span><br>"
-
-                data.append({
-                    "지수": name,
-                    "현재": f"{price_today:,.2f}",
-                    "변동률": f"{change:+.2f}%",
-                    "전략": formatted_strategy
-                })
-        except Exception as e:
-            data.append({"지수": name, "현재": "N/A", "변동률": "N/A", "전략": f"로드 실패: {e}"})
-
-    df = pd.DataFrame(data)
-    table_html = df.to_html(index=False, escape=False, justify="center", border=1)
-
-    return f"""
-    <div style='background:#f9f9f9;padding:10px;border-radius:8px;'>
-        <h4>📈 주요 지수 및 시장 전망</h4>
-        {table_html}
-    </div>
-    """
 
 def fetch_economic_indicators():
     """
