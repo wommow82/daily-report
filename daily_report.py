@@ -415,53 +415,106 @@ def get_market_outlook_html():
 
 def fetch_economic_indicators():
     """
-    FRED API에서 미국 주요 경제지표 최근 6개월 데이터를 불러와 DataFrame으로 반환
+    미국 주요 경제지표 최근 6개월 데이터를 가져옴.
+    - 1차: FRED API
+    - 2차: TradingEconomics API (fallback)
+    - 분기 데이터(GDP 등)는 최근 2분기만 뽑아서 병합
     """
     indicators = {
-        "소비자물가지수(CPI)": "CPIAUCSL",
-        "실업률": "UNRATE",
-        "GDP 성장률": "A191RL1Q225SBEA",
-        "개인소비지출(PCE)": "PCE",
-        "연방기금금리": "FEDFUNDS",
-        "신규실업수당청구": "ICSA",
+        "소비자물가지수(CPI)": {"fred": "CPIAUCSL", "te": "united states/cpi", "freq": "M"},
+        "실업률": {"fred": "UNRATE", "te": "united states/unemployment rate", "freq": "M"},
+        "GDP 성장률": {"fred": "A191RL1Q225SBEA", "te": "united states/gdp growth rate", "freq": "Q"},
+        "개인소비지출(PCE)": {"fred": "PCE", "te": "united states/personal spending", "freq": "M"},
+        "연방기금금리": {"fred": "FEDFUNDS", "te": "united states/interest rate", "freq": "M"},
+        "신규실업수당청구": {"fred": "ICSA", "te": "united states/jobless claims", "freq": "W"},  # 주간 → 월별 평균 변환
     }
 
     end_date = datetime.today().strftime("%Y-%m-%d")
-    start_date = (datetime.today() - timedelta(days=365)).strftime("%Y-%m-%d")  # 최근 1년치 요청
-
+    start_date = (datetime.today() - timedelta(days=180)).strftime("%Y-%m-%d")  # 최근 6개월
     data = {"지표": []}
     months = []
 
-    for name, code in indicators.items():
-        url = (
-            f"{FRED_API_BASE}?series_id={code}&api_key={FRED_API_KEY}"
-            f"&file_type=json&observation_start={start_date}&observation_end={end_date}"
-        )
+    for name, cfg in indicators.items():
+        monthly_values = {}
+
+        # ------------------------
+        # 1차: FRED API 시도
+        # ------------------------
         try:
+            url = (
+                f"{FRED_API_BASE}?series_id={cfg['fred']}&api_key={FRED_API_KEY}"
+                f"&file_type=json&observation_start={start_date}&observation_end={end_date}"
+            )
             r = requests.get(url, timeout=10)
+            r.raise_for_status()
             observations = r.json().get("observations", [])
 
-            monthly_values = {}
             for obs in observations:
                 date = obs["date"][:7]  # YYYY-MM
-                val = None if obs["value"] == "." else float(obs["value"])
+                val = None if obs["value"] in [".", ""] else float(obs["value"])
                 monthly_values[date] = val
 
-            # 기준 월 설정 (최근 6개월)
-            if not months:
-                months = sorted(list(monthly_values.keys())[-6:])
-                for m in months:
-                    data[m] = []
-
-            data["지표"].append(name)
-            for m in months:
-                data[m].append(monthly_values.get(m, None))
+            if monthly_values:
+                print(f"✅ {name} → FRED API 성공")
+            else:
+                raise ValueError("빈 데이터")
 
         except Exception as e:
-            print(f"❌ {name} 로드 실패: {e}")
-            data["지표"].append(name)
+            print(f"⚠️ {name} FRED 실패: {e} → TradingEconomics로 대체 시도")
+
+            # ------------------------
+            # 2차: TradingEconomics API 시도
+            # ------------------------
+            try:
+                url = (
+                    f"https://api.tradingeconomics.com/historical/{cfg['te']}?"
+                    f"c={TRADING_API_KEY}&d1={start_date}&d2={end_date}&f=json"
+                )
+                r = requests.get(url, timeout=10)
+                r.raise_for_status()
+                te_data = r.json()
+
+                for obs in te_data:
+                    date = obs.get("Date", "")[:7]
+                    val = obs.get("Value", None)
+                    monthly_values[date] = val
+
+                if monthly_values:
+                    print(f"✅ {name} → TradingEconomics API 성공")
+                else:
+                    raise ValueError("빈 데이터")
+
+            except Exception as e2:
+                print(f"❌ {name} TE도 실패: {e2}")
+
+        # ------------------------
+        # 데이터 정규화
+        # ------------------------
+        if cfg["freq"] == "Q":
+            # 분기 데이터 → 최근 2분기만 추출
+            quarterly_keys = sorted(monthly_values.keys())[-2:]
+            monthly_values = {k: monthly_values[k] for k in quarterly_keys}
+        elif cfg["freq"] == "W":
+            # 주간 데이터 → 월별 평균 변환
+            tmp = {}
+            for k, v in monthly_values.items():
+                if v is None:
+                    continue
+                ym = k
+                tmp.setdefault(ym, []).append(v)
+            monthly_values = {ym: sum(vals) / len(vals) for ym, vals in tmp.items()}
+
+        # ------------------------
+        # 결과 저장
+        # ------------------------
+        if not months and monthly_values:
+            months = sorted(list(monthly_values.keys())[-6:])
             for m in months:
-                data[m].append(None)
+                data[m] = []
+
+        data["지표"].append(name)
+        for m in months:
+            data[m].append(monthly_values.get(m, None))
 
     return pd.DataFrame(data)
 
@@ -471,7 +524,7 @@ def get_monthly_economic_indicators_html():
     """
     try:
         df = fetch_economic_indicators()
-        if df.empty:
+        if df.empty or len(df) == 0:
             return "<p style='color:red;'>⚠️ 경제지표 데이터를 불러오지 못했습니다. (API 키/범위 확인 필요)</p>"
 
         explanations = {
