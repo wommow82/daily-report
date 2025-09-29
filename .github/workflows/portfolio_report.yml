@@ -1,18 +1,14 @@
-# ------------------------------------------------------------
-# GitHub Actions workflow file (save as .github/workflows/portfolio_report.yml)
-# ------------------------------------------------------------
-# This workflow runs the report every day and can also be run on-demand.
-# Cron is in UTC: 15:00 UTC ≈ 09:00 in Alberta (summer), 08:00 (winter).
-
-"""
 name: Daily Portfolio Report
 
 on:
-  workflow_dispatch: {}
+  schedule:
+    - cron: '0 15 * * *'   # 매일 15:00 UTC (캐나다 앨버타 여름 09:00 / 겨울 08:00)
+  workflow_dispatch: {}     # 수동 실행도 가능
 
 jobs:
   build-and-send:
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -28,12 +24,11 @@ jobs:
           pip install gspread oauth2client yfinance pandas numpy matplotlib requests openai
 
       - name: Write Google credentials (from Secrets)
-        if: ${{ secrets.GOOGLE_APPLICATION_CREDENTIALS_JSON != '' }}
         run: |
           echo '${{ secrets.GOOGLE_APPLICATION_CREDENTIALS_JSON }}' > service_account.json
           echo "GOOGLE_APPLICATION_CREDENTIALS=$PWD/service_account.json" >> $GITHUB_ENV
 
-            - name: Run report
+      - name: Run report
         env:
           GSHEET_ID: ${{ secrets.GSHEET_ID }}
           EMAIL_SENDER: ${{ secrets.EMAIL_SENDER }}
@@ -52,4 +47,3 @@ jobs:
           name: portfolio-report-${{ github.run_id }}
           path: |
             portfolio_gsheet_policy_report_*.html
-"""
