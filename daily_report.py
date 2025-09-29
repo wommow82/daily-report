@@ -323,11 +323,20 @@ def get_news_summary_html():
         try:
             r = requests.get(
                 "https://newsapi.org/v2/everything",
-                params={"q": t, "apiKey": NEWS_API_KEY, "pageSize": 6, "sortBy": "publishedAt"},
+                params={
+                    "q": t,
+                    "apiKey": NEWS_API_KEY,
+                    "pageSize": 6,
+                    "sortBy": "publishedAt"
+                },
                 timeout=10,
             )
             articles = r.json().get("articles", [])
-            filtered = [a for a in articles if t_upper in (a.get("title","")+a.get("description","")).upper()][:3]
+            filtered = [
+                a for a in articles
+                if t_upper in (a.get("title", "") + a.get("description", "")).upper()
+            ][:3]
+
             if not filtered:
                 html += "<p style='color:gray;'>관련 뉴스 없음</p>"
                 continue
@@ -337,11 +346,18 @@ def get_news_summary_html():
                 title = a.get("title", "제목 없음")
                 desc = a.get("description", "")
                 url = a.get("url", "#")
-                html += f"<p><b>{i}. <a href='{url}'>{title}</a></b></p>"
+                published = a.get("publishedAt", "")[:10]  # YYYY-MM-DD 형식
+
+                # 뉴스 제목 + 날짜
+                html += f"<p><b>{i}. <a href='{url}'>{title}</a></b> <span style='color:gray;font-size:12px;'>({published})</span></p>"
+
+                # 뉴스 설명
                 if desc:
                     html += f"<p style='margin-left:20px;color:#555;'>{desc}</p>"
-                news_text += f"[{i}] {title} - {desc}\n"
 
+                news_text += f"[{i}] {title} ({published}) - {desc}\n"
+
+            # GPT 번역 요약
             summary = gpt_chat(
                 f"{t_upper} 관련 뉴스:\n{news_text}\n"
                 "뉴스 요약을 한국어로 작성하고, 각 주제는 ● 로 시작, 세부내용은 + 기호로 시작해 들여쓰기 해줘."
