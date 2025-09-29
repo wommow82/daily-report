@@ -46,41 +46,114 @@ def fig_to_base64(fig):
     return base64.b64encode(buf.read()).decode("utf-8")
 
 # ------------------------------------------------------------
-# 정책 포커스 섹션 (수정된 부분)
+# 포트폴리오 분석
 # ------------------------------------------------------------
-def policy_focus_section():
+def portfolio_analysis(df_hold, settings):
+    df_hold["Value"] = df_hold["Shares"] * df_hold["AvgPrice"]
+    total_value = df_hold["Value"].sum() + float(settings.get("CashUSD", 0))
+    df_hold["Weight"] = df_hold["Value"] / total_value * 100
+
+    fig, ax = plt.subplots()
+    ax.pie(df_hold["Weight"], labels=df_hold["Ticker"], autopct="%1.1f%%")
+    ax.set_title("Portfolio Weights (포트폴리오 비중)")
+    img = fig_to_base64(fig)
+    plt.close(fig)
+
+    return df_hold, f"<img src='data:image/png;base64,{img}'/>"
+
+# ------------------------------------------------------------
+# 주요 지수 섹션
+# ------------------------------------------------------------
+def index_section():
+    tickers = ["^GSPC", "^IXIC", "^DJI"]
+    data = {}
+    for t in tickers:
+        try:
+            df = yf.download(t, period="5d")
+            data[t] = round(df["Close"].iloc[-1], 2)
+        except Exception:
+            data[t] = "N/A"
+    html = "<h2>📈 Major Index (주요 지수)</h2><ul>"
+    for k,v in data.items():
+        html += f"<li>{k}: {v}</li>"
+    html += "</ul>"
+    return html
+
+# ------------------------------------------------------------
+# 뉴스 요약 섹션
+# ------------------------------------------------------------
+def recent_news_section():
     api_key = os.environ.get("NEWS_API_KEY")
     if not api_key:
-        return "<h2>📰 Policy Focus (정책 포커스)</h2><p>No NEWS_API_KEY provided.</p>"
-
-    url = f"https://newsapi.org/v2/everything?q=Trump+policy+economy&language=en&sortBy=publishedAt&pageSize=5&apiKey={api_key}"
+        return "<h2>📰 Market News (시장 뉴스)</h2><p>No NEWS_API_KEY provided.</p>"
+    url = f"https://newsapi.org/v2/top-headlines?language=en&category=business&pageSize=5&apiKey={api_key}"
     r = requests.get(url)
     if r.status_code != 200:
-        return "<h2>📰 Policy Focus (정책 포커스)</h2><p>Failed to fetch news.</p>"
-
+        return "<h2>📰 Market News (시장 뉴스)</h2><p>Failed to fetch news.</p>"
     articles = r.json().get("articles", [])
     items = []
     for a in articles:
         title = a.get("title") or ""
         desc = a.get("description") or ""
-        content = title + " " + desc
         items.append(f"<li>{title}<br><small>{desc}</small></li>")
+    return "<h2>📰 Market News (시장 뉴스)</h2><ul>" + "".join(items) + "</ul>"
 
-    html = "<h2>📰 Policy Focus (정책 포커스)</h2><ul>" + "".join(items) + "</ul>"
-    return html
+# ------------------------------------------------------------
+# 정책 포커스 섹션 (수정 완료)
+# ------------------------------------------------------------
+def policy_focus_section():
+    api_key = os.environ.get("NEWS_API_KEY")
+    if not api_key:
+        return "<h2>📰 Policy Focus (정책 포커스)</h2><p>No NEWS_API_KEY provided.</p>"
+    url = f"https://newsapi.org/v2/everything?q=Trump+policy+economy&language=en&sortBy=publishedAt&pageSize=5&apiKey={api_key}"
+    r = requests.get(url)
+    if r.status_code != 200:
+        return "<h2>📰 Policy Focus (정책 포커스)</h2><p>Failed to fetch news.</p>"
+    articles = r.json().get("articles", [])
+    items = []
+    for a in articles:
+        title = a.get("title") or ""
+        desc = a.get("description") or ""
+        items.append(f"<li>{title}<br><small>{desc}</small></li>")
+    return "<h2>📰 Policy Focus (정책 포커스)</h2><ul>" + "".join(items) + "</ul>"
+
+# ------------------------------------------------------------
+# GPT 투자 의견 (선택)
+# ------------------------------------------------------------
+def gpt_investment_opinion(context):
+    api_key = os.environ.get("OPENAI_API_KEY")
+    if not api_key:
+        return "<h2>🤖 GPT Opinion (투자의견)</h2><p>No OPENAI_API_KEY provided.</p>"
+    openai.api_key = api_key
+    try:
+        prompt = f"Summarize and give investment opinion for context: {context}"
+        resp = openai.Completion.create(model="text-davinci-003", prompt=prompt, max_tokens=200)
+        text = resp["choices"][0]["text"]
+        return f"<h2>🤖 GPT Opinion (투자의견)</h2><p>{text}</p>"
+    except Exception as e:
+        return f"<h2>🤖 GPT Opinion (투자의견)</h2><p>Error: {e}</p>"
 
 # ------------------------------------------------------------
 # 전체 리포트 조립
 # ------------------------------------------------------------
 def build_report_html():
     df_hold, df_watch, settings = load_holdings_watchlist_settings()
+    df_hold, pie_html = portfolio_analysis(df_hold, settings)
     now = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
+    context = f"Holdings: {df_hold.to_dict()} Settings: {settings}"
 
     html = f"""
     <html><head><meta charset='utf-8'></head><body>
     <h1>📊 Portfolio Report (포트폴리오 리포트)</h1>
     <p>Generated at {now}</p>
+    <h2>📂 Holdings (보유 종목)</h2>
+    {df_hold.to_html(index=False)}
+    <h2>💰 Portfolio Allocation (포트폴리오 비중)</h2>
+    {pie_html}
+    {index_section()}
+    {recent_news_section()}
     {policy_focus_section()}
+    {gpt_investment_opinion(context)}
     </body></html>
     """
     return html
