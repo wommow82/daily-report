@@ -8,8 +8,6 @@
 name: Daily Portfolio Report
 
 on:
-  schedule:
-    - cron: '0 15 * * *'  # 15:00 UTC daily
   workflow_dispatch: {}
 
 jobs:
