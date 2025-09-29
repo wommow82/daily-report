@@ -37,7 +37,7 @@ def setup_matplotlib_korean_font():
 portfolio = {
     "NVDA": {"shares": 50, "avg_price": 123.971},
     "PLTR": {"shares": 10, "avg_price": 151.60},
-    "SCHD": {"shares": 2140, "avg_price": 24.3777},
+    "SCHD": {"shares": 2146, "avg_price": 24.3851},
     "TSLA": {"shares": 10, "avg_price": 320.745},
     "CRCL": {"shares": 20, "avg_price": 137.32},
 }
