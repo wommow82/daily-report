@@ -33,7 +33,7 @@ jobs:
           echo '${{ secrets.GOOGLE_APPLICATION_CREDENTIALS_JSON }}' > service_account.json
           echo "GOOGLE_APPLICATION_CREDENTIALS=$PWD/service_account.json" >> $GITHUB_ENV
 
-      - name: Run report
+            - name: Run report
         env:
           GSHEET_ID: ${{ secrets.GSHEET_ID }}
           EMAIL_SENDER: ${{ secrets.EMAIL_SENDER }}
@@ -43,7 +43,6 @@ jobs:
           NEWS_API_KEY: ${{ secrets.NEWS_API_KEY }}
           SMTP_HOST: ${{ secrets.SMTP_HOST }}
           SMTP_PORT: ${{ secrets.SMTP_PORT }}
-          GOOGLE_APPLICATION_CREDENTIALS_JSON: ${{ secrets.GOOGLE_APPLICATION_CREDENTIALS_JSON }}
         run: |
           python portfolio_gsheet_policy_report.py
 
