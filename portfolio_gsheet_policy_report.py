@@ -1,10 +1,6 @@
 import os
-import io
-import base64
 import gspread
 import pandas as pd
-import numpy as np
-import matplotlib.pyplot as plt
 import yfinance as yf
 import requests
 from openai import OpenAI
@@ -40,68 +36,7 @@ def load_holdings_watchlist_settings():
     return df_hold, df_watch, settings
 
 # ------------------------------------------------------------
-# 차트 생성 유틸
-# ------------------------------------------------------------
-def fig_to_base64(fig):
-    buf = io.BytesIO()
-    fig.savefig(buf, format="png", bbox_inches="tight")
-    buf.seek(0)
-    return base64.b64encode(buf.read()).decode("utf-8")
-
-# ------------------------------------------------------------
-# 포트폴리오 분석
-# ------------------------------------------------------------
-def portfolio_analysis(df_hold, settings):
-    cash_usd = float(settings.get("CashUSD", 0))
-    total_value = 0
-
-    # 종목별 평가금액
-    for idx, row in df_hold.iterrows():
-        ticker = row["Ticker"]
-        sh = float(row["Shares"])
-        try:
-            price = yf.Ticker(ticker).history(period="1d")["Close"].iloc[-1]
-        except Exception:
-            price = row["AvgPrice"]
-        if pd.isna(price):  # fallback
-            price = row["AvgPrice"]
-        df_hold.loc[idx, "LastPrice"] = round(price, 2)
-        df_hold.loc[idx, "Value"] = round(sh * price, 2)
-
-    df_hold["Shares"] = df_hold["Shares"].round(2)
-    df_hold["AvgPrice"] = df_hold["AvgPrice"].round(2)
-    df_hold["Value"] = df_hold["Value"].round(2)
-    total_value = df_hold["Value"].sum() + cash_usd
-
-    # Weight 계산
-    df_hold["Weight"] = round(df_hold["Value"] / total_value * 100, 2)
-
-    # 현금 추가
-    cash_row = {
-        "Ticker": "CASH",
-        "Shares": "-",
-        "AvgPrice": "-",
-        "LastPrice": 1.00,
-        "Value": round(cash_usd, 2),
-        "Weight": round(cash_usd / total_value * 100, 2)
-    }
-    df_hold = pd.concat([df_hold, pd.DataFrame([cash_row])], ignore_index=True)
-
-    # 파이차트
-    if total_value > 0:
-        fig, ax = plt.subplots()
-        ax.pie(df_hold["Weight"], labels=df_hold["Ticker"], autopct="%1.1f%%")
-        ax.set_title("Portfolio Weights (포트폴리오 비중)")
-        img = fig_to_base64(fig)
-        plt.close(fig)
-        pie_html = f"<img src='data:image/png;base64,{img}'/>"
-    else:
-        pie_html = "<p>No data for allocation chart</p>"
-
-    return df_hold, pie_html
-
-# ------------------------------------------------------------
-# 주요 지수 섹션
+# 주요 지수 섹션 (표 형식)
 # ------------------------------------------------------------
 def index_section():
     tickers = {"S&P500": "^GSPC", "Nasdaq": "^IXIC", "Dow Jones": "^DJI"}
@@ -117,7 +52,7 @@ def index_section():
     return "<h2>📈 Major Index (주요 지수)</h2>" + df_idx.to_html(index=False)
 
 # ------------------------------------------------------------
-# 뉴스 요약 섹션 (한글 번역 추가)
+# 뉴스 요약 섹션 (한글 번역 + 날짜 추가)
 # ------------------------------------------------------------
 def recent_news_section():
     api_key = os.environ.get("NEWS_API_KEY")
@@ -140,7 +75,7 @@ def recent_news_section():
                 client = OpenAI(api_key=api_key_openai)
                 resp = client.chat.completions.create(
                     model="gpt-4o-mini",
-                    messages=[{"role":"user","content":f"Translate into Korean:\\nTitle: {title}\\nDescription: {desc}"}],
+                    messages=[{"role":"user","content":f"Translate into Korean:\nTitle: {title}\nDescription: {desc}"}],
                     max_tokens=150
                 )
                 trans = resp.choices[0].message.content
@@ -150,7 +85,7 @@ def recent_news_section():
     return "<h2>📰 Market News (시장 뉴스)</h2>" + "".join(items)
 
 # ------------------------------------------------------------
-# 정책 포커스 섹션 (한글 번역 추가)
+# 정책 포커스 섹션 (한글 번역 + 날짜 추가)
 # ------------------------------------------------------------
 def policy_focus_section():
     api_key = os.environ.get("NEWS_API_KEY")
@@ -165,6 +100,7 @@ def policy_focus_section():
     for a in articles:
         title = a.get("title") or ""
         desc = a.get("description") or ""
+        date = (a.get("publishedAt") or "")[:10]
         trans = ""
         api_key_openai = os.environ.get("OPENAI_API_KEY")
         if api_key_openai:
@@ -178,7 +114,7 @@ def policy_focus_section():
                 trans = resp.choices[0].message.content
             except:
                 pass
-        items.append(f"<div class='card'><b>{title}</b><br><small>{desc}</small><br><i>{trans}</i></div>")
+        items.append(f"<div class='card'><b>{title}</b> <small>({date})</small><br><small>{desc}</small><br><i>{trans}</i></div>")
     return "<h2>📰 Policy Focus (정책 포커스)</h2>" + "".join(items)
 
 # ------------------------------------------------------------
@@ -230,11 +166,22 @@ def send_email_html(subject, html_body):
         print("❌ Email send failed:", e)
 
 # ------------------------------------------------------------
-# 전체 리포트 조립 (레이아웃 개선)
+# 전체 리포트 조립 (Portfolio Allocation 제거, Watchlist 포함)
 # ------------------------------------------------------------
 def build_report_html():
     df_hold, df_watch, settings = load_holdings_watchlist_settings()
-    df_hold, pie_html = portfolio_analysis(df_hold, settings)
+
+    # Holdings + Cash 추가
+    cash_usd = float(settings.get("CashUSD", 0))
+    cash_row = {
+        "Ticker": "CASH",
+        "Shares": "-",
+        "AvgPrice": "-",
+        "LastPrice": 1.00,
+        "Value": round(cash_usd, 2)
+    }
+    df_hold = pd.concat([df_hold, pd.DataFrame([cash_row])], ignore_index=True)
+
     now = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
     context = f"Holdings: {df_hold.to_dict()} Settings: {settings}"
 
@@ -259,8 +206,8 @@ def build_report_html():
     <h2>📂 Holdings (보유 종목)</h2>
     {df_hold.to_html(index=False)}
 
-    <h2>💰 Portfolio Allocation (포트폴리오 비중)</h2>
-    <div class='card'>{pie_html}</div>
+    <h2>👀 Watchlist (관심 종목)</h2>
+    {df_watch.to_html(index=False)}
 
     {index_section()}
     {recent_news_section()}
