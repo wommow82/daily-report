@@ -402,6 +402,18 @@ def build_report_html():
     }
     df_disp = pd.concat([df_hold, pd.DataFrame([cash_row])], ignore_index=True)
 
+    # ---- 수익/손실 계산 ----
+    def calc_profit_loss(row):
+        try:
+            if pd.isna(row["Shares"]) or pd.isna(row["AvgPrice"]):
+                return "-"
+            cost = float(row["Shares"]) * float(row["AvgPrice"])
+            profit = float(row["Value"]) - cost
+            color = "green" if profit > 0 else ("red" if profit < 0 else "black")
+            return f"<span style='color:{color}'>{fmt_money_2(profit)}</span>"
+        except Exception:
+            return "-"
+
     # ---- 포맷팅 함수 ----
     def fmt_price_with_change(row):
         try:
@@ -438,6 +450,10 @@ def build_report_html():
     df_disp["PrevClose"] = df_disp["PrevClose"].apply(fmt_money_2)
     df_disp["PrevValue"] = df_disp["PrevValue"].apply(fmt_money_2)
 
+    # ✅ 새 열 추가
+    df_disp["Profit/Loss (수익/손실)"] = df_disp.apply(calc_profit_loss, axis=1)
+
+    # 컬럼명 정리
     df_disp = df_disp.rename(columns={
         "Ticker": "Ticker (종목)",
         "Shares": "Shares (수량)",
