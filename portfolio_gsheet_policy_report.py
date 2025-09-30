@@ -385,20 +385,64 @@ def build_report_html():
 
     cash_usd = float(settings.get("CashUSD", 0) or 0)
 
+    # 현재/전일 자산가치
     total_today, total_yday = compute_portfolio_values(df_hold.copy(), cash_usd)
     total_change_pct = round(((total_today - total_yday) / total_yday * 100.0), 2) if total_yday != 0 else 0.0
     emo = emoji_from_change_pct(total_change_pct)
 
-    cash_row = {"Ticker": "CASH", "Shares": np.nan, "AvgPrice": np.nan, "LastPrice": 1.00, "PrevClose": 1.00, "Value": cash_usd, "PrevValue": cash_usd}
+    # 현금 행 추가
+    cash_row = {"Ticker": "CASH", "Shares": np.nan, "AvgPrice": np.nan,
+                "LastPrice": 1.00, "PrevClose": 1.00,
+                "Value": cash_usd, "PrevValue": cash_usd}
     df_disp = pd.concat([df_hold, pd.DataFrame([cash_row])], ignore_index=True)
 
-    if "Shares" in df_disp.columns: df_disp["Shares"] = df_disp["Shares"].apply(lambda x: fmt_2(x) if pd.notna(x) else "-")
-    if "AvgPrice" in df_disp.columns: df_disp["AvgPrice"] = df_disp["AvgPrice"].apply(lambda x: fmt_money_2(x) if pd.notna(x) else "-")
-    df_disp["LastPrice"] = df_disp["LastPrice"].apply(fmt_money_2)
+    # 숫자 포맷팅
+    if "Shares" in df_disp.columns:
+        df_disp["Shares"] = df_disp["Shares"].apply(lambda x: fmt_2(x) if pd.notna(x) else "-")
+    if "AvgPrice" in df_disp.columns:
+        df_disp["AvgPrice"] = df_disp["AvgPrice"].apply(lambda x: fmt_money_2(x) if pd.notna(x) else "-")
+
+    # --- 가격 변동 % 계산 및 색상+아이콘 반영 ---
+    def fmt_price_with_change(row):
+        try:
+            last = float(row["LastPrice"])
+            prev = float(row["PrevClose"])
+            if prev == 0:
+                return fmt_money_2(last)
+            pct = round((last - prev) / prev * 100, 2)
+            if pct > 0:
+                color, icon = "green", "🔺"
+            elif pct < 0:
+                color, icon = "red", "🔻"
+            else:
+                color, icon = "black", ""
+            return f"<span style='color:{color}'>{fmt_money_2(last)} ({pct}% {icon})</span>"
+        except Exception:
+            return "-"
+        
+    def fmt_value_with_change(row):
+        try:
+            val = float(row["Value"])
+            prev = float(row["PrevValue"])
+            if prev == 0:
+                return fmt_money_2(val)
+            pct = round((val - prev) / prev * 100, 2)
+            if pct > 0:
+                color, icon = "green", "🔺"
+            elif pct < 0:
+                color, icon = "red", "🔻"
+            else:
+                color, icon = "black", ""
+            return f"<span style='color:{color}'>{fmt_money_2(val)} ({pct}% {icon})</span>"
+        except Exception:
+            return "-"
+
+    df_disp["LastPrice"] = df_disp.apply(fmt_price_with_change, axis=1)
     df_disp["PrevClose"] = df_disp["PrevClose"].apply(fmt_money_2)
-    df_disp["Value"] = df_disp["Value"].apply(fmt_money_2)
+    df_disp["Value"] = df_disp.apply(fmt_value_with_change, axis=1)
     df_disp["PrevValue"] = df_disp["PrevValue"].apply(fmt_money_2)
 
+    # 컬럼 이름 변경
     df_disp = df_disp.rename(columns={
         "Ticker": "Ticker (종목)",
         "Shares": "Shares (수량)",
@@ -408,13 +452,19 @@ def build_report_html():
         "Value": "Value (자산가치)",
         "PrevValue": "Prev Value (전일자산)"
     })
+
+    # Holdings 섹션 HTML
+    total_color = "green" if total_change_pct > 0 else ("red" if total_change_pct < 0 else "black")
+    total_icon = "🔺" if total_change_pct > 0 else ("🔻" if total_change_pct < 0 else "")
     holdings_html = f"""
     <h2>📂 Holdings (보유 종목)</h2>
     <p><b>Total Assets (총 자산):</b> {fmt_money_2(total_today)} &nbsp;&nbsp;
-       <b>Δ vs. Yesterday (전일 대비 변화):</b> {fmt_2(total_change_pct)}% {emo}</p>
-    {df_disp.to_html(index=False)}
+       <b>Δ vs. Yesterday (전일 대비 변화):</b> 
+       <span style='color:{total_color}'>{fmt_2(total_change_pct)}% {total_icon}</span> {emo}</p>
+    {df_disp.to_html(index=False, escape=False)}
     """
 
+    # --- 이하 원래 코드 유지 ---
     tickers = [t for t in df_hold["Ticker"].tolist() if isinstance(t, str)]
     signals_df = build_signals_table(tickers)
     signals_html = f"<h2>📈 Signals (종목별 판단 지표)</h2>{signals_df.to_html(index=False)}"
@@ -435,7 +485,6 @@ def build_report_html():
 
     econ_html = econ_section()
     indices_html = indices_section()
-
     gpt_html = f"<h2>🤖 GPT Opinion (투자의견)</h2>{gpt_strategy_summary(merged_for_gpt.to_dict(orient='records'))}"
 
     now = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
