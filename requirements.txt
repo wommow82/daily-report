@@ -6,6 +6,7 @@ matplotlib>=3.7.0
 # 금융 데이터
 yfinance>=0.2.50
 fredapi>=0.5.0
+feedparser>=6.0.10
 pandas_datareader>=0.10.0
 
 # 구글 스프레드시트
