@@ -1,5 +1,6 @@
 import os
 import gspread
+import time
 import pandas as pd
 import numpy as np
 import yfinance as yf
@@ -44,13 +45,42 @@ def emoji_from_change_pct(pct):
         return "🔴"
     return "🟡"
 
+# def get_gspread_client():
+#     scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
+#     creds = ServiceAccountCredentials.from_json_keyfile_name(os.environ.get("GOOGLE_APPLICATION_CREDENTIALS"), scope)
+#     return gspread.authorize(creds)
+
+# def open_gsheet(gs_id):
+#     return get_gspread_client().open_by_key(gs_id)
+
 def get_gspread_client():
     scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
-    creds = ServiceAccountCredentials.from_json_keyfile_name(os.environ.get("GOOGLE_APPLICATION_CREDENTIALS"), scope)
+    creds = ServiceAccountCredentials.from_json_keyfile_name(
+        os.environ.get("GOOGLE_APPLICATION_CREDENTIALS"), scope
+    )
     return gspread.authorize(creds)
 
-def open_gsheet(gs_id):
-    return get_gspread_client().open_by_key(gs_id)
+def open_gsheet(gs_id, retries=3, delay=5):
+    """
+    Google Sheet 열기 (503 오류 대비 재시도 포함)
+
+    Args:
+        gs_id (str): 구글 시트 ID
+        retries (int): 최대 재시도 횟수
+        delay (int): 재시도 간 대기 시간 (초)
+
+    Returns:
+        gspread.Spreadsheet: 열린 스프레드시트 객체
+    """
+    for i in range(retries):
+        try:
+            return get_gspread_client().open_by_key(gs_id)
+        except gspread.exceptions.APIError as e:
+            if "503" in str(e) and i < retries - 1:
+                print(f"⚠️ Google API 503 오류 발생, {delay}초 후 재시도... ({i+1}/{retries})")
+                time.sleep(delay)
+                continue
+            raise
 
 def load_holdings_watchlist_settings():
     gs_id = os.environ.get("GSHEET_ID")
