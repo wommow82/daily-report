@@ -450,7 +450,10 @@ def save_fred_cache(data):
         pickle.dump(cache, f)
 
 def fetch_economic_data():
-    """오늘자 경제지표 데이터를 가져오거나 캐시 사용"""
+    """
+    FRED 지표 한 번만 불러와서 캐싱
+    Returns: dict {지표명: {YYYY-MM: value, ...}}
+    """
     cached = load_fred_cache()
     if cached:
         return cached
@@ -460,47 +463,71 @@ def fetch_economic_data():
         try:
             series = fred.get_series(tick, observation_start=f"{datetime.today().year}-01-01")
             if series is None or series.empty:
-                result[name] = None
+                result[name] = {}
                 continue
 
             monthly_vals = series.resample("M").last().dropna()
-            if monthly_vals.empty:
-                result[name] = None
-                continue
-
-            last_val = float(monthly_vals.iloc[-1])
-            prev_val = float(monthly_vals.iloc[-2]) if len(monthly_vals) > 1 else last_val
-            change = last_val - prev_val
-            pct = (change / prev_val) * 100 if prev_val != 0 else 0
-            result[name] = (prev_val, last_val, change, pct)
+            monthly_dict = {d.strftime("%Y-%m"): float(v) for d, v in monthly_vals.items()}
+            result[name] = monthly_dict
         except Exception:
-            result[name] = None
+            result[name] = {}
 
     save_fred_cache(result)
     return result
 
 def econ_section():
-    """📊 Economic Indicators (경제 지표) HTML"""
+    """📊 Economic Indicators (경제 지표) - 월별 테이블 + 최근 증감률"""
     econ_data = fetch_economic_data()
-    rows = []
+
+    # 1월부터 현재월까지 열 생성
+    months = pd.date_range(
+        start=f"{datetime.today().year}-01-01",
+        end=datetime.today(),
+        freq="M"
+    ).strftime("%Y-%m").tolist()
+
+    # 테이블 구조
+    table_data = {"Indicator (지표)": []}
+    for m in months:
+        table_data[m] = []
+    table_data["Change (변화)"] = []  # 새 열 추가
 
     for name in FRED_TICKERS.keys():
-        if econ_data.get(name) is None:
-            rows.append([name, "N/A", "N/A"])
-            continue
+        monthly_dict = econ_data.get(name, {})
 
-        prev_val, last_val, change, pct = econ_data[name]
-        if change > 0:
-            color, arrow = "green", "🟢"
-        elif change < 0:
-            color, arrow = "red", "🔴"
+        # 값 채우기
+        row_vals = []
+        for m in months:
+            if m in monthly_dict:
+                row_vals.append(f"{monthly_dict[m]:,.2f}")
+            else:
+                row_vals.append("N/A")
+
+        # 최근 값 변화 계산
+        if len(monthly_dict) >= 2:
+            vals = list(monthly_dict.values())
+            prev_val, last_val = vals[-2], vals[-1]
+            change = last_val - prev_val
+            pct = (change / prev_val) * 100 if prev_val != 0 else 0
+
+            if change > 0:
+                color, arrow = "green", "🟢"
+            elif change < 0:
+                color, arrow = "red", "🔴"
+            else:
+                color, arrow = "black", "⚫"
+
+            change_html = f"<span style='color:{color}'>{last_val:,.2f} ({change:+.2f}, {pct:+.2f}%) {arrow}</span>"
         else:
-            color, arrow = "black", "⚫"
+            change_html = "N/A"
 
-        last_html = f"<span style='color:{color}'>{last_val:,.2f} ({change:+.2f}, {pct:+.2f}%) {arrow}</span>"
-        rows.append([name, f"{prev_val:,.2f}", last_html])
+        # 테이블에 넣기
+        table_data["Indicator (지표)"].append(name)
+        for idx, m in enumerate(months):
+            table_data[m].append(row_vals[idx])
+        table_data["Change (변화)"].append(change_html)
 
-    df_out = pd.DataFrame(rows, columns=["Indicator (지표)", "Prev Value (이전)", "Last Value (최근)"])
+    df_out = pd.DataFrame(table_data)
     return "<h2>📊 Economic Indicators (경제 지표)</h2>" + df_out.to_html(index=False, escape=False)
 
 def indices_section():
