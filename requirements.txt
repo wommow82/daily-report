@@ -1,0 +1,12 @@
+yfinance
+pandas
+matplotlib
+numpy
+requests
+beautifulsoup4
+selenium
+openai
+schedule
+googletrans==4.0.0-rc1
+fredapi
+pandas_datareader
