@@ -379,7 +379,6 @@ def send_email_html(subject, html_body):
 def build_report_html():
     df_hold, df_watch, settings = load_holdings_watchlist_settings()
 
-    # 기본 숫자형 정리
     if "Shares" in df_hold.columns:
         df_hold["Shares"] = pd.to_numeric(df_hold["Shares"], errors="coerce").fillna(0.0)
     if "AvgPrice" in df_hold.columns:
@@ -387,11 +386,12 @@ def build_report_html():
 
     cash_usd = float(settings.get("CashUSD", 0) or 0)
 
-    # ✅ 원본 df_hold를 전달해서 LastPrice/PrevClose/Value/PrevValue가 실제로 채워지도록 함
+    # ✅ 원본 df_hold를 넘겨서 값이 채워지도록 함
     total_today, total_yday = compute_portfolio_values(df_hold, cash_usd)
 
     # 총자산 증감
-    total_change_pct = round(((total_today - total_yday) / total_yday * 100.0), 2) if total_yday != 0 else 0.0
+    diff = total_today - total_yday
+    total_change_pct = round(((diff) / total_yday * 100.0), 2) if total_yday != 0 else 0.0
     emo = emoji_from_change_pct(total_change_pct)
 
     # 현금 행 추가
@@ -402,7 +402,7 @@ def build_report_html():
     }
     df_disp = pd.concat([df_hold, pd.DataFrame([cash_row])], ignore_index=True)
 
-    # ---- 포맷팅 헬퍼: 현재가/자산가치에 전일 대비 % 및 색상 표시 ----
+    # ---- 포맷팅 함수 ----
     def fmt_price_with_change(row):
         try:
             last = float(row["LastPrice"])
@@ -427,22 +427,17 @@ def build_report_html():
         except Exception:
             return "-"
 
-    # ---- 표에 뿌릴 값 포맷 ----
-    # 수량/평단
+    # ---- 표 컬럼 처리 ----
     if "Shares" in df_disp.columns:
         df_disp["Shares"] = df_disp["Shares"].apply(lambda x: fmt_2(x) if pd.notna(x) else "-")
     if "AvgPrice" in df_disp.columns:
         df_disp["AvgPrice"] = df_disp["AvgPrice"].apply(lambda x: fmt_money_2(x) if pd.notna(x) else "-")
 
-    # 현재가/자산가치: 색상 + % 변동
     df_disp["LastPrice"] = df_disp.apply(fmt_price_with_change, axis=1)
     df_disp["Value"] = df_disp.apply(fmt_value_with_change, axis=1)
-
-    # 전일종가/전일자산: 숫자만 표시
     df_disp["PrevClose"] = df_disp["PrevClose"].apply(fmt_money_2)
     df_disp["PrevValue"] = df_disp["PrevValue"].apply(fmt_money_2)
 
-    # 컬럼명 정리
     df_disp = df_disp.rename(columns={
         "Ticker": "Ticker (종목)",
         "Shares": "Shares (수량)",
@@ -453,17 +448,17 @@ def build_report_html():
         "PrevValue": "Prev Value (전일자산)"
     })
 
-    # Holdings 섹션 (총자산 변화 색상)
-    total_color = "green" if total_change_pct > 0 else ("red" if total_change_pct < 0 else "black")
+    # 총자산 변화: 퍼센트 + 액수
+    total_color = "green" if diff > 0 else ("red" if diff < 0 else "black")
     holdings_html = f"""
     <h2>📂 Holdings (보유 종목)</h2>
     <p><b>Total Assets (총 자산):</b> {fmt_money_2(total_today)} &nbsp;&nbsp;
        <b>Δ vs. Yesterday (전일 대비 변화):</b>
-       <span style='color:{total_color}'>{fmt_2(total_change_pct)}%</span> {emo}</p>
+       <span style='color:{total_color}'>{fmt_money_2(diff)} ({fmt_2(total_change_pct)}%)</span> {emo}</p>
     {df_disp.to_html(index=False, escape=False)}
     """
 
-    # --------- 이하 기존 섹션 유지 (변경 없음) ----------
+    # -------- 나머지 섹션 그대로 유지 --------
     tickers = [t for t in df_hold["Ticker"].tolist() if isinstance(t, str)]
     signals_df = build_signals_table(tickers)
     signals_html = f"<h2>📈 Signals (종목별 판단 지표)</h2>{signals_df.to_html(index=False)}"
