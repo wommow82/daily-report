@@ -379,24 +379,38 @@ def econ_section():
     df_out = pd.DataFrame(table_data)
     return "<h2>📊 Economic Indicators (경제 지표)</h2>" + df_out.to_html(index=False)
 
+# 주요 지수 심볼 매핑 (Yahoo Finance)
+INDEX_MAP = {
+    "S&P 500": "^GSPC",
+    "Dow Jones": "^DJI",
+    "Nasdaq": "^IXIC",
+    "Russell 2000": "^RUT",
+    "VIX (Volatility)": "^VIX",
+    "Gold (금)": "GC=F",
+    "Crude Oil (원유)": "CL=F"
+}
+
 def indices_section():
     rows = []
     for name, tick in INDEX_MAP.items():
         try:
-            df = yf.download(tick, period="5d")
-            last = round(float(df["Close"].iloc[-1]), 2)
-            prev = round(float(df["Close"].iloc[-2]), 2) if len(df) >= 2 else last
-            chg = round(last - prev, 2)
-            chg_pct = round((chg / prev * 100.0), 2) if prev != 0 else 0.0
-            rows.append({
-                "Index (지수)": name,
-                "Value (값)": fmt_2(last),
-                "Δ (변화)": fmt_2(chg),
-                "%Δ (변화%)": fmt_2(chg_pct)
-            })
-        except Exception:
-            rows.append({"Index (지수)": name, "Value (값)": "N/A", "Δ (변화)": "N/A", "%Δ (변화%)": "N/A"})
-    return "<h2>🏦 Major Indices (주요 지수)</h2>" + pd.DataFrame(rows).to_html(index=False)
+            df = yf.download(tick, period="5d", interval="1d", progress=False)
+            if df.empty:
+                rows.append([name, "N/A", "N/A"])
+                continue
+
+            last = df["Close"].iloc[-1]
+            prev = df["Close"].iloc[-2] if len(df) > 1 else last
+            pct = round((last - prev) / prev * 100, 2) if prev != 0 else 0
+            color = "green" if pct > 0 else ("red" if pct < 0 else "black")
+            last_html = f"<span style='color:{color}'>{fmt_money_2(last)} ({pct}%)</span>"
+
+            rows.append([name, last_html, fmt_money_2(prev)])
+        except Exception as e:
+            rows.append([name, f"Error: {e}", "Error"])
+
+    df_out = pd.DataFrame(rows, columns=["Index (지수)", "Last Price (현재가)", "Prev Close (전일종가)"])
+    return "<h2>📊 Market Indices (주요 지수)</h2>" + df_out.to_html(index=False, escape=False)
 
 def send_email_html(subject, html_body):
     sender = os.environ.get("EMAIL_SENDER")
