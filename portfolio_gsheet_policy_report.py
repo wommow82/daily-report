@@ -227,56 +227,121 @@ def build_strategy_table(tickers, last_prices, settings):
         })
     return pd.DataFrame(rows)
 
-def gpt_strategy_summary(ticker_rows):
-    api_key = os.environ.get("OPENAI_API_KEY")
-    if not api_key:
-        return "<p>OpenAI API key missing → skip summary.</p>"
+# def gpt_strategy_summary(ticker_rows):
+#     api_key = os.environ.get("OPENAI_API_KEY")
+#     if not api_key:
+#         return "<p>OpenAI API key missing → skip summary.</p>"
+#     try:
+#         client = OpenAI(api_key=api_key)
+#         csv_text = pd.DataFrame(ticker_rows).to_csv(index=False)
+#         prompt = (
+#             "다음 표의 RSI, MACD, P/E, ROE, EPS, 손절/목표가를 바탕으로 "
+#             "각 종목의 매매 전략을 종목별로 1줄씩 한국어로 요약해줘.\n\n"
+#             "출력 형식은 반드시 아래처럼 해줘:\n"
+#             "종목명: (매수|매도|관망) - 간단 설명\n\n"
+#             "예시:\n"
+#             "NVDA: 매수 - 기술적 지표 긍정적\n"
+#             "AAPL: 관망 - 실적 발표 대기\n"
+#             "TSLA: 매도 - 단기 과열\n\n"
+#             + csv_text
+#         )
+#         resp = client.chat.completions.create(
+#             model="gpt-4o-mini",
+#             messages=[{"role":"user","content":prompt}],
+#             max_tokens=600
+#         )
+#         raw_text = resp.choices[0].message.content.strip()
+
+#         # ✅ 서식 변환
+#         lines = []
+#         for line in raw_text.splitlines():
+#             if ":" not in line:
+#                 continue
+#             ticker, desc = line.split(":", 1)
+#             ticker = ticker.strip()
+#             desc = desc.strip()
+
+#             # 신호 아이콘 매핑
+#             if "매수" in desc:
+#                 icon = "🟢"
+#             elif "매도" in desc:
+#                 icon = "🔴"
+#             elif "관망" in desc:
+#                 icon = "🟡"
+#             else:
+#                 icon = "🔵"  # fallback
+
+#             lines.append(f"{icon} <b>{ticker}</b>: {desc}")
+
+#         formatted_html = "<br>".join(lines)
+#         return f"<div class='card'>{formatted_html}</div>"
+#     except Exception as e:
+#         return f"<p>GPT summary error: {e}</p>"
+
+def gpt_strategy_summary(econ_html, holdings_news, watchlist_news, market_news, policy_focus):
+    """
+    GPT Opinion (투자의견) 섹션을 작성.
+    경제지표 + 투자종목 뉴스 + 관심종목 뉴스 + 시장 뉴스 + 정책 포커스를 종합적으로 분석.
+    
+    Args:
+        econ_html (str): 경제 지표 요약 (HTML or 텍스트)
+        holdings_news (dict): 투자 종목 뉴스 {ticker: [뉴스 요약...]}
+        watchlist_news (dict): 관심 종목 뉴스 {ticker: [뉴스 요약...]}
+        market_news (str): 시장 뉴스 요약
+        policy_focus (str): 정책/매크로 포커스 요약
+
+    Returns:
+        str: HTML 형식의 GPT Opinion 섹션
+    """
     try:
-        client = OpenAI(api_key=api_key)
-        csv_text = pd.DataFrame(ticker_rows).to_csv(index=False)
-        prompt = (
-            "다음 표의 RSI, MACD, P/E, ROE, EPS, 손절/목표가를 바탕으로 "
-            "각 종목의 매매 전략을 종목별로 1줄씩 한국어로 요약해줘.\n\n"
-            "출력 형식은 반드시 아래처럼 해줘:\n"
-            "종목명: (매수|매도|관망) - 간단 설명\n\n"
-            "예시:\n"
-            "NVDA: 매수 - 기술적 지표 긍정적\n"
-            "AAPL: 관망 - 실적 발표 대기\n"
-            "TSLA: 매도 - 단기 과열\n\n"
-            + csv_text
-        )
-        resp = client.chat.completions.create(
+        client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
+
+        # GPT에 전달할 프롬프트 구성
+        prompt = f"""
+너는 전문 투자 전략가다. 아래 자료들을 종합하여 투자 의견을 작성하라.
+
+📊 경제 지표:
+{econ_html}
+
+📂 투자 종목 뉴스:
+{holdings_news}
+
+👁️ 관심 종목 뉴스:
+{watchlist_news}
+
+🌍 시장 뉴스:
+{market_news}
+
+🏛️ 정책 포커스:
+{policy_focus}
+
+요구사항:
+1. 투자 종목(보유 종목)과 관심 종목을 반드시 구분해서 각각 분석할 것.
+2. 각 종목의 투자 관점(매수/보유/매도/관망)을 명확히 제시할 것.
+3. 경제 지표, 시장 상황, 정책 환경이 종목별 전략에 어떤 영향을 주는지 연결해서 설명할 것.
+4. 출력은 HTML 형식으로, 제목과 섹션 구분을 포함할 것.
+5. 종목별 분석은 🔵🟢🔴🟡 아이콘을 활용해 가독성을 높일 것.
+        """
+
+        response = client.chat.completions.create(
             model="gpt-4o-mini",
-            messages=[{"role":"user","content":prompt}],
-            max_tokens=600
+            messages=[
+                {"role": "system", "content": "You are an expert financial analyst."},
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0.4,
+            max_tokens=1000
         )
-        raw_text = resp.choices[0].message.content.strip()
 
-        # ✅ 서식 변환
-        lines = []
-        for line in raw_text.splitlines():
-            if ":" not in line:
-                continue
-            ticker, desc = line.split(":", 1)
-            ticker = ticker.strip()
-            desc = desc.strip()
+        opinion_text = response.choices[0].message.content.strip()
 
-            # 신호 아이콘 매핑
-            if "매수" in desc:
-                icon = "🟢"
-            elif "매도" in desc:
-                icon = "🔴"
-            elif "관망" in desc:
-                icon = "🟡"
-            else:
-                icon = "🔵"  # fallback
+        return f"""
+        <h2>🤖 GPT Opinion (투자의견)</h2>
+        <div style="line-height:1.6">{opinion_text}</div>
+        """
 
-            lines.append(f"{icon} <b>{ticker}</b>: {desc}")
-
-        formatted_html = "<br>".join(lines)
-        return f"<div class='card'>{formatted_html}</div>"
     except Exception as e:
-        return f"<p>GPT summary error: {e}</p>"
+        return f"<h2>🤖 GPT Opinion (투자의견)</h2><p>Error generating opinion: {e}</p>"
 
 def translate_ko(text):
     api_key = os.environ.get("OPENAI_API_KEY")
