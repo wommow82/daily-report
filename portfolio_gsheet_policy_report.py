@@ -52,6 +52,10 @@ def fig_to_base64(fig):
 # 포트폴리오 분석
 # ------------------------------------------------------------
 def portfolio_analysis(df_hold, settings):
+    cash_usd = float(settings.get("CashUSD", 0))
+    total_value = 0
+
+    # 종목별 평가금액
     for idx, row in df_hold.iterrows():
         ticker = row["Ticker"]
         sh = float(row["Shares"])
@@ -59,40 +63,58 @@ def portfolio_analysis(df_hold, settings):
             price = yf.Ticker(ticker).history(period="1d")["Close"].iloc[-1]
         except Exception:
             price = row["AvgPrice"]
+        if pd.isna(price):  # fallback
+            price = row["AvgPrice"]
         df_hold.loc[idx, "LastPrice"] = round(price, 2)
         df_hold.loc[idx, "Value"] = round(sh * price, 2)
+
     df_hold["Shares"] = df_hold["Shares"].round(2)
     df_hold["AvgPrice"] = df_hold["AvgPrice"].round(2)
     df_hold["Value"] = df_hold["Value"].round(2)
+    total_value = df_hold["Value"].sum() + cash_usd
 
-    total_value = df_hold["Value"].sum() + float(settings.get("CashUSD", 0))
+    # Weight 계산
     df_hold["Weight"] = round(df_hold["Value"] / total_value * 100, 2)
 
-    fig, ax = plt.subplots()
-    ax.pie(df_hold["Weight"], labels=df_hold["Ticker"], autopct="%1.1f%%")
-    ax.set_title("Portfolio Weights (포트폴리오 비중)")
-    img = fig_to_base64(fig)
-    plt.close(fig)
+    # 현금 추가
+    cash_row = {
+        "Ticker": "CASH",
+        "Shares": "-",
+        "AvgPrice": "-",
+        "LastPrice": 1.00,
+        "Value": round(cash_usd, 2),
+        "Weight": round(cash_usd / total_value * 100, 2)
+    }
+    df_hold = pd.concat([df_hold, pd.DataFrame([cash_row])], ignore_index=True)
 
-    return df_hold, f"<img src='data:image/png;base64,{img}'/>"
+    # 파이차트
+    if total_value > 0:
+        fig, ax = plt.subplots()
+        ax.pie(df_hold["Weight"], labels=df_hold["Ticker"], autopct="%1.1f%%")
+        ax.set_title("Portfolio Weights (포트폴리오 비중)")
+        img = fig_to_base64(fig)
+        plt.close(fig)
+        pie_html = f"<img src='data:image/png;base64,{img}'/>"
+    else:
+        pie_html = "<p>No data for allocation chart</p>"
+
+    return df_hold, pie_html
 
 # ------------------------------------------------------------
 # 주요 지수 섹션
 # ------------------------------------------------------------
 def index_section():
-    tickers = ["^GSPC", "^IXIC", "^DJI"]
-    data = {}
-    for t in tickers:
+    tickers = {"S&P500": "^GSPC", "Nasdaq": "^IXIC", "Dow Jones": "^DJI"}
+    rows = []
+    for name, t in tickers.items():
         try:
             df = yf.download(t, period="5d")
-            data[t] = round(df["Close"].iloc[-1], 2)
+            last = round(float(df["Close"].iloc[-1]), 2)
+            rows.append({"Index": name, "Value": last})
         except Exception:
-            data[t] = "N/A"
-    html = "<h2>📈 Major Index (주요 지수)</h2><ul>"
-    for k,v in data.items():
-        html += f"<li>{k}: {v}</li>"
-    html += "</ul>"
-    return html
+            rows.append({"Index": name, "Value": "N/A"})
+    df_idx = pd.DataFrame(rows)
+    return "<h2>📈 Major Index (주요 지수)</h2>" + df_idx.to_html(index=False)
 
 # ------------------------------------------------------------
 # 뉴스 요약 섹션 (한글 번역 추가)
@@ -110,6 +132,7 @@ def recent_news_section():
     for a in articles:
         title = a.get("title") or ""
         desc = a.get("description") or ""
+        date = (a.get("publishedAt") or "")[:10]
         trans = ""
         api_key_openai = os.environ.get("OPENAI_API_KEY")
         if api_key_openai:
@@ -117,13 +140,13 @@ def recent_news_section():
                 client = OpenAI(api_key=api_key_openai)
                 resp = client.chat.completions.create(
                     model="gpt-4o-mini",
-                    messages=[{"role":"user","content":f"Translate into Korean:\nTitle: {title}\nDescription: {desc}"}],
+                    messages=[{"role":"user","content":f"Translate into Korean:\\nTitle: {title}\\nDescription: {desc}"}],
                     max_tokens=150
                 )
                 trans = resp.choices[0].message.content
             except:
                 pass
-        items.append(f"<div class='card'><b>{title}</b><br><small>{desc}</small><br><i>{trans}</i></div>")
+        items.append(f"<div class='card'><b>{title}</b> <small>({date})</small><br><small>{desc}</small><br><i>{trans}</i></div>")
     return "<h2>📰 Market News (시장 뉴스)</h2>" + "".join(items)
 
 # ------------------------------------------------------------
