@@ -333,38 +333,44 @@ def policy_focus_section():
 FRED_TICKERS = {
     "CPI (소비자물가지수)": "CPIAUCSL",
     "Unemployment (실업률)": "UNRATE",
-    "GDP Growth (GDP 성장률)": "A191RL1Q225SBEA",
     "Fed Funds Rate (연방기금금리)": "FEDFUNDS",
-    "PCE (개인소비지출)": "PCE"
+    "PCE (개인소비지출)": "PCE",
+    "M2 (통화량)": "M2SL"
 }
+
 def econ_section():
     rows = []
+    months = pd.date_range(start=f"{datetime.today().year}-01-01", 
+                           end=datetime.today(), freq="M").strftime("%Y-%m").tolist()
+
+    table_data = {"Indicator (지표)": []}
+    for m in months:
+        table_data[m] = []
+
     for name, tick in FRED_TICKERS.items():
         try:
-            df = yf.download(tick, period="1y", interval="1mo")
+            df = yf.download(tick, period="1y", interval="1mo", progress=False)
             if df.empty:
-                rows.append({"Indicator (지표)": name, "Latest (최근치)": "N/A", "Δ MoM (전월대비)": "N/A"})
-                continue
-            ser = df["Close"].dropna()
-            last = float(ser.iloc[-1])
-            prev = float(ser.iloc[-2]) if len(ser) >= 2 else last
-            rows.append({
-                "Indicator (지표)": name,
-                "Latest (최근치)": fmt_1(last),
-                "Δ MoM (전월대비)": fmt_1(last - prev)
-            })
+                row = [name] + ["N/A"] * len(months)
+            else:
+                ser = df["Adj Close"].dropna()
+                monthly_vals = {d.strftime("%Y-%m"): v for d, v in ser.items()}
+                row = [name]
+                for m in months:
+                    if m in monthly_vals:
+                        row.append(fmt_1(monthly_vals[m]))
+                    else:
+                        row.append("N/A")
         except Exception:
-            rows.append({"Indicator (지표)": name, "Latest (최근치)": "N/A", "Δ MoM (전월대비)": "N/A"})
-    return "<h2>📊 Economic Indicators (경제 지표)</h2>" + pd.DataFrame(rows).to_html(index=False)
+            row = [name] + ["N/A"] * len(months)
 
-INDEX_MAP = {
-    "S&P 500": "^GSPC",
-    "Nasdaq": "^IXIC",
-    "Dow Jones": "^DJI",
-    "VIX": "^VIX",
-    "Gold": "GC=F",
-    "WTI Oil": "CL=F"
-}
+        table_data["Indicator (지표)"].append(row[0])
+        for idx, m in enumerate(months):
+            table_data[m].append(row[idx+1])
+
+    df_out = pd.DataFrame(table_data)
+    return "<h2>📊 Economic Indicators (경제 지표)</h2>" + df_out.to_html(index=False)
+
 def indices_section():
     rows = []
     for name, tick in INDEX_MAP.items():
