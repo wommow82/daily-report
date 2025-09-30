@@ -833,12 +833,6 @@ def build_report_html():
     strat_df = build_strategy_table(tickers_hold, last_prices, settings)
     strategy_html = f"<h2>🧭 Strategies (종목별 매매 전략)</h2>{strat_df.to_html(index=False)}"
 
-    # -------- News Section --------
-    hold_news_html = holdings_news_section(tickers_hold)
-    watch_news_html = watchlist_news_section(tickers_watch) if tickers_watch else ""
-    market_html = market_news_section()
-    policy_html = policy_focus_section()
-
     # -------- Econ / Indices --------
     econ_html = econ_section()
     indices_html = indices_section()
@@ -846,10 +840,10 @@ def build_report_html():
     # -------- GPT Opinion (투자의견) --------
     gpt_html = gpt_strategy_summary(
         econ_html,
-        hold_news_html,
-        watch_news_html,
-        market_html,
-        policy_html
+        "보유 종목 뉴스 요약",
+        "관심 종목 뉴스 요약",
+        "시장 뉴스 요약",
+        "정책 포커스 요약"
     )
 
     # -------- HTML 최종 출력 --------
@@ -875,10 +869,6 @@ def build_report_html():
     {holdings_html}
     {signals_html}
     {strategy_html}
-    {hold_news_html}
-    {watch_news_html}
-    {market_html}
-    {policy_html}
     {econ_html}
     {indices_html}
     {gpt_html}
