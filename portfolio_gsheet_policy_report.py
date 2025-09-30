@@ -7,12 +7,28 @@ import yfinance as yf
 import smtplib
 import requests
 import feedparser
+import pickle
 from fredapi import Fred
 from openai import OpenAI
 from oauth2client.service_account import ServiceAccountCredentials
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from datetime import datetime, timedelta
+
+# FRED 클라이언트
+fred = Fred(api_key=os.environ.get("FRED_API_KEY"))
+
+# 캐시 파일 경로
+CACHE_FILE = "fred_cache.pkl"
+
+# FRED 지표 매핑
+FRED_TICKERS = {
+    "CPI (소비자물가지수)": "CPIAUCSL",
+    "Unemployment (실업률)": "UNRATE",
+    "Fed Funds Rate (연방기금금리)": "FEDFUNDS",
+    "PCE (개인소비지출)": "PCE",
+    "M2 (통화량)": "M2SL"
+}
 
 def fmt_money_2(x):
     try:
@@ -418,50 +434,74 @@ def policy_focus_section():
         cards.append(f"<div class='card'><b><a href='{url}' target='_blank'>{title}</a></b> <small>({date})</small><br><small>{desc}</small><br><i>{ko}</i></div>")
     return "<h2>🏛 Policy Focus (정책 포커스)</h2>" + "".join(cards)
 
-def econ_section():
-    # 가져올 경제 지표 코드
-    FRED_TICKERS = {
-        "CPI (소비자물가지수)": "CPIAUCSL",
-        "Unemployment (실업률)": "UNRATE",
-        "Fed Funds Rate (연방기금금리)": "FEDFUNDS",
-        "PCE (개인소비지출)": "PCE",
-        "M2 (통화량)": "M2SL"
-    }
+def load_fred_cache():
+    """캐시 파일 불러오기"""
+    if os.path.exists(CACHE_FILE):
+        with open(CACHE_FILE, "rb") as f:
+            cache = pickle.load(f)
+        if cache.get("date") == datetime.today().date():
+            return cache.get("data", {})
+    return {}
 
-    # 1월부터 현재까지 월별 범위 생성
-    months = pd.date_range(start=f"{datetime.today().year}-01-01",
-                           end=datetime.today(), freq="M").strftime("%Y-%m").tolist()
+def save_fred_cache(data):
+    """캐시 파일 저장"""
+    cache = {"date": datetime.today().date(), "data": data}
+    with open(CACHE_FILE, "wb") as f:
+        pickle.dump(cache, f)
 
-    table_data = {"Indicator (지표)": []}
-    for m in months:
-        table_data[m] = []
+def fetch_economic_data():
+    """오늘자 경제지표 데이터를 가져오거나 캐시 사용"""
+    cached = load_fred_cache()
+    if cached:
+        return cached
 
+    result = {}
     for name, tick in FRED_TICKERS.items():
         try:
-            # FRED에서 시계열 데이터 가져오기
             series = fred.get_series(tick, observation_start=f"{datetime.today().year}-01-01")
-
             if series is None or series.empty:
-                row = [name] + ["N/A"] * len(months)
-            else:
-                monthly_vals = series.resample("M").last().dropna()
-                monthly_dict = {d.strftime("%Y-%m"): v for d, v in monthly_vals.items()}
+                result[name] = None
+                continue
 
-                row = [name]
-                for m in months:
-                    if m in monthly_dict:
-                        row.append(fmt_1(monthly_dict[m]))
-                    else:
-                        row.append("N/A")
+            monthly_vals = series.resample("M").last().dropna()
+            if monthly_vals.empty:
+                result[name] = None
+                continue
+
+            last_val = float(monthly_vals.iloc[-1])
+            prev_val = float(monthly_vals.iloc[-2]) if len(monthly_vals) > 1 else last_val
+            change = last_val - prev_val
+            pct = (change / prev_val) * 100 if prev_val != 0 else 0
+            result[name] = (prev_val, last_val, change, pct)
         except Exception:
-            row = [name] + ["N/A"] * len(months)
+            result[name] = None
 
-        table_data["Indicator (지표)"].append(row[0])
-        for idx, m in enumerate(months):
-            table_data[m].append(row[idx+1])
+    save_fred_cache(result)
+    return result
 
-    df_out = pd.DataFrame(table_data)
-    return "<h2>📊 Economic Indicators (경제 지표)</h2>" + df_out.to_html(index=False)
+def econ_section():
+    """📊 Economic Indicators (경제 지표) HTML"""
+    econ_data = fetch_economic_data()
+    rows = []
+
+    for name in FRED_TICKERS.keys():
+        if econ_data.get(name) is None:
+            rows.append([name, "N/A", "N/A"])
+            continue
+
+        prev_val, last_val, change, pct = econ_data[name]
+        if change > 0:
+            color, arrow = "green", "🟢"
+        elif change < 0:
+            color, arrow = "red", "🔴"
+        else:
+            color, arrow = "black", "⚫"
+
+        last_html = f"<span style='color:{color}'>{last_val:,.2f} ({change:+.2f}, {pct:+.2f}%) {arrow}</span>"
+        rows.append([name, f"{prev_val:,.2f}", last_html])
+
+    df_out = pd.DataFrame(rows, columns=["Indicator (지표)", "Prev Value (이전)", "Last Value (최근)"])
+    return "<h2>📊 Economic Indicators (경제 지표)</h2>" + df_out.to_html(index=False, escape=False)
 
 def indices_section():
     import yfinance as yf
@@ -470,7 +510,7 @@ def indices_section():
     import os
 
     # FRED API 클라이언트
-    fred = Fred(api_key=os.environ.get("FRED_API_KEY"))
+    # fred = Fred(api_key=os.environ.get("FRED_API_KEY"))
 
     # 주요 지수 (Yahoo Finance)
     INDEX_MAP = {
