@@ -410,6 +410,7 @@ def send_email_html(subject, html_body):
 def build_report_html():
     df_hold, df_watch, settings = load_holdings_watchlist_settings()
 
+    # --- Holdings 데이터 전처리 ---
     if "Shares" in df_hold.columns:
         df_hold["Shares"] = pd.to_numeric(df_hold["Shares"], errors="coerce").fillna(0.0)
     if "AvgPrice" in df_hold.columns:
@@ -509,29 +510,44 @@ def build_report_html():
     {df_disp.to_html(index=False, escape=False)}
     """
 
-    # -------- 나머지 섹션 (Signals / Strategies / News / Econ / Indices / GPT Opinion) --------
-    tickers = [t for t in df_hold["Ticker"].tolist() if isinstance(t, str)]
-    signals_df = build_signals_table(tickers)
-    signals_html = f"<h2>📈 Signals (종목별 판단 지표)</h2>{signals_df.to_html(index=False)}"
+    # -------- Signals Section --------
+    tickers_hold = [t for t in df_hold["Ticker"].tolist() if isinstance(t, str)]
+    tickers_watch = [t for t in df_watch["Ticker"].tolist() if isinstance(t, str)]
 
+    # 보유 종목 신호
+    signals_df_hold = build_signals_table(tickers_hold)
+    signals_html_hold = f"<h2>📈 Signals – Holdings (보유 종목)</h2>{signals_df_hold.to_html(index=False)}"
+
+    # 관심 종목 신호
+    signals_html_watch = ""
+    if tickers_watch:
+        signals_df_watch = build_signals_table(tickers_watch)
+        signals_html_watch = f"<h2>📊 Signals – Watchlist (관심 종목)</h2>{signals_df_watch.to_html(index=False)}"
+
+    signals_html = signals_html_hold + signals_html_watch
+
+    # -------- Strategies Section --------
     last_prices = {}
-    for t in tickers:
+    for t in tickers_hold:
         lp, _ = get_last_and_prev_close(t)
         last_prices[t] = lp
-    strat_df = build_strategy_table(tickers, last_prices, settings)
-    merged_for_gpt = pd.merge(signals_df, strat_df, on="Ticker (종목)", how="left")
+    strat_df = build_strategy_table(tickers_hold, last_prices, settings)
+    merged_for_gpt = pd.merge(signals_df_hold, strat_df, on="Ticker (종목)", how="left")
     strategy_html = f"<h2>🧭 Strategies (종목별 매매 전략)</h2>{strat_df.to_html(index=False)}"
     strategy_summary_html = f"<h3>📝 Strategy Summary (전략 요약)</h3>{gpt_strategy_summary(merged_for_gpt.to_dict(orient='records'))}"
 
-    hold_news_html = holdings_news_section(tickers)
-    watch_news_html = watchlist_news_section(df_watch['Ticker'].dropna().tolist()) if 'Ticker' in df_watch.columns else ""
+    # -------- News Section --------
+    hold_news_html = holdings_news_section(tickers_hold)
+    watch_news_html = watchlist_news_section(tickers_watch) if tickers_watch else ""
     market_html = market_news_section()
     policy_html = policy_focus_section()
 
+    # -------- Econ / Indices / GPT Opinion --------
     econ_html = econ_section()
     indices_html = indices_section()
     gpt_html = f"<h2>🤖 GPT Opinion (투자의견)</h2>{gpt_strategy_summary(merged_for_gpt.to_dict(orient='records'))}"
 
+    # -------- HTML 최종 출력 --------
     now = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
     style = """
     <style>
