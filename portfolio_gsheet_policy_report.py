@@ -159,6 +159,40 @@ def build_report_html():
     return html
 
 # ------------------------------------------------------------
+# 메일 전송
+# ------------------------------------------------------------
+
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
+
+def send_email_html(subject, html_body):
+    sender = os.environ.get("EMAIL_SENDER")
+    password = os.environ.get("EMAIL_PASSWORD")
+    receiver = os.environ.get("EMAIL_RECEIVER")
+    smtp_host = os.environ.get("SMTP_HOST", "smtp.gmail.com")
+    smtp_port = int(os.environ.get("SMTP_PORT", "587"))
+
+    if not (sender and password and receiver):
+        print("⚠️ Missing email settings → Email not sent")
+        return
+
+    msg = MIMEMultipart("alternative")
+    msg["Subject"] = subject
+    msg["From"] = sender
+    msg["To"] = receiver
+    msg.attach(MIMEText(html_body, "html", _charset="utf-8"))
+
+    try:
+        with smtplib.SMTP(smtp_host, smtp_port) as server:
+            server.starttls()
+            server.login(sender, password)
+            server.sendmail(sender, receiver, msg.as_string())
+        print("✅ Email sent to:", receiver)
+    except Exception as e:
+        print("❌ Email send failed:", e)
+
+# ------------------------------------------------------------
 # 메인
 # ------------------------------------------------------------
 def main():
@@ -167,6 +201,9 @@ def main():
     with open(outname, "w", encoding="utf-8") as f:
         f.write(html_doc)
     print(f"Report saved: {outname}")
+
+    # 메일 발송
+    send_email_html(f"📊 Portfolio Report - {datetime.now().strftime('%Y-%m-%d')}", html_doc)
 
 if __name__ == "__main__":
     main()
