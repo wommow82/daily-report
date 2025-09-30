@@ -1,12 +1,23 @@
-yfinance
-pandas
-matplotlib
-numpy
-requests
-beautifulsoup4
-selenium
-openai
-schedule
+# 기본 데이터 처리
+pandas>=2.0.0
+numpy>=1.24.0
+matplotlib>=3.7.0
+
+# 금융 데이터
+yfinance>=0.2.50
+fredapi>=0.5.0
+pandas_datareader>=0.10.0
+
+# 웹/네트워크
+requests>=2.31.0
+beautifulsoup4>=4.12.0
+selenium>=4.10.0
+
+# 스케줄링
+schedule>=1.2.0
+
+# 번역
 googletrans==4.0.0-rc1
-fredapi
-pandas_datareader
+
+# OpenAI 최신 버전 (GPT 호출용)
+openai>=1.12.0
