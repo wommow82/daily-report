@@ -4,14 +4,15 @@ import time
 import pandas as pd
 import numpy as np
 import yfinance as yf
+import smtplib
 import requests
+import feedparser
 from fredapi import Fred
 from openai import OpenAI
 from oauth2client.service_account import ServiceAccountCredentials
-from datetime import datetime
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
-import smtplib
+from datetime import datetime, timedelta
 
 def fmt_money_2(x):
     try:
@@ -276,12 +277,68 @@ def translate_ko(text):
     except Exception:
         return ""
 
-def fetch_news_for_ticker(ticker, api_key, page_size=3):
-    url = f"https://newsapi.org/v2/everything?q={ticker}&language=en&sortBy=publishedAt&pageSize={page_size}&apiKey={api_key}"
-    r = requests.get(url, timeout=20)
-    if r.status_code != 200:
-        return []
-    return r.json().get("articles", [])
+# def fetch_news_for_ticker(ticker, api_key, page_size=3):
+#     url = f"https://newsapi.org/v2/everything?q={ticker}&language=en&sortBy=publishedAt&pageSize={page_size}&apiKey={api_key}"
+#     r = requests.get(url, timeout=20)
+#     if r.status_code != 200:
+#         return []
+#     return r.json().get("articles", [])
+
+def fetch_news_for_ticker(ticker, api_key, page_size=3, days=7):
+    """
+    종목 뉴스 가져오기: NewsAPI → 실패/한도 초과 시 Google News RSS fallback
+
+    Args:
+        ticker (str): 종목 티커 (예: 'AAPL')
+        api_key (str): NewsAPI 키
+        page_size (int): 가져올 뉴스 개수
+        days (int): 최근 n일 동안의 뉴스만 가져오기 (NewsAPI 전용)
+
+    Returns:
+        list of dict: [{title, url, source, published}, ...]
+    """
+    articles = []
+
+    # 1️⃣ NewsAPI 시도
+    try:
+        url = "https://newsapi.org/v2/everything"
+        params = {
+            "q": ticker,
+            "apiKey": api_key,
+            "language": "en",
+            "sortBy": "publishedAt",
+            "pageSize": page_size,
+            "from": (datetime.today() - timedelta(days=days)).strftime("%Y-%m-%d"),
+        }
+        r = requests.get(url, params=params, timeout=20)
+        if r.status_code == 200:
+            data = r.json()
+            for a in data.get("articles", []):
+                articles.append({
+                    "title": a.get("title"),
+                    "url": a.get("url"),
+                    "source": a.get("source", {}).get("name", ""),
+                    "published": a.get("publishedAt", "")[:10],
+                })
+    except Exception as e:
+        print(f"⚠️ NewsAPI 오류: {e}")
+
+    # 2️⃣ fallback → Google News RSS
+    if not articles:
+        try:
+            rss_url = f"https://news.google.com/rss/search?q={ticker}+stock&hl=en&gl=US&ceid=US:en"
+            feed = feedparser.parse(rss_url)
+            for entry in feed.entries[:page_size]:
+                articles.append({
+                    "title": entry.title,
+                    "url": entry.link,
+                    "source": getattr(entry, "source", {}).get("title", "Google News") if hasattr(entry, "source") else "Google News",
+                    "published": entry.published[:16] if hasattr(entry, "published") else "",
+                })
+        except Exception as e:
+            print(f"⚠️ Google News RSS 오류: {e}")
+
+    return articles
 
 def holdings_news_section(tickers):
     api_key = os.environ.get("NEWS_API_KEY")
