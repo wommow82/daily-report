@@ -16,8 +16,5 @@ selenium>=4.10.0
 # 스케줄링
 schedule>=1.2.0
 
-# 번역
-googletrans==4.0.0-rc1
-
 # OpenAI 최신 버전 (GPT 호출용)
 openai>=1.12.0
