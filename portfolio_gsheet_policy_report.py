@@ -278,59 +278,51 @@ def build_strategy_table(tickers, last_prices, settings):
 #     except Exception as e:
 #         return f"<p>GPT summary error: {e}</p>"
 
+import os
+from openai import OpenAI
+
 def gpt_strategy_summary(econ_html, holdings_news, watchlist_news, market_news, policy_focus):
     """
-    GPT Opinion (투자의견) 섹션을 작성.
-    경제지표 + 투자종목 뉴스 + 관심종목 뉴스 + 시장 뉴스 + 정책 포커스를 종합적으로 분석.
-    
-    Args:
-        econ_html (str): 경제 지표 요약 (HTML or 텍스트)
-        holdings_news (dict): 투자 종목 뉴스 {ticker: [뉴스 요약...]}
-        watchlist_news (dict): 관심 종목 뉴스 {ticker: [뉴스 요약...]}
-        market_news (str): 시장 뉴스 요약
-        policy_focus (str): 정책/매크로 포커스 요약
-
-    Returns:
-        str: HTML 형식의 GPT Opinion 섹션
+    GPT Opinion (투자의견)
+    - 투자 종목, 관심 종목을 각각 분석
+    - 마지막에 100자 내외의 종합 전략 요약 포함
     """
     try:
         client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
 
-        # GPT에 전달할 프롬프트 구성
         prompt = f"""
-너는 전문 투자 전략가다. 아래 자료들을 종합하여 투자 의견을 작성하라.
+너는 전문 투자 전략가다. 다음 자료들을 바탕으로 투자 전략 보고서를 작성하라.
 
 📊 경제 지표:
-{econ_html}
+{econ_html[:600]}
 
 📂 투자 종목 뉴스:
-{holdings_news}
+{holdings_news[:600]}
 
 👁️ 관심 종목 뉴스:
-{watchlist_news}
+{watchlist_news[:600]}
 
 🌍 시장 뉴스:
-{market_news}
+{market_news[:600]}
 
 🏛️ 정책 포커스:
-{policy_focus}
+{policy_focus[:600]}
 
 요구사항:
-1. 투자 종목(보유 종목)과 관심 종목을 반드시 구분해서 각각 분석할 것.
-2. 각 종목의 투자 관점(매수/보유/매도/관망)을 명확히 제시할 것.
-3. 경제 지표, 시장 상황, 정책 환경이 종목별 전략에 어떤 영향을 주는지 연결해서 설명할 것.
-4. 출력은 HTML 형식으로, 제목과 섹션 구분을 포함할 것.
-5. 종목별 분석은 🔵🟢🔴🟡 아이콘을 활용해 가독성을 높일 것.
+1. 투자 종목(보유 종목)과 관심 종목을 각각 구분해 종목별로 분석한다.
+2. 각 종목 분석에 매수🟢, 매도🔴, 관망🟡, 일반 분석🔵 아이콘을 활용한다.
+3. 마지막에 '📌 종합 전략 (100자 요약)'을 따로 작성해라.
+4. 전체 출력은 HTML 형식으로, 제목과 섹션 구분을 포함한다.
         """
 
         response = client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[
-                {"role": "system", "content": "You are an expert financial analyst."},
+                {"role": "system", "content": "You are a professional financial analyst writing structured investment strategy reports."},
                 {"role": "user", "content": prompt}
             ],
-            temperature=0.4,
-            max_tokens=1000
+            temperature=0.5,
+            max_tokens=800
         )
 
         opinion_text = response.choices[0].message.content.strip()
@@ -743,7 +735,7 @@ def build_report_html():
     }
     df_disp = pd.concat([df_hold, pd.DataFrame([cash_row])], ignore_index=True)
 
-    # ---- Profit/Loss 계산 (⚠️ 포맷팅 전에 먼저 계산) ----
+    # ---- Profit/Loss 계산 ----
     def calc_profit_loss(row):
         try:
             sh = float(row.get("Shares", 0) or 0)
@@ -823,11 +815,9 @@ def build_report_html():
     tickers_hold = [t for t in df_hold["Ticker"].tolist() if isinstance(t, str)]
     tickers_watch = [t for t in df_watch["Ticker"].tolist() if isinstance(t, str)]
 
-    # 보유 종목 신호
     signals_df_hold = build_signals_table(tickers_hold)
     signals_html_hold = f"<h2>📈 Signals – Holdings (보유 종목)</h2>{signals_df_hold.to_html(index=False)}"
 
-    # 관심 종목 신호
     signals_html_watch = ""
     if tickers_watch:
         signals_df_watch = build_signals_table(tickers_watch)
@@ -841,9 +831,7 @@ def build_report_html():
         lp, _ = get_last_and_prev_close(t)
         last_prices[t] = lp
     strat_df = build_strategy_table(tickers_hold, last_prices, settings)
-    merged_for_gpt = pd.merge(signals_df_hold, strat_df, on="Ticker (종목)", how="left")
     strategy_html = f"<h2>🧭 Strategies (종목별 매매 전략)</h2>{strat_df.to_html(index=False)}"
-    strategy_summary_html = f"<h3>📝 Strategy Summary (전략 요약)</h3>{gpt_strategy_summary(merged_for_gpt.to_dict(orient='records'))}"
 
     # -------- News Section --------
     hold_news_html = holdings_news_section(tickers_hold)
@@ -851,10 +839,18 @@ def build_report_html():
     market_html = market_news_section()
     policy_html = policy_focus_section()
 
-    # -------- Econ / Indices / GPT Opinion --------
+    # -------- Econ / Indices --------
     econ_html = econ_section()
     indices_html = indices_section()
-    gpt_html = f"<h2>🤖 GPT Opinion (투자의견)</h2>{gpt_strategy_summary(merged_for_gpt.to_dict(orient='records'))}"
+
+    # -------- GPT Opinion (투자의견) --------
+    gpt_html = gpt_strategy_summary(
+        econ_html,
+        hold_news_html,
+        watch_news_html,
+        market_html,
+        policy_html
+    )
 
     # -------- HTML 최종 출력 --------
     now = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
@@ -879,7 +875,6 @@ def build_report_html():
     {holdings_html}
     {signals_html}
     {strategy_html}
-    {strategy_summary_html}
     {hold_news_html}
     {watch_news_html}
     {market_html}
