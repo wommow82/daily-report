@@ -187,15 +187,29 @@ def gpt_strategy_summary(ticker_rows):
         client = OpenAI(api_key=api_key)
         csv_text = pd.DataFrame(ticker_rows).to_csv(index=False)
         prompt = (
-            "다음 표의 RSI, MACD, P/E, ROE, EPS, 손절/목표가를 바탕으로 각 종목의 기본 매매전략과 "
-            "추가적으로 고려할 사항을 한국어로 간결히 bullet 5줄 이내로 요약해줘.\n\n" + csv_text
+            "다음 표의 RSI, MACD, P/E, ROE, EPS, 손절/목표가를 바탕으로 "
+            "각 종목의 기본 매매전략과 추가적으로 고려할 사항을 "
+            "한국어로 종목별로 1줄씩 요약해줘. "
+            "출력은 반드시 '종목명: 설명' 형태로 해줘.\n\n" + csv_text
         )
         resp = client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[{"role":"user","content":prompt}],
-            max_tokens=400
+            max_tokens=500
         )
-        return f"<div class='card'>{resp.choices[0].message.content}</div>"
+        raw_text = resp.choices[0].message.content.strip()
+
+        # ✅ 서식 변환: 줄 단위로 잘라 🔵 + bold 종목명 적용
+        lines = []
+        for line in raw_text.splitlines():
+            if ":" in line:
+                ticker, desc = line.split(":", 1)
+                lines.append(f"🔵 <b>{ticker.strip()}</b>: {desc.strip()}")
+            elif line.strip():
+                lines.append(f"🔵 {line.strip()}")
+        formatted_html = "<br>".join(lines)
+
+        return f"<div class='card'>{formatted_html}</div>"
     except Exception as e:
         return f"<p>GPT summary error: {e}</p>"
 
@@ -386,7 +400,7 @@ def build_report_html():
 
     cash_usd = float(settings.get("CashUSD", 0) or 0)
 
-    # ✅ 원본 df_hold를 넘겨서 값이 채워지도록 함
+    # ✅ 원본 df_hold 사용
     total_today, total_yday = compute_portfolio_values(df_hold, cash_usd)
 
     # 총자산 증감
@@ -402,17 +416,23 @@ def build_report_html():
     }
     df_disp = pd.concat([df_hold, pd.DataFrame([cash_row])], ignore_index=True)
 
-    # ---- 수익/손실 계산 ----
+    # ---- Profit/Loss 계산 (⚠️ 포맷팅 전에 먼저 계산) ----
     def calc_profit_loss(row):
         try:
-            if pd.isna(row["Shares"]) or pd.isna(row["AvgPrice"]):
-                return "-"
-            cost = float(row["Shares"]) * float(row["AvgPrice"])
-            profit = float(row["Value"]) - cost
-            color = "green" if profit > 0 else ("red" if profit < 0 else "black")
-            return f"<span style='color:{color}'>{fmt_money_2(profit)}</span>"
+            sh = float(row.get("Shares", 0) or 0)
+            avg = float(row.get("AvgPrice", 0) or 0)
+            val = float(row.get("Value", 0) or 0)
+            cost = sh * avg
+            profit = val - cost
+            if profit > 0:
+                return f"<span style='color:green'>+{fmt_money_2(profit)}</span>"
+            elif profit < 0:
+                return f"<span style='color:red'>{fmt_money_2(profit)}</span>"
+            else:
+                return f"<span style='color:black'>{fmt_money_2(profit)}</span>"
         except Exception:
             return "-"
+    df_disp["Profit/Loss (수익/손실)"] = df_disp.apply(calc_profit_loss, axis=1)
 
     # ---- 포맷팅 함수 ----
     def fmt_price_with_change(row):
@@ -439,7 +459,7 @@ def build_report_html():
         except Exception:
             return "-"
 
-    # ---- 표 컬럼 처리 ----
+    # ---- 표 컬럼 포맷팅 ----
     if "Shares" in df_disp.columns:
         df_disp["Shares"] = df_disp["Shares"].apply(lambda x: fmt_2(x) if pd.notna(x) else "-")
     if "AvgPrice" in df_disp.columns:
@@ -450,10 +470,7 @@ def build_report_html():
     df_disp["PrevClose"] = df_disp["PrevClose"].apply(fmt_money_2)
     df_disp["PrevValue"] = df_disp["PrevValue"].apply(fmt_money_2)
 
-    # ✅ 새 열 추가
-    df_disp["Profit/Loss (수익/손실)"] = df_disp.apply(calc_profit_loss, axis=1)
-
-    # 컬럼명 정리
+    # 컬럼 이름 변경
     df_disp = df_disp.rename(columns={
         "Ticker": "Ticker (종목)",
         "Shares": "Shares (수량)",
@@ -461,10 +478,11 @@ def build_report_html():
         "LastPrice": "Last Price (현재가)",
         "PrevClose": "Prev Close (전일종가)",
         "Value": "Value (자산가치)",
-        "PrevValue": "Prev Value (전일자산)"
+        "PrevValue": "Prev Value (전일자산)",
+        "Profit/Loss (수익/손실)": "Profit/Loss (수익/손실)"
     })
 
-    # 총자산 변화: 퍼센트 + 액수
+    # 총자산 변화 표시
     total_color = "green" if diff > 0 else ("red" if diff < 0 else "black")
     holdings_html = f"""
     <h2>📂 Holdings (보유 종목)</h2>
@@ -474,7 +492,7 @@ def build_report_html():
     {df_disp.to_html(index=False, escape=False)}
     """
 
-    # -------- 나머지 섹션 그대로 유지 --------
+    # -------- 나머지 섹션 (Signals / Strategies / News / Econ / Indices / GPT Opinion) --------
     tickers = [t for t in df_hold["Ticker"].tolist() if isinstance(t, str)]
     signals_df = build_signals_table(tickers)
     signals_html = f"<h2>📈 Signals (종목별 판단 지표)</h2>{signals_df.to_html(index=False)}"
