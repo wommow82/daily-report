@@ -188,27 +188,44 @@ def gpt_strategy_summary(ticker_rows):
         csv_text = pd.DataFrame(ticker_rows).to_csv(index=False)
         prompt = (
             "다음 표의 RSI, MACD, P/E, ROE, EPS, 손절/목표가를 바탕으로 "
-            "각 종목의 기본 매매전략과 추가적으로 고려할 사항을 "
-            "한국어로 종목별로 1줄씩 요약해줘. "
-            "출력은 반드시 '종목명: 설명' 형태로 해줘.\n\n" + csv_text
+            "각 종목의 매매 전략을 종목별로 1줄씩 한국어로 요약해줘.\n\n"
+            "출력 형식은 반드시 아래처럼 해줘:\n"
+            "종목명: (매수|매도|관망) - 간단 설명\n\n"
+            "예시:\n"
+            "NVDA: 매수 - 기술적 지표 긍정적\n"
+            "AAPL: 관망 - 실적 발표 대기\n"
+            "TSLA: 매도 - 단기 과열\n\n"
+            + csv_text
         )
         resp = client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[{"role":"user","content":prompt}],
-            max_tokens=500
+            max_tokens=600
         )
         raw_text = resp.choices[0].message.content.strip()
 
-        # ✅ 서식 변환: 줄 단위로 잘라 🔵 + bold 종목명 적용
+        # ✅ 서식 변환
         lines = []
         for line in raw_text.splitlines():
-            if ":" in line:
-                ticker, desc = line.split(":", 1)
-                lines.append(f"🔵 <b>{ticker.strip()}</b>: {desc.strip()}")
-            elif line.strip():
-                lines.append(f"🔵 {line.strip()}")
-        formatted_html = "<br>".join(lines)
+            if ":" not in line:
+                continue
+            ticker, desc = line.split(":", 1)
+            ticker = ticker.strip()
+            desc = desc.strip()
 
+            # 신호 아이콘 매핑
+            if "매수" in desc:
+                icon = "🟢"
+            elif "매도" in desc:
+                icon = "🔴"
+            elif "관망" in desc:
+                icon = "🟡"
+            else:
+                icon = "🔵"  # fallback
+
+            lines.append(f"{icon} <b>{ticker}</b>: {desc}")
+
+        formatted_html = "<br>".join(lines)
         return f"<div class='card'>{formatted_html}</div>"
     except Exception as e:
         return f"<p>GPT summary error: {e}</p>"
