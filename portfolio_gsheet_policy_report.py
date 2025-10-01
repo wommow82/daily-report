@@ -815,12 +815,13 @@ def build_report_html():
 
     signals_html = signals_html_hold + signals_html_watch
 
-    # -------- GPT Opinion Section --------
+    # -------- News Section --------
     hold_news_html = holdings_news_section(tickers_hold)
     watch_news_html = watchlist_news_section(tickers_watch) if tickers_watch else ""
     market_html = market_news_section()
     policy_html = policy_focus_section()
 
+    # -------- GPT Opinion Section --------
     gpt_html = gpt_strategy_summary(
         hold_news_html,
         watch_news_html,
@@ -850,6 +851,10 @@ def build_report_html():
 
     {holdings_html}
     {signals_html}
+    {hold_news_html}
+    {watch_news_html}
+    {market_html}
+    {policy_html}
     {gpt_html}
 
     </body></html>
