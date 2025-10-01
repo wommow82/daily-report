@@ -278,26 +278,23 @@ def build_strategy_table(tickers, last_prices, settings):
 #     except Exception as e:
 #         return f"<p>GPT summary error: {e}</p>"
 
-import os
-from openai import OpenAI
-
 def gpt_strategy_summary(holdings_news, watchlist_news, market_news, policy_focus):
     """
-    GPT에게 보유종목, 관심종목 관련 뉴스 + 시장 뉴스 + 정책 포커스를 전달하고
-    이를 종합해서 100자 내외의 간결한 투자 의견을 리턴
+    GPT에게 뉴스와 정책 포커스를 전달하고,
+    보유 종목과 관심 종목에 대해 종목별 bullet + 신호 아이콘으로 투자 의견을 생성.
+    마지막에 간단한 종합 요약을 포함.
     """
 
     client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
 
-    # 프롬프트 구성
     prompt = f"""
-    너는 금융 애널리스트다.
-    아래는 최근 수집된 뉴스 및 정책 포커스 요약이다.
+    너는 금융 애널리스트다.  
+    아래 뉴스/정책 정보를 바탕으로 보유 종목과 관심 종목에 대해 간결하고 직관적인 투자 의견을 제시해라.  
 
-    [보유 종목 관련 뉴스]
+    [보유 종목 뉴스]
     {holdings_news}
 
-    [관심 종목 관련 뉴스]
+    [관심 종목 뉴스]
     {watchlist_news}
 
     [시장 뉴스]
@@ -306,24 +303,41 @@ def gpt_strategy_summary(holdings_news, watchlist_news, market_news, policy_focu
     [정책 포커스]
     {policy_focus}
 
-    위 내용을 종합해서
-    - 보유 종목 투자 의견 (100자 내외)
-    - 관심 종목 투자 의견 (100자 내외)
-
-    두 문단으로 간결하게 작성하라.
+    출력 형식:
+    1. 📂 보유 종목
+       - 🟢 TICKER: 한줄 의견
+       - 🔴 TICKER: 한줄 의견
+       - 🟡 TICKER: 한줄 의견
+    2. 👁️ 관심 종목
+       - 🟢 TICKER: 한줄 의견
+       - 🔴 TICKER: 한줄 의견
+       - 🟡 TICKER: 한줄 의견
+    3. 📌 종합 요약 (100자 이내)
+    
+    규칙:
+    - 반드시 bullet 형식으로 출력
+    - 종목별로 아이콘(🟢/🔴/🟡)을 붙여라
+    - 분석은 최대한 간결하게 한 줄씩
+    - 마지막에 전체 전략 요약은 별도 문단으로 제시
     """
+
     try:
         response = client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[{"role": "user", "content": prompt}],
-            temperature=0.6,
-            max_tokens=300
+            temperature=0.5,
+            max_tokens=500
         )
         opinion_text = response.choices[0].message.content.strip()
     except Exception as e:
         opinion_text = f"(GPT Opinion 생성 실패: {e})"
 
-    return f"<h2>🤖 GPT Opinion (투자의견)</h2><div class='gpt-box'>{opinion_text}</div>"
+    return f"""
+    <h2>🤖 GPT Opinion (투자의견)</h2>
+    <div class='gpt-box' style="line-height:1.6; font-size:14px; white-space:pre-line">
+    {opinion_text}
+    </div>
+    """
 
 def translate_ko(text):
     api_key = os.environ.get("OPENAI_API_KEY")
