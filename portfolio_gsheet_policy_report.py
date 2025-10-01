@@ -27,7 +27,6 @@ FRED_TICKERS = {
     "Unemployment (실업률)": "UNRATE",
     "Fed Funds Rate (연방기금금리)": "FEDFUNDS",
     "PCE (개인소비지출)": "PCE",
-    "M2 (통화량)": "M2SL"
 }
 
 def fmt_money_2(x):
@@ -797,6 +796,10 @@ def build_report_html():
     market_html = market_news_section()
     policy_html = policy_focus_section()
 
+    # -------- Econ / Indices Section --------
+    econ_html = econ_section()       # 📊 Economic Indicators (M2 제외)
+    indices_html = indices_section() # 📊 주요 지수 및 경제 지표 (M2 제외)
+
     # -------- GPT Opinion Section --------
     gpt_html = gpt_strategy_summary(
         hold_news_html,
@@ -831,6 +834,8 @@ def build_report_html():
     {watch_news_html}
     {market_html}
     {policy_html}
+    {econ_html}
+    {indices_html}
     {gpt_html}
 
     </body></html>
