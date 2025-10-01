@@ -359,7 +359,8 @@ def fetch_news_for_ticker(ticker, api_key, page_size=3, days=7):
 
     return articles
 
-def safe_date_str(date_str):
+def extract_article_date(article):
+    """뉴스 기사 dict에서 날짜를 안전하게 추출"""
     date_raw = article.get("publishedAt") or article.get("pubDate") or article.get("date") or ""
     if not date_raw:
         return "N/A"
@@ -384,7 +385,7 @@ def holdings_news_section(tickers):
             url = a.get("url") or "#"
             desc = a.get("description") or ""
             date_raw = a.get("publishedAt") or ""
-            date = safe_date_str(date_raw)
+            date = extract_article_date(a)   # ✅ 여기서 article(dict) 넘겨줌
             ko = translate_ko(f"{title}\n{desc}")
             cards.append(
                 f"<div class='card'><b><a href='{url}' target='_blank'>{title}</a></b> "
@@ -409,7 +410,7 @@ def watchlist_news_section(tickers):
             url = a.get("url") or "#"
             desc = a.get("description") or ""
             date_raw = a.get("publishedAt") or ""
-            date = safe_date_str(date_raw)
+            date = extract_article_date(a)   # ✅ 여기서 article(dict) 넘겨줌
             ko = translate_ko(f"{title}\n{desc}")
             cards.append(
                 f"<div class='card'><b><a href='{url}' target='_blank'>{title}</a></b> "
