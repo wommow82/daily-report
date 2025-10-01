@@ -227,57 +227,6 @@ def build_strategy_table(tickers, last_prices, settings):
         })
     return pd.DataFrame(rows)
 
-# def gpt_strategy_summary(ticker_rows):
-#     api_key = os.environ.get("OPENAI_API_KEY")
-#     if not api_key:
-#         return "<p>OpenAI API key missing → skip summary.</p>"
-#     try:
-#         client = OpenAI(api_key=api_key)
-#         csv_text = pd.DataFrame(ticker_rows).to_csv(index=False)
-#         prompt = (
-#             "다음 표의 RSI, MACD, P/E, ROE, EPS, 손절/목표가를 바탕으로 "
-#             "각 종목의 매매 전략을 종목별로 1줄씩 한국어로 요약해줘.\n\n"
-#             "출력 형식은 반드시 아래처럼 해줘:\n"
-#             "종목명: (매수|매도|관망) - 간단 설명\n\n"
-#             "예시:\n"
-#             "NVDA: 매수 - 기술적 지표 긍정적\n"
-#             "AAPL: 관망 - 실적 발표 대기\n"
-#             "TSLA: 매도 - 단기 과열\n\n"
-#             + csv_text
-#         )
-#         resp = client.chat.completions.create(
-#             model="gpt-4o-mini",
-#             messages=[{"role":"user","content":prompt}],
-#             max_tokens=600
-#         )
-#         raw_text = resp.choices[0].message.content.strip()
-
-#         # ✅ 서식 변환
-#         lines = []
-#         for line in raw_text.splitlines():
-#             if ":" not in line:
-#                 continue
-#             ticker, desc = line.split(":", 1)
-#             ticker = ticker.strip()
-#             desc = desc.strip()
-
-#             # 신호 아이콘 매핑
-#             if "매수" in desc:
-#                 icon = "🟢"
-#             elif "매도" in desc:
-#                 icon = "🔴"
-#             elif "관망" in desc:
-#                 icon = "🟡"
-#             else:
-#                 icon = "🔵"  # fallback
-
-#             lines.append(f"{icon} <b>{ticker}</b>: {desc}")
-
-#         formatted_html = "<br>".join(lines)
-#         return f"<div class='card'>{formatted_html}</div>"
-#     except Exception as e:
-#         return f"<p>GPT summary error: {e}</p>"
-
 def gpt_strategy_summary(holdings_news, watchlist_news, market_news, policy_focus):
     """
     GPT에게 뉴스와 정책 포커스를 전달하고,
@@ -354,13 +303,6 @@ def translate_ko(text):
     except Exception:
         return ""
 
-# def fetch_news_for_ticker(ticker, api_key, page_size=3):
-#     url = f"https://newsapi.org/v2/everything?q={ticker}&language=en&sortBy=publishedAt&pageSize={page_size}&apiKey={api_key}"
-#     r = requests.get(url, timeout=20)
-#     if r.status_code != 200:
-#         return []
-#     return r.json().get("articles", [])
-
 def fetch_news_for_ticker(ticker, api_key, page_size=3, days=7):
     """
     종목 뉴스 가져오기: NewsAPI → 실패/한도 초과 시 Google News RSS fallback
@@ -418,14 +360,14 @@ def fetch_news_for_ticker(ticker, api_key, page_size=3, days=7):
     return articles
 
 def safe_date_str(date_str):
-    if not date_str:
+    date_raw = article.get("publishedAt") or article.get("pubDate") or article.get("date") or ""
+    if not date_raw:
         return "N/A"
     try:
-        dt = datetime.fromisoformat(date_str.replace("Z", "+00:00"))
+        dt = datetime.fromisoformat(date_raw.replace("Z", "+00:00"))
         return dt.strftime("%Y-%m-%d")
     except Exception:
-        return date_str[:10]  # fallback
-
+        return date_raw[:10]
 
 def holdings_news_section(tickers):
     api_key = os.environ.get("NEWS_API_KEY")
