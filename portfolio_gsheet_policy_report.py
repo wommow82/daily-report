@@ -431,9 +431,12 @@ def holdings_news_section(tickers):
             title = a.get("title") or ""
             url = a.get("url") or "#"
             desc = a.get("description") or ""
-            date = (a.get("publishedAt") or "")[:10]
+            date = (a.get("publishedAt") or "")[:10]  # YYYY-MM-DD
             ko = translate_ko(f"{title}\n{desc}")
-            cards.append(f"<div class='card'><b><a href='{url}' target='_blank'>{title}</a></b> <small>({date})</small><br><small>{desc}</small><br><i>{ko}</i></div>")
+            cards.append(
+                f"<div class='card'><b><a href='{url}' target='_blank'>{title}</a></b> "
+                f"<small>({date})</small><br><small>{desc}</small><br><i>{ko}</i></div>"
+            )
         html += f"<h3>{t}</h3>" + "".join(cards)
     return html
 
@@ -451,9 +454,12 @@ def watchlist_news_section(tickers):
             title = a.get("title") or ""
             url = a.get("url") or "#"
             desc = a.get("description") or ""
-            date = (a.get("publishedAt") or "")[:10]
+            date = (a.get("publishedAt") or "")[:10]  # YYYY-MM-DD
             ko = translate_ko(f"{title}\n{desc}")
-            cards.append(f"<div class='card'><b><a href='{url}' target='_blank'>{title}</a></b> <small>({date})</small><br><small>{desc}</small><br><i>{ko}</i></div>")
+            cards.append(
+                f"<div class='card'><b><a href='{url}' target='_blank'>{title}</a></b> "
+                f"<small>({date})</small><br><small>{desc}</small><br><i>{ko}</i></div>"
+            )
         html += f"<h3>{t}</h3>" + "".join(cards)
     return html
 
