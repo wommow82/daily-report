@@ -281,59 +281,49 @@ def build_strategy_table(tickers, last_prices, settings):
 import os
 from openai import OpenAI
 
-def gpt_strategy_summary(econ_html, holdings_news, watchlist_news, market_news, policy_focus):
+def gpt_strategy_summary(holdings_news, watchlist_news, market_news, policy_focus):
     """
-    GPT Opinion (투자의견)
-    - 투자 종목, 관심 종목을 각각 분석
-    - 마지막에 100자 내외의 종합 전략 요약 포함
+    GPT에게 보유종목, 관심종목 관련 뉴스 + 시장 뉴스 + 정책 포커스를 전달하고
+    이를 종합해서 100자 내외의 간결한 투자 의견을 리턴
+    """
+
+    client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
+
+    # 프롬프트 구성
+    prompt = f"""
+    너는 금융 애널리스트다.
+    아래는 최근 수집된 뉴스 및 정책 포커스 요약이다.
+
+    [보유 종목 관련 뉴스]
+    {holdings_news}
+
+    [관심 종목 관련 뉴스]
+    {watchlist_news}
+
+    [시장 뉴스]
+    {market_news}
+
+    [정책 포커스]
+    {policy_focus}
+
+    위 내용을 종합해서
+    - 보유 종목 투자 의견 (100자 내외)
+    - 관심 종목 투자 의견 (100자 내외)
+
+    두 문단으로 간결하게 작성하라.
     """
     try:
-        client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
-
-        prompt = f"""
-너는 전문 투자 전략가다. 다음 자료들을 바탕으로 투자 전략 보고서를 작성하라.
-
-📊 경제 지표:
-{econ_html[:600]}
-
-📂 투자 종목 뉴스:
-{holdings_news[:600]}
-
-👁️ 관심 종목 뉴스:
-{watchlist_news[:600]}
-
-🌍 시장 뉴스:
-{market_news[:600]}
-
-🏛️ 정책 포커스:
-{policy_focus[:600]}
-
-요구사항:
-1. 투자 종목(보유 종목)과 관심 종목을 각각 구분해 종목별로 분석한다.
-2. 각 종목 분석에 매수🟢, 매도🔴, 관망🟡, 일반 분석🔵 아이콘을 활용한다.
-3. 마지막에 '📌 종합 전략 (100자 요약)'을 따로 작성해라.
-4. 전체 출력은 HTML 형식으로, 제목과 섹션 구분을 포함한다.
-        """
-
         response = client.chat.completions.create(
             model="gpt-4o-mini",
-            messages=[
-                {"role": "system", "content": "You are a professional financial analyst writing structured investment strategy reports."},
-                {"role": "user", "content": prompt}
-            ],
-            temperature=0.5,
-            max_tokens=800
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.6,
+            max_tokens=300
         )
-
         opinion_text = response.choices[0].message.content.strip()
-
-        return f"""
-        <h2>🤖 GPT Opinion (투자의견)</h2>
-        <div style="line-height:1.6">{opinion_text}</div>
-        """
-
     except Exception as e:
-        return f"<h2>🤖 GPT Opinion (투자의견)</h2><p>Error generating opinion: {e}</p>"
+        opinion_text = f"(GPT Opinion 생성 실패: {e})"
+
+    return f"<h2>🤖 GPT Opinion (투자의견)</h2><div class='gpt-box'>{opinion_text}</div>"
 
 def translate_ko(text):
     api_key = os.environ.get("OPENAI_API_KEY")
@@ -825,25 +815,17 @@ def build_report_html():
 
     signals_html = signals_html_hold + signals_html_watch
 
-    # -------- Strategies Section --------
-    last_prices = {}
-    for t in tickers_hold:
-        lp, _ = get_last_and_prev_close(t)
-        last_prices[t] = lp
-    strat_df = build_strategy_table(tickers_hold, last_prices, settings)
-    strategy_html = f"<h2>🧭 Strategies (종목별 매매 전략)</h2>{strat_df.to_html(index=False)}"
+    # -------- GPT Opinion Section --------
+    hold_news_html = holdings_news_section(tickers_hold)
+    watch_news_html = watchlist_news_section(tickers_watch) if tickers_watch else ""
+    market_html = market_news_section()
+    policy_html = policy_focus_section()
 
-    # -------- Econ / Indices --------
-    econ_html = econ_section()
-    indices_html = indices_section()
-
-    # -------- GPT Opinion (투자의견) --------
     gpt_html = gpt_strategy_summary(
-        econ_html,
-        "보유 종목 뉴스 요약",
-        "관심 종목 뉴스 요약",
-        "시장 뉴스 요약",
-        "정책 포커스 요약"
+        hold_news_html,
+        watch_news_html,
+        market_html,
+        policy_html
     )
 
     # -------- HTML 최종 출력 --------
@@ -868,9 +850,6 @@ def build_report_html():
 
     {holdings_html}
     {signals_html}
-    {strategy_html}
-    {econ_html}
-    {indices_html}
     {gpt_html}
 
     </body></html>
