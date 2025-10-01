@@ -417,6 +417,16 @@ def fetch_news_for_ticker(ticker, api_key, page_size=3, days=7):
 
     return articles
 
+def safe_date_str(date_str):
+    if not date_str:
+        return "N/A"
+    try:
+        dt = datetime.fromisoformat(date_str.replace("Z", "+00:00"))
+        return dt.strftime("%Y-%m-%d")
+    except Exception:
+        return date_str[:10]  # fallback
+
+
 def holdings_news_section(tickers):
     api_key = os.environ.get("NEWS_API_KEY")
     if not api_key:
@@ -431,7 +441,8 @@ def holdings_news_section(tickers):
             title = a.get("title") or ""
             url = a.get("url") or "#"
             desc = a.get("description") or ""
-            date = (a.get("publishedAt") or "")[:10]  # YYYY-MM-DD
+            date_raw = a.get("publishedAt") or ""
+            date = safe_date_str(date_raw)
             ko = translate_ko(f"{title}\n{desc}")
             cards.append(
                 f"<div class='card'><b><a href='{url}' target='_blank'>{title}</a></b> "
@@ -439,6 +450,7 @@ def holdings_news_section(tickers):
             )
         html += f"<h3>{t}</h3>" + "".join(cards)
     return html
+
 
 def watchlist_news_section(tickers):
     api_key = os.environ.get("NEWS_API_KEY")
@@ -454,7 +466,8 @@ def watchlist_news_section(tickers):
             title = a.get("title") or ""
             url = a.get("url") or "#"
             desc = a.get("description") or ""
-            date = (a.get("publishedAt") or "")[:10]  # YYYY-MM-DD
+            date_raw = a.get("publishedAt") or ""
+            date = safe_date_str(date_raw)
             ko = translate_ko(f"{title}\n{desc}")
             cards.append(
                 f"<div class='card'><b><a href='{url}' target='_blank'>{title}</a></b> "
