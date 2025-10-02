@@ -656,10 +656,10 @@ def build_strategy_table(df_hold, last_prices):
     rows = []
     summary = []
 
-    # ✅ ETF 목록 (원하는 ETF만 추가)
+    # ✅ ETF 목록
     etf_list = ["SCHD", "VOO", "SPY", "QQQ"]
 
-    # ✅ 보유 중인 종목만 분석
+    # ✅ 보유 종목만 분석
     tickers = [t for t in df_hold["Ticker"].tolist() if isinstance(t, str)]
 
     for t in tickers:
@@ -668,17 +668,17 @@ def build_strategy_table(df_hold, last_prices):
             if df.empty:
                 continue
 
-            last_price = last_prices.get(t, df["Close"].iloc[-1])
+            last_price = float(last_prices.get(t, df["Close"].iloc[-1]))
             ma20 = df["Close"].rolling(20).mean().iloc[-1]
             ma60 = df["Close"].rolling(60).mean().iloc[-1]
 
-            # ✅ ETF면 MA60, 아니면 MA20
+            # ✅ ETF는 MA60, 종목은 MA20
             if t.upper() in etf_list:
-                stop = round(ma60, 2)
+                stop = round(float(ma60), 2)
             else:
-                stop = round(ma20, 2)
+                stop = round(float(ma20), 2)
 
-            # ✅ 목표가: 현재가 대비 8% / 15%
+            # ✅ 목표가
             tp1 = round(last_price * 1.08, 2)
             tp2 = round(last_price * 1.15, 2)
 
@@ -702,7 +702,6 @@ def build_strategy_table(df_hold, last_prices):
             print(f"⚠️ {t} 전략 생성 실패: {e}")
             continue
 
-    # ✅ 표 생성
     if rows:
         df_out = pd.DataFrame(rows)
         table_html = "<h2>🧭 Strategies (종목별 매매 전략)</h2>" + df_out.to_html(index=False, escape=False)
@@ -710,6 +709,7 @@ def build_strategy_table(df_hold, last_prices):
         return table_html + summary_html
     else:
         return "<h2>🧭 Strategies (종목별 매매 전략)</h2><p>보유 종목에 대한 전략 데이터를 가져올 수 없습니다.</p>"
+
 
 def send_email_html(subject, html_body):
     sender = os.environ.get("EMAIL_SENDER")
