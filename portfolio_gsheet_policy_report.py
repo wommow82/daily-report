@@ -901,8 +901,8 @@ def build_report_html():
 
     {holdings_html}
     {signals_html}
-    {hold_news_html}
     {strategy_html}   <!-- ✅ 전략 섹션을 보유종목 뉴스 뒤에 추가 -->
+    {hold_news_html}
     {watch_news_html}
     {market_html}
     {policy_html}
