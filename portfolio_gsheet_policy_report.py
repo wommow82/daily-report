@@ -650,6 +650,67 @@ def indices_section():
 
     return html
 
+def build_strategy_table(df_hold, last_prices):
+    import yfinance as yf
+
+    rows = []
+    summary = []
+
+    # ✅ ETF 목록 (원하는 ETF만 추가)
+    etf_list = ["SCHD", "VOO", "SPY", "QQQ"]
+
+    # ✅ 보유 중인 종목만 분석
+    tickers = [t for t in df_hold["Ticker"].tolist() if isinstance(t, str)]
+
+    for t in tickers:
+        try:
+            df = yf.download(t, period="6mo", interval="1d", progress=False)
+            if df.empty:
+                continue
+
+            last_price = last_prices.get(t, df["Close"].iloc[-1])
+            ma20 = df["Close"].rolling(20).mean().iloc[-1]
+            ma60 = df["Close"].rolling(60).mean().iloc[-1]
+
+            # ✅ ETF면 MA60, 아니면 MA20
+            if t.upper() in etf_list:
+                stop = round(ma60, 2)
+            else:
+                stop = round(ma20, 2)
+
+            # ✅ 목표가: 현재가 대비 8% / 15%
+            tp1 = round(last_price * 1.08, 2)
+            tp2 = round(last_price * 1.15, 2)
+
+            rows.append({
+                "Ticker (종목)": t,
+                "Price (현재가)": round(last_price, 2),
+                "Stop (손절)": stop,
+                "TP1 (1차 매도)": tp1,
+                "TP2 (2차 매도)": tp2
+            })
+
+            # -------- 전략 요약 --------
+            if last_price > ma20 and last_price > ma60:
+                summary.append(f"🟢 <b>{t}</b>: 매수 - 기술적 지표 긍정적, 상승 여력 있음")
+            elif last_price < ma20 and last_price < ma60:
+                summary.append(f"🔴 <b>{t}</b>: 매도 - 하락 추세, 추가 조정 가능성")
+            else:
+                summary.append(f"🟡 <b>{t}</b>: 관망 - 뚜렷한 추세 없음, 시장 상황 확인 필요")
+
+        except Exception as e:
+            print(f"⚠️ {t} 전략 생성 실패: {e}")
+            continue
+
+    # ✅ 표 생성
+    if rows:
+        df_out = pd.DataFrame(rows)
+        table_html = "<h2>🧭 Strategies (종목별 매매 전략)</h2>" + df_out.to_html(index=False, escape=False)
+        summary_html = "<h3>📝 Strategy Summary (전략 요약)</h3><div class='card'>" + "<br>".join(summary) + "</div>"
+        return table_html + summary_html
+    else:
+        return "<h2>🧭 Strategies (종목별 매매 전략)</h2><p>보유 종목에 대한 전략 데이터를 가져올 수 없습니다.</p>"
+
 def send_email_html(subject, html_body):
     sender = os.environ.get("EMAIL_SENDER")
     password = os.environ.get("EMAIL_PASSWORD")
@@ -808,6 +869,16 @@ def build_report_html():
         policy_html
     )
 
+    # 보유 종목 리스트
+    tickers_hold = [t for t in df_hold["Ticker"].tolist() if isinstance(t, str)]
+
+    # 현재가 가져오기
+    last_prices = {}
+    for t in tickers_hold:
+        lp, _ = get_last_and_prev_close(t)
+        last_prices[t] = lp
+
+    strategy_html = build_strategy_table(df_hold, last_prices)
     # -------- HTML 최종 출력 --------
     now = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
     style = """
@@ -831,6 +902,7 @@ def build_report_html():
     {holdings_html}
     {signals_html}
     {hold_news_html}
+    {strategy_html}   <!-- ✅ 전략 섹션을 보유종목 뉴스 뒤에 추가 -->
     {watch_news_html}
     {market_html}
     {policy_html}
