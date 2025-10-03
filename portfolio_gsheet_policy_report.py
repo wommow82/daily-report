@@ -858,8 +858,8 @@ def build_report_html():
     """
 
     # -------- Signals Section --------
-    tickers_hold = [t for t in df_hold["Ticker"].tolist() if isinstance(t, str)]
-    tickers_watch = [t for t in df_watch["Ticker"].tolist() if isinstance(t, str)]
+    tickers_hold = [str(t).strip().upper() for t in df_hold["Ticker"].dropna().tolist()]
+    tickers_watch = [str(t).strip().upper() for t in df_watch["Ticker"].dropna().tolist()]
 
     signals_df_hold = build_signals_table(tickers_hold)
     signals_html_hold = f"<h2>📈 Signals – Holdings (보유 종목)</h2>{signals_df_hold.to_html(index=False)}"
@@ -878,8 +878,8 @@ def build_report_html():
     policy_html = policy_focus_section()
 
     # -------- Econ / Indices Section --------
-    econ_html = econ_section()       # 📊 Economic Indicators (M2 제외)
-    indices_html = indices_section() # 📊 주요 지수 및 경제 지표 (M2 제외)
+    econ_html = econ_section()
+    indices_html = indices_section()
 
     # -------- GPT Opinion Section --------
     gpt_html = gpt_strategy_summary(
@@ -889,26 +889,22 @@ def build_report_html():
         policy_html
     )
 
-# 보유 종목 리스트
-tickers_hold = [str(t).strip().upper() for t in df_hold["Ticker"].dropna().tolist()]
+    # -------- 보유 종목 현재가 가져오기 --------
+    last_prices = {}
+    for t in tickers_hold:
+        try:
+            lp, prev = get_last_and_prev_close(t)
+            if lp is None or lp == 0:
+                df_tmp = yf.download(t, period="5d", interval="1d", progress=False)
+                if not df_tmp.empty:
+                    lp = df_tmp["Close"].iloc[-1]
+            last_prices[t] = lp
+        except Exception as e:
+            print(f"⚠️ {t} 가격 조회 실패: {e}")
+            last_prices[t] = None
 
-# 현재가 가져오기
-last_prices = {}
-for t in tickers_hold:
-    try:
-        lp, prev = get_last_and_prev_close(t)
-        if lp is None or lp == 0:
-            # fallback: yfinance 데이터 직접 가져오기
-            df_tmp = yf.download(t, period="5d", interval="1d", progress=False)
-            if not df_tmp.empty:
-                lp = df_tmp["Close"].iloc[-1]
-        last_prices[t] = lp
-    except Exception as e:
-        print(f"⚠️ {t} 가격 조회 실패: {e}")
-        last_prices[t] = None
-
-# 전략 섹션
-strategy_html = build_strategy_table(df_hold, last_prices)
+    # -------- Strategies Section --------
+    strategy_html = build_strategy_table(df_hold, last_prices)
 
     # -------- HTML 최종 출력 --------
     now = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
@@ -932,8 +928,8 @@ strategy_html = build_strategy_table(df_hold, last_prices)
 
     {holdings_html}
     {signals_html}
-    {strategy_html}   <!-- ✅ 전략 섹션을 보유종목 뉴스 뒤에 추가 -->
     {hold_news_html}
+    {strategy_html}   <!-- 전략 섹션을 보유종목 뉴스 뒤에 추가 -->
     {watch_news_html}
     {market_html}
     {policy_html}
