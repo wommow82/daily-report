@@ -657,11 +657,11 @@ def build_strategy_table(df_hold, last_prices):
     rows = []
     summary = []
 
+    # ✅ ETF 목록
     etf_list = ["SCHD", "VOO", "SPY", "QQQ"]
 
-    # ✅ NaN 제거 & 문자열 변환
+    # ✅ 보유 종목만 분석
     tickers = [str(t).strip().upper() for t in df_hold["Ticker"].dropna().tolist()]
-    print("보유 종목:", tickers)  # 디버깅용
 
     for t in tickers:
         try:
@@ -670,15 +670,26 @@ def build_strategy_table(df_hold, last_prices):
                 print(f"⚠️ {t}: yfinance 데이터 없음")
                 continue
 
-            last_price = float(last_prices.get(t, df["Close"].iloc[-1]))
+            # ✅ 현재가 가져오기 (last_prices → fallback yfinance)
+            last_price = last_prices.get(t)
+            if last_price is None or pd.isna(last_price) or last_price == 0:
+                last_price = df["Close"].iloc[-1]
+            last_price = float(last_price)
 
+            # 이동평균선 계산
             ma20 = df["Close"].rolling(20).mean().iloc[-1]
             ma60 = df["Close"].rolling(60).mean().iloc[-1]
 
-            if pd.isna(ma20): ma20 = last_price
-            if pd.isna(ma60): ma60 = last_price
+            # NaN 방지 → 현재가로 대체
+            if pd.isna(ma20): 
+                ma20 = last_price
+            if pd.isna(ma60): 
+                ma60 = last_price
 
+            # ✅ ETF는 MA60, 종목은 MA20
             stop = round(float(ma60 if t in etf_list else ma20), 2)
+
+            # ✅ 목표가
             tp1 = round(last_price * 1.08, 2)
             tp2 = round(last_price * 1.15, 2)
 
@@ -690,6 +701,7 @@ def build_strategy_table(df_hold, last_prices):
                 "TP2 (2차 매도)": tp2
             })
 
+            # -------- 전략 요약 --------
             if last_price > ma20 and last_price > ma60:
                 summary.append(f"🟢 <b>{t}</b>: 매수 - 기술적 지표 긍정적, 상승 여력 있음")
             elif last_price < ma20 and last_price < ma60:
@@ -701,9 +713,11 @@ def build_strategy_table(df_hold, last_prices):
             print(f"⚠️ {t} 전략 생성 실패: {e}")
             continue
 
+    # ✅ 결과 HTML 반환
     if rows:
         df_out = pd.DataFrame(rows)
         table_html = "<h2>🧭 Strategies (종목별 매매 전략)</h2>" + df_out.to_html(index=False, escape=False)
+
         summary_items = "".join([f"<li>{s}</li>" for s in summary])
         summary_html = f"""
         <h3>📝 Strategy Summary (전략 요약)</h3>
@@ -875,16 +889,27 @@ def build_report_html():
         policy_html
     )
 
-    # 보유 종목 리스트
-    tickers_hold = [t for t in df_hold["Ticker"].tolist() if isinstance(t, str)]
+# 보유 종목 리스트
+tickers_hold = [str(t).strip().upper() for t in df_hold["Ticker"].dropna().tolist()]
 
-    # 현재가 가져오기
-    last_prices = {}
-    for t in tickers_hold:
-        lp, _ = get_last_and_prev_close(t)
+# 현재가 가져오기
+last_prices = {}
+for t in tickers_hold:
+    try:
+        lp, prev = get_last_and_prev_close(t)
+        if lp is None or lp == 0:
+            # fallback: yfinance 데이터 직접 가져오기
+            df_tmp = yf.download(t, period="5d", interval="1d", progress=False)
+            if not df_tmp.empty:
+                lp = df_tmp["Close"].iloc[-1]
         last_prices[t] = lp
+    except Exception as e:
+        print(f"⚠️ {t} 가격 조회 실패: {e}")
+        last_prices[t] = None
 
-    strategy_html = build_strategy_table(df_hold, last_prices)
+# 전략 섹션
+strategy_html = build_strategy_table(df_hold, last_prices)
+
     # -------- HTML 최종 출력 --------
     now = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
     style = """
