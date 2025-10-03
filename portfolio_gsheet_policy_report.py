@@ -656,9 +656,6 @@ def build_strategy_table(df_hold, last_prices):
     - yfinance가 빈 데이터(네트워크/레이트리밋 등)를 주더라도
       다단계 폴백으로 행을 채워 '전략 데이터 없음' 문구가 뜨지 않도록 보강.
     """
-    import pandas as pd
-    import yfinance as yf
-    import numpy as np
 
     # ✅ ETF 목록: ETF는 MA60을 손절 기준으로, 개별주는 MA20 사용
     etf_list = ["SCHD", "VOO", "SPY", "QQQ"]
