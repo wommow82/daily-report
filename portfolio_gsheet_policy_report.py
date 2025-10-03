@@ -27,6 +27,7 @@ FRED_TICKERS = {
     "Unemployment (실업률)": "UNRATE",
     "Fed Funds Rate (연방기금금리)": "FEDFUNDS",
     "PCE (개인소비지출)": "PCE",
+    "M2 (통화량)": "M2SL",   # ✅ 여기 추가
 }
 
 def fmt_money_2(x):
@@ -623,11 +624,6 @@ def econ_section():
 def indices_section():
     import yfinance as yf
     import pandas as pd
-    from fredapi import Fred
-    import os
-
-    # FRED API 클라이언트
-    # fred = Fred(api_key=os.environ.get("FRED_API_KEY"))
 
     # 주요 지수 (Yahoo Finance)
     INDEX_MAP = {
@@ -673,33 +669,7 @@ def indices_section():
         except Exception as e:
             rows.append(f"<tr><td>{name}</td><td colspan='3'>Error: {str(e)}</td></tr>")
 
-    # FRED: M2 통화량
-    try:
-        series = fred.get_series("M2SL")  # 미국 M2 통화량
-        monthly_vals = series.resample("M").last().dropna()
-        last_val = float(monthly_vals.iloc[-1])
-        prev_val = float(monthly_vals.iloc[-2])
-
-        change = last_val - prev_val
-        pct_change = (change / prev_val) * 100
-
-        if change > 0:
-            color, arrow = "green", "🟢"
-        elif change < 0:
-            color, arrow = "red", "🔴"
-        else:
-            color, arrow = "black", "⚫"
-
-        rows.append(
-            f"<tr>"
-            f"<td>M2 통화량 (억 달러)</td>"
-            f"<td>{prev_val:,.2f}</td>"
-            f"<td><span style='color:{color}'>{last_val:,.2f} "
-            f"({change:+,.2f}, {pct_change:+.2f}%) {arrow}</span></td>"
-            f"</tr>"
-        )
-    except Exception as e:
-        rows.append(f"<tr><td>M2 통화량</td><td colspan='3'>Error: {str(e)}</td></tr>")
+    # ✅ M2 통화량 관련 부분은 삭제했음
 
     # 최종 HTML
     html = """
@@ -717,6 +687,104 @@ def indices_section():
     )
 
     return html
+
+# def indices_section():
+#     import yfinance as yf
+#     import pandas as pd
+#     from fredapi import Fred
+#     import os
+
+#     # FRED API 클라이언트
+#     # fred = Fred(api_key=os.environ.get("FRED_API_KEY"))
+
+#     # 주요 지수 (Yahoo Finance)
+#     INDEX_MAP = {
+#         "S&P 500": "^GSPC",
+#         "NASDAQ": "^IXIC",
+#         "Dow Jones": "^DJI",
+#         "VIX": "^VIX",
+#         "Gold": "GC=F",
+#         "Crude Oil": "CL=F",
+#     }
+
+#     rows = []
+
+#     # Yahoo Finance 기반 주요 지수
+#     for name, ticker in INDEX_MAP.items():
+#         try:
+#             data = yf.download(ticker, period="5d", interval="1d", progress=False)
+#             if data.empty:
+#                 rows.append(f"<tr><td>{name}</td><td colspan='3'>데이터 없음</td></tr>")
+#                 continue
+
+#             last_price = float(data["Close"].iloc[-1])
+#             prev_close = float(data["Close"].iloc[-2])
+
+#             change = last_price - prev_close
+#             pct_change = (change / prev_close) * 100
+
+#             if change > 0:
+#                 color, arrow = "green", "🟢"
+#             elif change < 0:
+#                 color, arrow = "red", "🔴"
+#             else:
+#                 color, arrow = "black", "⚫"
+
+#             rows.append(
+#                 f"<tr>"
+#                 f"<td>{name}</td>"
+#                 f"<td>{prev_close:,.2f}</td>"
+#                 f"<td><span style='color:{color}'>{last_price:,.2f} "
+#                 f"({change:+.2f}, {pct_change:+.2f}%) {arrow}</span></td>"
+#                 f"</tr>"
+#             )
+#         except Exception as e:
+#             rows.append(f"<tr><td>{name}</td><td colspan='3'>Error: {str(e)}</td></tr>")
+
+#     # FRED: M2 통화량
+#     try:
+#         series = fred.get_series("M2SL")  # 미국 M2 통화량
+#         monthly_vals = series.resample("M").last().dropna()
+#         last_val = float(monthly_vals.iloc[-1])
+#         prev_val = float(monthly_vals.iloc[-2])
+
+#         change = last_val - prev_val
+#         pct_change = (change / prev_val) * 100
+
+#         if change > 0:
+#             color, arrow = "green", "🟢"
+#         elif change < 0:
+#             color, arrow = "red", "🔴"
+#         else:
+#             color, arrow = "black", "⚫"
+
+#         rows.append(
+#             f"<tr>"
+#             f"<td>M2 통화량 (억 달러)</td>"
+#             f"<td>{prev_val:,.2f}</td>"
+#             f"<td><span style='color:{color}'>{last_val:,.2f} "
+#             f"({change:+,.2f}, {pct_change:+.2f}%) {arrow}</span></td>"
+#             f"</tr>"
+#         )
+#     except Exception as e:
+#         rows.append(f"<tr><td>M2 통화량</td><td colspan='3'>Error: {str(e)}</td></tr>")
+
+#     # 최종 HTML
+#     html = """
+#     <h2>📊 주요 지수 및 경제 지표</h2>
+#     <table border="1" cellspacing="0" cellpadding="4">
+#       <tr>
+#         <th>지수</th>
+#         <th>전월/전일 종가</th>
+#         <th>현재값 (변화)</th>
+#       </tr>
+#       {}
+#     </table>
+#     """.format(
+#         "\n".join(rows)
+#     )
+
+#     return html
 
 def build_strategy_table(df_hold, last_prices):
     """
