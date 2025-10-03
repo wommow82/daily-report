@@ -358,21 +358,92 @@ def fetch_news_for_ticker(ticker, api_key, page_size=3, days=7):
 
     return articles
 
+# def extract_article_date(article):
+#     """뉴스 기사 dict에서 날짜를 안전하게 추출"""
+#     date_raw = article.get("publishedAt") or article.get("pubDate") or article.get("date") or ""
+#     if not date_raw:
+#         return "N/A"
+#     try:
+#         dt = datetime.fromisoformat(date_raw.replace("Z", "+00:00"))
+#         return dt.strftime("%Y-%m-%d")
+#     except Exception:
+#         return date_raw[:10]
+
+# def holdings_news_section(tickers):
+#     api_key = os.environ.get("NEWS_API_KEY")
+#     if not api_key:
+#         return "<h2>🗞 Holdings News (보유 종목 뉴스)</h2><p>NEWS_API_KEY missing.</p>"
+#     html = "<h2>🗞 Holdings News (보유 종목 뉴스)</h2>"
+#     for t in tickers:
+#         arts = fetch_news_for_ticker(t, api_key)
+#         if not arts:
+#             continue
+#         cards = []
+#         for a in arts:
+#             title = a.get("title") or ""
+#             url = a.get("url") or "#"
+#             desc = a.get("description") or ""
+#             date_raw = a.get("publishedAt") or ""
+#             date = extract_article_date(a)   # ✅ 여기서 article(dict) 넘겨줌
+#             ko = translate_ko(f"{title}\n{desc}")
+#             cards.append(
+#                 f"<div class='card'><b><a href='{url}' target='_blank'>{title}</a></b> "
+#                 f"<small>({date})</small><br><small>{desc}</small><br><i>{ko}</i></div>"
+#             )
+#         html += f"<h3>{t}</h3>" + "".join(cards)
+#     return html
+
+
+# def watchlist_news_section(tickers):
+#     api_key = os.environ.get("NEWS_API_KEY")
+#     if not api_key:
+#         return "<h2>👀 Watchlist News (관심 종목 뉴스)</h2><p>NEWS_API_KEY missing.</p>"
+#     html = "<h2>👀 Watchlist News (관심 종목 뉴스)</h2>"
+#     for t in tickers:
+#         arts = fetch_news_for_ticker(t, api_key)
+#         if not arts:
+#             continue
+#         cards = []
+#         for a in arts:
+#             title = a.get("title") or ""
+#             url = a.get("url") or "#"
+#             desc = a.get("description") or ""
+#             date_raw = a.get("publishedAt") or ""
+#             date = extract_article_date(a)   # ✅ 여기서 article(dict) 넘겨줌
+#             ko = translate_ko(f"{title}\n{desc}")
+#             cards.append(
+#                 f"<div class='card'><b><a href='{url}' target='_blank'>{title}</a></b> "
+#                 f"<small>({date})</small><br><small>{desc}</small><br><i>{ko}</i></div>"
+#             )
+#         html += f"<h3>{t}</h3>" + "".join(cards)
+#     return html
+
 def extract_article_date(article):
     """뉴스 기사 dict에서 날짜를 안전하게 추출"""
-    date_raw = article.get("publishedAt") or article.get("pubDate") or article.get("date") or ""
+    # ✅ 모든 경우 고려 (NewsAPI, RSS 등)
+    date_raw = (
+        article.get("publishedAt")
+        or article.get("pubDate")
+        or article.get("date")
+        or article.get("published")   # ← fallback 필드 처리
+        or ""
+    )
     if not date_raw:
         return "N/A"
     try:
+        # ISO8601 포맷 (NewsAPI) 처리
         dt = datetime.fromisoformat(date_raw.replace("Z", "+00:00"))
         return dt.strftime("%Y-%m-%d")
     except Exception:
+        # RSS나 기타 포맷 → 앞 10자리만 슬라이싱
         return date_raw[:10]
+
 
 def holdings_news_section(tickers):
     api_key = os.environ.get("NEWS_API_KEY")
     if not api_key:
         return "<h2>🗞 Holdings News (보유 종목 뉴스)</h2><p>NEWS_API_KEY missing.</p>"
+
     html = "<h2>🗞 Holdings News (보유 종목 뉴스)</h2>"
     for t in tickers:
         arts = fetch_news_for_ticker(t, api_key)
@@ -383,8 +454,7 @@ def holdings_news_section(tickers):
             title = a.get("title") or ""
             url = a.get("url") or "#"
             desc = a.get("description") or ""
-            date_raw = a.get("publishedAt") or ""
-            date = extract_article_date(a)   # ✅ 여기서 article(dict) 넘겨줌
+            date = extract_article_date(a)   # ✅ 통일된 날짜 처리
             ko = translate_ko(f"{title}\n{desc}")
             cards.append(
                 f"<div class='card'><b><a href='{url}' target='_blank'>{title}</a></b> "
@@ -398,6 +468,7 @@ def watchlist_news_section(tickers):
     api_key = os.environ.get("NEWS_API_KEY")
     if not api_key:
         return "<h2>👀 Watchlist News (관심 종목 뉴스)</h2><p>NEWS_API_KEY missing.</p>"
+
     html = "<h2>👀 Watchlist News (관심 종목 뉴스)</h2>"
     for t in tickers:
         arts = fetch_news_for_ticker(t, api_key)
@@ -408,8 +479,7 @@ def watchlist_news_section(tickers):
             title = a.get("title") or ""
             url = a.get("url") or "#"
             desc = a.get("description") or ""
-            date_raw = a.get("publishedAt") or ""
-            date = extract_article_date(a)   # ✅ 여기서 article(dict) 넘겨줌
+            date = extract_article_date(a)   # ✅ 통일된 날짜 처리
             ko = translate_ko(f"{title}\n{desc}")
             cards.append(
                 f"<div class='card'><b><a href='{url}' target='_blank'>{title}</a></b> "
@@ -417,7 +487,7 @@ def watchlist_news_section(tickers):
             )
         html += f"<h3>{t}</h3>" + "".join(cards)
     return html
-
+    
 def market_news_section():
     api_key = os.environ.get("NEWS_API_KEY")
     if not api_key:
