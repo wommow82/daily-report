@@ -705,11 +705,18 @@ def build_strategy_table(df_hold, last_prices):
     if rows:
         df_out = pd.DataFrame(rows)
         table_html = "<h2>🧭 Strategies (종목별 매매 전략)</h2>" + df_out.to_html(index=False, escape=False)
-        summary_html = "<h3>📝 Strategy Summary (전략 요약)</h3><div class='card'>" + "<br>".join(summary) + "</div>"
+    
+        # 🔹 리스트로 바꿔 가독성 개선
+        summary_items = "".join([f"<li>{s}</li>" for s in summary])
+        summary_html = f"""
+        <h3>📝 Strategy Summary (전략 요약)</h3>
+        <div class='card'>
+            <ul style="list-style-type:none; padding-left:0;">
+                {summary_items}
+            </ul>
+        </div>
+        """
         return table_html + summary_html
-    else:
-        return "<h2>🧭 Strategies (종목별 매매 전략)</h2><p>보유 종목에 대한 전략 데이터를 가져올 수 없습니다.</p>"
-
 
 def send_email_html(subject, html_body):
     sender = os.environ.get("EMAIL_SENDER")
