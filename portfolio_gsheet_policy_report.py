@@ -658,12 +658,16 @@ def build_strategy_table(df_hold, last_prices):
     summary = []
 
     etf_list = ["SCHD", "VOO", "SPY", "QQQ"]
-    tickers = [t for t in df_hold["Ticker"].tolist() if isinstance(t, str)]
+
+    # ✅ NaN 제거 & 문자열 변환
+    tickers = [str(t).strip().upper() for t in df_hold["Ticker"].dropna().tolist()]
+    print("보유 종목:", tickers)  # 디버깅용
 
     for t in tickers:
         try:
             df = yf.download(t, period="6mo", interval="1d", progress=False)
             if df.empty:
+                print(f"⚠️ {t}: yfinance 데이터 없음")
                 continue
 
             last_price = float(last_prices.get(t, df["Close"].iloc[-1]))
@@ -671,15 +675,10 @@ def build_strategy_table(df_hold, last_prices):
             ma20 = df["Close"].rolling(20).mean().iloc[-1]
             ma60 = df["Close"].rolling(60).mean().iloc[-1]
 
-            # NaN 방지
             if pd.isna(ma20): ma20 = last_price
             if pd.isna(ma60): ma60 = last_price
 
-            if t.upper() in etf_list:
-                stop = round(float(ma60), 2)
-            else:
-                stop = round(float(ma20), 2)
-
+            stop = round(float(ma60 if t in etf_list else ma20), 2)
             tp1 = round(last_price * 1.08, 2)
             tp2 = round(last_price * 1.15, 2)
 
@@ -691,7 +690,6 @@ def build_strategy_table(df_hold, last_prices):
                 "TP2 (2차 매도)": tp2
             })
 
-            # -------- 전략 요약 --------
             if last_price > ma20 and last_price > ma60:
                 summary.append(f"🟢 <b>{t}</b>: 매수 - 기술적 지표 긍정적, 상승 여력 있음")
             elif last_price < ma20 and last_price < ma60:
@@ -706,21 +704,15 @@ def build_strategy_table(df_hold, last_prices):
     if rows:
         df_out = pd.DataFrame(rows)
         table_html = "<h2>🧭 Strategies (종목별 매매 전략)</h2>" + df_out.to_html(index=False, escape=False)
-        
-        # summary가 비어있지 않으면 출력
-        if summary:
-            summary_items = "".join([f"<li>{s}</li>" for s in summary])
-            summary_html = f"""
-            <h3>📝 Strategy Summary (전략 요약)</h3>
-            <div class='card'>
-                <ul style="list-style-type:none; padding-left:0;">
-                    {summary_items}
-                </ul>
-            </div>
-            """
-        else:
-            summary_html = "<h3>📝 Strategy Summary (전략 요약)</h3><p>전략 분석 결과 없음</p>"
-
+        summary_items = "".join([f"<li>{s}</li>" for s in summary])
+        summary_html = f"""
+        <h3>📝 Strategy Summary (전략 요약)</h3>
+        <div class='card'>
+            <ul style="list-style-type:none; padding-left:0;">
+                {summary_items}
+            </ul>
+        </div>
+        """
         return table_html + summary_html
     else:
         return "<h2>🧭 Strategies (종목별 매매 전략)</h2><p>보유 종목에 대한 전략 데이터를 가져올 수 없습니다.</p>"
