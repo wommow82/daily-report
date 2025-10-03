@@ -652,14 +652,12 @@ def indices_section():
 
 def build_strategy_table(df_hold, last_prices):
     import yfinance as yf
+    import pandas as pd
 
     rows = []
     summary = []
 
-    # ✅ ETF 목록
     etf_list = ["SCHD", "VOO", "SPY", "QQQ"]
-
-    # ✅ 보유 종목만 분석
     tickers = [t for t in df_hold["Ticker"].tolist() if isinstance(t, str)]
 
     for t in tickers:
@@ -669,16 +667,19 @@ def build_strategy_table(df_hold, last_prices):
                 continue
 
             last_price = float(last_prices.get(t, df["Close"].iloc[-1]))
+
             ma20 = df["Close"].rolling(20).mean().iloc[-1]
             ma60 = df["Close"].rolling(60).mean().iloc[-1]
 
-            # ✅ ETF는 MA60, 종목은 MA20
+            # NaN 방지
+            if pd.isna(ma20): ma20 = last_price
+            if pd.isna(ma60): ma60 = last_price
+
             if t.upper() in etf_list:
                 stop = round(float(ma60), 2)
             else:
                 stop = round(float(ma20), 2)
 
-            # ✅ 목표가
             tp1 = round(last_price * 1.08, 2)
             tp2 = round(last_price * 1.15, 2)
 
@@ -696,7 +697,7 @@ def build_strategy_table(df_hold, last_prices):
             elif last_price < ma20 and last_price < ma60:
                 summary.append(f"🔴 <b>{t}</b>: 매도 - 하락 추세, 추가 조정 가능성")
             else:
-                summary.append(f"🟡 <b>{t}</b>: 관망 - 뚜렷한 추세 없음, 시장 상황 확인 필요")
+                summary.append(f"🟡 <b>{t}</b>: 관망 - 추세 불확실, 시장 확인 필요")
 
         except Exception as e:
             print(f"⚠️ {t} 전략 생성 실패: {e}")
@@ -705,18 +706,24 @@ def build_strategy_table(df_hold, last_prices):
     if rows:
         df_out = pd.DataFrame(rows)
         table_html = "<h2>🧭 Strategies (종목별 매매 전략)</h2>" + df_out.to_html(index=False, escape=False)
-    
-        # 🔹 리스트로 바꿔 가독성 개선
-        summary_items = "".join([f"<li>{s}</li>" for s in summary])
-        summary_html = f"""
-        <h3>📝 Strategy Summary (전략 요약)</h3>
-        <div class='card'>
-            <ul style="list-style-type:none; padding-left:0;">
-                {summary_items}
-            </ul>
-        </div>
-        """
+        
+        # summary가 비어있지 않으면 출력
+        if summary:
+            summary_items = "".join([f"<li>{s}</li>" for s in summary])
+            summary_html = f"""
+            <h3>📝 Strategy Summary (전략 요약)</h3>
+            <div class='card'>
+                <ul style="list-style-type:none; padding-left:0;">
+                    {summary_items}
+                </ul>
+            </div>
+            """
+        else:
+            summary_html = "<h3>📝 Strategy Summary (전략 요약)</h3><p>전략 분석 결과 없음</p>"
+
         return table_html + summary_html
+    else:
+        return "<h2>🧭 Strategies (종목별 매매 전략)</h2><p>보유 종목에 대한 전략 데이터를 가져올 수 없습니다.</p>"
 
 def send_email_html(subject, html_body):
     sender = os.environ.get("EMAIL_SENDER")
