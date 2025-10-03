@@ -358,66 +358,6 @@ def fetch_news_for_ticker(ticker, api_key, page_size=3, days=7):
 
     return articles
 
-# def extract_article_date(article):
-#     """뉴스 기사 dict에서 날짜를 안전하게 추출"""
-#     date_raw = article.get("publishedAt") or article.get("pubDate") or article.get("date") or ""
-#     if not date_raw:
-#         return "N/A"
-#     try:
-#         dt = datetime.fromisoformat(date_raw.replace("Z", "+00:00"))
-#         return dt.strftime("%Y-%m-%d")
-#     except Exception:
-#         return date_raw[:10]
-
-# def holdings_news_section(tickers):
-#     api_key = os.environ.get("NEWS_API_KEY")
-#     if not api_key:
-#         return "<h2>🗞 Holdings News (보유 종목 뉴스)</h2><p>NEWS_API_KEY missing.</p>"
-#     html = "<h2>🗞 Holdings News (보유 종목 뉴스)</h2>"
-#     for t in tickers:
-#         arts = fetch_news_for_ticker(t, api_key)
-#         if not arts:
-#             continue
-#         cards = []
-#         for a in arts:
-#             title = a.get("title") or ""
-#             url = a.get("url") or "#"
-#             desc = a.get("description") or ""
-#             date_raw = a.get("publishedAt") or ""
-#             date = extract_article_date(a)   # ✅ 여기서 article(dict) 넘겨줌
-#             ko = translate_ko(f"{title}\n{desc}")
-#             cards.append(
-#                 f"<div class='card'><b><a href='{url}' target='_blank'>{title}</a></b> "
-#                 f"<small>({date})</small><br><small>{desc}</small><br><i>{ko}</i></div>"
-#             )
-#         html += f"<h3>{t}</h3>" + "".join(cards)
-#     return html
-
-
-# def watchlist_news_section(tickers):
-#     api_key = os.environ.get("NEWS_API_KEY")
-#     if not api_key:
-#         return "<h2>👀 Watchlist News (관심 종목 뉴스)</h2><p>NEWS_API_KEY missing.</p>"
-#     html = "<h2>👀 Watchlist News (관심 종목 뉴스)</h2>"
-#     for t in tickers:
-#         arts = fetch_news_for_ticker(t, api_key)
-#         if not arts:
-#             continue
-#         cards = []
-#         for a in arts:
-#             title = a.get("title") or ""
-#             url = a.get("url") or "#"
-#             desc = a.get("description") or ""
-#             date_raw = a.get("publishedAt") or ""
-#             date = extract_article_date(a)   # ✅ 여기서 article(dict) 넘겨줌
-#             ko = translate_ko(f"{title}\n{desc}")
-#             cards.append(
-#                 f"<div class='card'><b><a href='{url}' target='_blank'>{title}</a></b> "
-#                 f"<small>({date})</small><br><small>{desc}</small><br><i>{ko}</i></div>"
-#             )
-#         html += f"<h3>{t}</h3>" + "".join(cards)
-#     return html
-
 def extract_article_date(article):
     """뉴스 기사 dict에서 날짜를 안전하게 추출"""
     # ✅ 모든 경우 고려 (NewsAPI, RSS 등)
@@ -488,42 +428,100 @@ def watchlist_news_section(tickers):
         html += f"<h3>{t}</h3>" + "".join(cards)
     return html
     
+# def market_news_section():
+#     api_key = os.environ.get("NEWS_API_KEY")
+#     if not api_key:
+#         return "<h2>📰 Market News (시장 뉴스)</h2><p>NEWS_API_KEY missing.</p>"
+#     url = f"https://newsapi.org/v2/top-headlines?language=en&category=business&pageSize=6&apiKey={api_key}"
+#     r = requests.get(url, timeout=20)
+#     if r.status_code != 200:
+#         return "<h2>📰 Market News (시장 뉴스)</h2><p>Load failed.</p>"
+#     arts = r.json().get("articles", [])
+#     cards = []
+#     for a in arts:
+#         title = a.get("title") or ""
+#         url = a.get("url") or "#"
+#         desc = a.get("description") or ""
+#         date = (a.get("publishedAt") or "")[:10]
+#         ko = translate_ko(f"{title}\n{desc}")
+#         cards.append(f"<div class='card'><b><a href='{url}' target='_blank'>{title}</a></b> <small>({date})</small><br><small>{desc}</small><br><i>{ko}</i></div>")
+#     return "<h2>📰 Market News (시장 뉴스)</h2>" + "".join(cards)
+
 def market_news_section():
     api_key = os.environ.get("NEWS_API_KEY")
     if not api_key:
         return "<h2>📰 Market News (시장 뉴스)</h2><p>NEWS_API_KEY missing.</p>"
+
     url = f"https://newsapi.org/v2/top-headlines?language=en&category=business&pageSize=6&apiKey={api_key}"
     r = requests.get(url, timeout=20)
-    if r.status_code != 200:
-        return "<h2>📰 Market News (시장 뉴스)</h2><p>Load failed.</p>"
+
+    if r.status_code == 429:
+        return "<h2>📰 Market News (시장 뉴스)</h2><p>Usage limit exceeded (사용량 초과)</p>"
+    elif r.status_code in (401, 403):
+        return "<h2>📰 Market News (시장 뉴스)</h2><p>API Key error (API 키 오류)</p>"
+    elif r.status_code != 200:
+        return f"<h2>📰 Market News (시장 뉴스)</h2><p>Load failed (HTTP {r.status_code})</p>"
+
     arts = r.json().get("articles", [])
     cards = []
     for a in arts:
         title = a.get("title") or ""
         url = a.get("url") or "#"
         desc = a.get("description") or ""
-        date = (a.get("publishedAt") or "")[:10]
+        date = extract_article_date(a)  # ✅ 통일된 날짜 처리
         ko = translate_ko(f"{title}\n{desc}")
-        cards.append(f"<div class='card'><b><a href='{url}' target='_blank'>{title}</a></b> <small>({date})</small><br><small>{desc}</small><br><i>{ko}</i></div>")
+        cards.append(
+            f"<div class='card'><b><a href='{url}' target='_blank'>{title}</a></b> "
+            f"<small>({date})</small><br><small>{desc}</small><br><i>{ko}</i></div>"
+        )
     return "<h2>📰 Market News (시장 뉴스)</h2>" + "".join(cards)
+
+# def policy_focus_section():
+#     api_key = os.environ.get("NEWS_API_KEY")
+#     if not api_key:
+#         return "<h2>🏛 Policy Focus (정책 포커스)</h2><p>NEWS_API_KEY missing.</p>"
+#     url = f"https://newsapi.org/v2/everything?q=Trump+policy+economy&language=en&sortBy=publishedAt&pageSize=6&apiKey={api_key}"
+#     r = requests.get(url, timeout=20)
+#     if r.status_code != 200:
+#         return "<h2>🏛 Policy Focus (정책 포커스)</h2><p>Load failed.</p>"
+#     arts = r.json().get("articles", [])
+#     cards = []
+#     for a in arts:
+#         title = a.get("title") or ""
+#         url = a.get("url") or "#"
+#         desc = a.get("description") or ""
+#         date = (a.get("publishedAt") or "")[:10]
+#         ko = translate_ko(f"{title}\n{desc}")
+#         cards.append(f"<div class='card'><b><a href='{url}' target='_blank'>{title}</a></b> <small>({date})</small><br><small>{desc}</small><br><i>{ko}</i></div>")
+#     return "<h2>🏛 Policy Focus (정책 포커스)</h2>" + "".join(cards)
 
 def policy_focus_section():
     api_key = os.environ.get("NEWS_API_KEY")
     if not api_key:
         return "<h2>🏛 Policy Focus (정책 포커스)</h2><p>NEWS_API_KEY missing.</p>"
-    url = f"https://newsapi.org/v2/everything?q=Trump+policy+economy&language=en&sortBy=publishedAt&pageSize=6&apiKey={api_key}"
+
+    url = f"https://newsapi.org/v2/top-headlines?language=en&category=politics&pageSize=6&apiKey={api_key}"
     r = requests.get(url, timeout=20)
-    if r.status_code != 200:
-        return "<h2>🏛 Policy Focus (정책 포커스)</h2><p>Load failed.</p>"
+
+    if r.status_code == 429:
+        return "<h2>🏛 Policy Focus (정책 포커스)</h2><p>Usage limit exceeded (사용량 초과)</p>"
+    elif r.status_code in (401, 403):
+        return "<h2>🏛 Policy Focus (정책 포커스)</h2><p>API Key error (API 키 오류)</p>"
+    elif r.status_code != 200:
+        return f"<h2>🏛 Policy Focus (정책 포커스)</h2><p>Load failed (HTTP {r.status_code})</p>"
+
     arts = r.json().get("articles", [])
     cards = []
     for a in arts:
         title = a.get("title") or ""
         url = a.get("url") or "#"
         desc = a.get("description") or ""
-        date = (a.get("publishedAt") or "")[:10]
+        date = extract_article_date(a)
         ko = translate_ko(f"{title}\n{desc}")
-        cards.append(f"<div class='card'><b><a href='{url}' target='_blank'>{title}</a></b> <small>({date})</small><br><small>{desc}</small><br><i>{ko}</i></div>")
+        cards.append(
+            f"<div class='card'><b><a href='{url}' target='_blank'>{title}</a></b> "
+            f"<small>({date})</small><br><small>{desc}</small><br><i>{ko}</i></div>"
+        )
     return "<h2>🏛 Policy Focus (정책 포커스)</h2>" + "".join(cards)
 
 def load_fred_cache():
