@@ -204,28 +204,157 @@ def build_signals_table(tickers):
             })
     return pd.DataFrame(rows)
 
-def build_strategy_table(tickers, last_prices, settings):
-    sl_floor = float(settings.get("RiskStopLossFloor", 0.90))
-    tp1 = float(settings.get("TakeProfit1", 1.08))
-    tp2 = float(settings.get("TakeProfit2", 1.15))
-    rows = []
+# def build_strategy_table(tickers, last_prices, settings):
+#     sl_floor = float(settings.get("RiskStopLossFloor", 0.90))
+#     tp1 = float(settings.get("TakeProfit1", 1.08))
+#     tp2 = float(settings.get("TakeProfit2", 1.15))
+#     rows = []
+#     for t in tickers:
+#         p = last_prices.get(t)
+#         if p is None:
+#             last = s1 = t1 = t2 = None
+#         else:
+#             last = round(p, 2)
+#             s1 = round(last * sl_floor, 2)
+#             t1 = round(last * tp1, 2)
+#             t2 = round(last * tp2, 2)
+#         rows.append({
+#             "Ticker (종목)": t,
+#             "Price (현재가)": fmt_2(last) if last is not None else "N/A",
+#             "Stop (손절)": fmt_2(s1) if s1 is not None else "N/A",
+#             "TP1 (1차 매도)": fmt_2(t1) if t1 is not None else "N/A",
+#             "TP2 (2차 매도)": fmt_2(t2) if t2 is not None else "N/A"
+#         })
+#     return pd.DataFrame(rows)
+
+def build_strategy_table(df_hold, last_prices):
+    """
+    🧭 보유 종목별 매매 전략 (요약판 개선)
+    - MA 계산시 가용 데이터에 맞춰 창(20→15→10→5) 자동 선택
+    - 분류시 완충치(ε=0.5%) 적용 → '관망' 남발 방지
+    - MA가 현재가와 같아지는 경우 5일/전일 추세로 보정
+    """
+    import yfinance as yf
+    import pandas as pd
+    import numpy as np
+
+    rows, summary = [], []
+    etf_list = ["SCHD", "VOO", "SPY", "QQQ"]
+    tickers = [str(t).strip().upper() for t in df_hold["Ticker"].dropna().tolist()]
+
+    def smart_ma(close: pd.Series, pref_window: int) -> float:
+        """원하는 창이 NaN이면 20→15→10→5 순으로 대체"""
+        for w in [pref_window, 15, 10, 5]:
+            if len(close) >= w:
+                v = close.rolling(w).mean().iloc[-1]
+                if pd.notna(v):
+                    return float(v)
+        # 최소 데이터조차 없으면 마지막 가격으로 fallback
+        return float(close.iloc[-1])
+
     for t in tickers:
-        p = last_prices.get(t)
-        if p is None:
-            last = s1 = t1 = t2 = None
-        else:
-            last = round(p, 2)
-            s1 = round(last * sl_floor, 2)
-            t1 = round(last * tp1, 2)
-            t2 = round(last * tp2, 2)
-        rows.append({
-            "Ticker (종목)": t,
-            "Price (현재가)": fmt_2(last) if last is not None else "N/A",
-            "Stop (손절)": fmt_2(s1) if s1 is not None else "N/A",
-            "TP1 (1차 매도)": fmt_2(t1) if t1 is not None else "N/A",
-            "TP2 (2차 매도)": fmt_2(t2) if t2 is not None else "N/A"
-        })
-    return pd.DataFrame(rows)
+        try:
+            df = yf.download(t, period="6mo", interval="1d", progress=False)
+            if df.empty:
+                # 데이터가 완전 없으면 현재가만으로 TP/SL 계산 불가 → 표시만
+                rows.append({
+                    "Ticker (종목)": t,
+                    "Price (현재가)": "N/A",
+                    "Stop (손절)": "N/A",
+                    "TP1 (1차 매도)": "N/A",
+                    "TP2 (2차 매도)": "N/A",
+                })
+                summary.append(f"🟡 <b>{t}</b>: 데이터 부족으로 추세 판단 불가")
+                continue
+
+            # 현재가: 전달된 last_prices 우선, 없으면 df 종가
+            last_price = last_prices.get(t)
+            if last_price is None or pd.isna(last_price) or last_price == 0:
+                last_price = float(df["Close"].iloc[-1])
+            else:
+                last_price = float(last_price)
+
+            close = df["Close"].astype(float)
+            # MA 계산 (가용창 자동 선택)
+            ma20 = smart_ma(close, 20)
+            ma60 = smart_ma(close, 60)
+
+            # 손절선: ETF는 MA60, 개별주는 MA20
+            stop = round(ma60 if t in etf_list else ma20, 2)
+
+            # 목표가
+            tp1 = round(last_price * 1.08, 2)
+            tp2 = round(last_price * 1.15, 2)
+
+            rows.append({
+                "Ticker (종목)": t,
+                "Price (현재가)": round(last_price, 2),
+                "Stop (손절)": stop,
+                "TP1 (1차 매도)": tp1,
+                "TP2 (2차 매도)": tp2
+            })
+
+            # ---------- 전략 요약 분류 로직 (개선) ----------
+            # 완충치: 0.5% (미세한 동률로 '관망' 남발 방지)
+            eps = 0.005
+            above20 = last_price > ma20 * (1 + eps)
+            above60 = last_price > ma60 * (1 + eps)
+            below20 = last_price < ma20 * (1 - eps)
+            below60 = last_price < ma60 * (1 - eps)
+
+            # 5일/전일 추세 보정
+            if len(close) >= 6:
+                trend_ref = float(close.iloc[-1] - close.iloc[-6])  # 5거래일 변화
+            elif len(close) >= 2:
+                trend_ref = float(close.iloc[-1] - close.iloc[-2])  # 전일 변화
+            else:
+                trend_ref = 0.0
+
+            # MA가 현재가와 사실상 동일할 때(데이터 부족) → 추세로 보정
+            ma_tied = (
+                abs(last_price - ma20) / max(ma20, 1e-9) < eps and
+                abs(last_price - ma60) / max(ma60, 1e-9) < eps
+            )
+
+            if (above20 and above60) or (not above20 and not below20 and not above60 and not below60 and not ma_tied and ma20 > ma60):
+                # 명확한 상방 or (밴드 안이지만 골든크로스 우위)
+                summary.append(f"🟢 <b>{t}</b>: 매수 - 가격이 MA 상단(또는 골든크로스 우위), 상승 모멘텀")
+            elif (below20 and below60) or (not above20 and not below20 and not above60 and not below60 and not ma_tied and ma20 < ma60):
+                # 명확한 하방 or (밴드 안이지만 데드크로스 우위)
+                summary.append(f"🔴 <b>{t}</b>: 매도 - 가격이 MA 하단(또는 데드크로스 우위), 하락 모멘텀")
+            elif ma_tied:
+                # MA가 사실상 현재가와 동일 → 추세 보정
+                if trend_ref > 0:
+                    summary.append(f"🟢 <b>{t}</b>: 매수 - 데이터 부족으로 MA 동률, 단기 추세 우상향")
+                elif trend_ref < 0:
+                    summary.append(f"🔴 <b>{t}</b>: 매도 - 데이터 부족으로 MA 동률, 단기 추세 우하향")
+                else:
+                    summary.append(f"🟡 <b>{t}</b>: 관망 - 데이터 부족, 방향성 모호")
+            else:
+                # 그 외 혼조 → 관망
+                summary.append(f"🟡 <b>{t}</b>: 관망 - 추세 혼재, 확인 필요")
+
+        except Exception as e:
+            summary.append(f"🟡 <b>{t}</b>: 예외 발생({e}), 데이터 확인 필요")
+            continue
+
+    # 결과 HTML
+    import pandas as pd
+    df_out = pd.DataFrame(rows) if rows else pd.DataFrame(
+        [{"Ticker (종목)": "-", "Price (현재가)": "-", "Stop (손절)": "-", "TP1 (1차 매도)": "-", "TP2 (2차 매도)": "-"}]
+    )
+    table_html = "<h2>🧭 Strategies (종목별 매매 전략)</h2>" + df_out.to_html(index=False, escape=False)
+
+    summary_items = "".join([f"<li>{s}</li>" for s in summary]) if summary else "<li>🟡 데이터 확인 필요</li>"
+    summary_html = f"""
+    <h3>📝 Strategy Summary (전략 요약)</h3>
+    <div class='card'>
+        <ul style="list-style-type:none; padding-left:0;">
+            {summary_items}
+        </ul>
+    </div>
+    """
+    return table_html + summary_html
 
 def gpt_strategy_summary(holdings_news, watchlist_news, market_news, policy_focus):
     """
