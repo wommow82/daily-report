@@ -427,25 +427,6 @@ def watchlist_news_section(tickers):
             )
         html += f"<h3>{t}</h3>" + "".join(cards)
     return html
-    
-# def market_news_section():
-#     api_key = os.environ.get("NEWS_API_KEY")
-#     if not api_key:
-#         return "<h2>📰 Market News (시장 뉴스)</h2><p>NEWS_API_KEY missing.</p>"
-#     url = f"https://newsapi.org/v2/top-headlines?language=en&category=business&pageSize=6&apiKey={api_key}"
-#     r = requests.get(url, timeout=20)
-#     if r.status_code != 200:
-#         return "<h2>📰 Market News (시장 뉴스)</h2><p>Load failed.</p>"
-#     arts = r.json().get("articles", [])
-#     cards = []
-#     for a in arts:
-#         title = a.get("title") or ""
-#         url = a.get("url") or "#"
-#         desc = a.get("description") or ""
-#         date = (a.get("publishedAt") or "")[:10]
-#         ko = translate_ko(f"{title}\n{desc}")
-#         cards.append(f"<div class='card'><b><a href='{url}' target='_blank'>{title}</a></b> <small>({date})</small><br><small>{desc}</small><br><i>{ko}</i></div>")
-#     return "<h2>📰 Market News (시장 뉴스)</h2>" + "".join(cards)
 
 def market_news_section():
     api_key = os.environ.get("NEWS_API_KEY")
@@ -475,25 +456,6 @@ def market_news_section():
             f"<small>({date})</small><br><small>{desc}</small><br><i>{ko}</i></div>"
         )
     return "<h2>📰 Market News (시장 뉴스)</h2>" + "".join(cards)
-
-# def policy_focus_section():
-#     api_key = os.environ.get("NEWS_API_KEY")
-#     if not api_key:
-#         return "<h2>🏛 Policy Focus (정책 포커스)</h2><p>NEWS_API_KEY missing.</p>"
-#     url = f"https://newsapi.org/v2/everything?q=Trump+policy+economy&language=en&sortBy=publishedAt&pageSize=6&apiKey={api_key}"
-#     r = requests.get(url, timeout=20)
-#     if r.status_code != 200:
-#         return "<h2>🏛 Policy Focus (정책 포커스)</h2><p>Load failed.</p>"
-#     arts = r.json().get("articles", [])
-#     cards = []
-#     for a in arts:
-#         title = a.get("title") or ""
-#         url = a.get("url") or "#"
-#         desc = a.get("description") or ""
-#         date = (a.get("publishedAt") or "")[:10]
-#         ko = translate_ko(f"{title}\n{desc}")
-#         cards.append(f"<div class='card'><b><a href='{url}' target='_blank'>{title}</a></b> <small>({date})</small><br><small>{desc}</small><br><i>{ko}</i></div>")
-#     return "<h2>🏛 Policy Focus (정책 포커스)</h2>" + "".join(cards)
 
 def policy_focus_section():
     api_key = os.environ.get("NEWS_API_KEY")
@@ -687,113 +649,34 @@ def indices_section():
 
     return html
 
-# def indices_section():
-#     import yfinance as yf
-#     import pandas as pd
-#     from fredapi import Fred
-#     import os
-
-#     # FRED API 클라이언트
-#     # fred = Fred(api_key=os.environ.get("FRED_API_KEY"))
-
-#     # 주요 지수 (Yahoo Finance)
-#     INDEX_MAP = {
-#         "S&P 500": "^GSPC",
-#         "NASDAQ": "^IXIC",
-#         "Dow Jones": "^DJI",
-#         "VIX": "^VIX",
-#         "Gold": "GC=F",
-#         "Crude Oil": "CL=F",
-#     }
-
-#     rows = []
-
-#     # Yahoo Finance 기반 주요 지수
-#     for name, ticker in INDEX_MAP.items():
-#         try:
-#             data = yf.download(ticker, period="5d", interval="1d", progress=False)
-#             if data.empty:
-#                 rows.append(f"<tr><td>{name}</td><td colspan='3'>데이터 없음</td></tr>")
-#                 continue
-
-#             last_price = float(data["Close"].iloc[-1])
-#             prev_close = float(data["Close"].iloc[-2])
-
-#             change = last_price - prev_close
-#             pct_change = (change / prev_close) * 100
-
-#             if change > 0:
-#                 color, arrow = "green", "🟢"
-#             elif change < 0:
-#                 color, arrow = "red", "🔴"
-#             else:
-#                 color, arrow = "black", "⚫"
-
-#             rows.append(
-#                 f"<tr>"
-#                 f"<td>{name}</td>"
-#                 f"<td>{prev_close:,.2f}</td>"
-#                 f"<td><span style='color:{color}'>{last_price:,.2f} "
-#                 f"({change:+.2f}, {pct_change:+.2f}%) {arrow}</span></td>"
-#                 f"</tr>"
-#             )
-#         except Exception as e:
-#             rows.append(f"<tr><td>{name}</td><td colspan='3'>Error: {str(e)}</td></tr>")
-
-#     # FRED: M2 통화량
-#     try:
-#         series = fred.get_series("M2SL")  # 미국 M2 통화량
-#         monthly_vals = series.resample("M").last().dropna()
-#         last_val = float(monthly_vals.iloc[-1])
-#         prev_val = float(monthly_vals.iloc[-2])
-
-#         change = last_val - prev_val
-#         pct_change = (change / prev_val) * 100
-
-#         if change > 0:
-#             color, arrow = "green", "🟢"
-#         elif change < 0:
-#             color, arrow = "red", "🔴"
-#         else:
-#             color, arrow = "black", "⚫"
-
-#         rows.append(
-#             f"<tr>"
-#             f"<td>M2 통화량 (억 달러)</td>"
-#             f"<td>{prev_val:,.2f}</td>"
-#             f"<td><span style='color:{color}'>{last_val:,.2f} "
-#             f"({change:+,.2f}, {pct_change:+.2f}%) {arrow}</span></td>"
-#             f"</tr>"
-#         )
-#     except Exception as e:
-#         rows.append(f"<tr><td>M2 통화량</td><td colspan='3'>Error: {str(e)}</td></tr>")
-
-#     # 최종 HTML
-#     html = """
-#     <h2>📊 주요 지수 및 경제 지표</h2>
-#     <table border="1" cellspacing="0" cellpadding="4">
-#       <tr>
-#         <th>지수</th>
-#         <th>전월/전일 종가</th>
-#         <th>현재값 (변화)</th>
-#       </tr>
-#       {}
-#     </table>
-#     """.format(
-#         "\n".join(rows)
-#     )
-
-#     return html
-
 def build_strategy_table(df_hold, last_prices):
     """
-    🧭 보유 종목별 매매 전략
-    - yfinance가 빈 데이터(네트워크/레이트리밋 등)를 주더라도
-      다단계 폴백으로 행을 채워 '전략 데이터 없음' 문구가 뜨지 않도록 보강.
+    🧭 보유 종목별 매매 전략 (Stop=Price 버그 수정)
+    - 손절선: MA(ETF=60, 주식=20) → 최근 저가 → 퍼센트 폴백(ETF 4% / 주식 5%)
+    - MA가 없거나 현재가와 사실상 동일(±0.5%)하면 MA 대신 다른 기준 사용
     """
 
-    # ✅ ETF 목록: ETF는 MA60을 손절 기준으로, 개별주는 MA20 사용
+    import numpy as np
+
+    # ✅ ETF 목록: ETF는 MA60, 개별주는 MA20
     etf_list = ["SCHD", "VOO", "SPY", "QQQ"]
+
+    # 유틸들
+    def _as_float(x):
+        try:
+            if isinstance(x, (pd.Series, np.ndarray, list, tuple)):
+                arr = np.asarray(x, dtype="float64").ravel()
+                if arr.size == 0: return None
+                v = arr[-1]
+            else:
+                v = float(x)
+            return float(v) if np.isfinite(v) else None
+        except Exception:
+            return None
+
+    EPS = 0.005           # 현재가와 MA가 0.5% 이내면 '사실상 동일'
+    FB_STOCK = 0.05       # 주식 폴백 손절 5%
+    FB_ETF   = 0.04       # ETF  폴백 손절 4%
 
     # 보유 종목 티커 / 평단가 맵
     tickers = [str(t).strip().upper() for t in df_hold["Ticker"].dropna().tolist()]
@@ -806,12 +689,10 @@ def build_strategy_table(df_hold, last_prices):
 
     for t in tickers:
         last_price = last_prices.get(t)
-
-        # 1) last_prices 폴백 점검
         if last_price is None or pd.isna(last_price) or float(last_price) == 0:
             last_price = None
 
-        # 2) 시세 히스토리 (6mo → 실패 시 3mo) 시도
+        # 시세 히스토리 (6mo → 실패 시 3mo)
         df = None
         try:
             df = yf.download(t, period="6mo", interval="1d", progress=False)
@@ -820,27 +701,24 @@ def build_strategy_table(df_hold, last_prices):
         except Exception:
             df = None
 
-        # 3) 히스토리가 있으면 여기서 현재가 대체
+        # 히스토리가 있으면 현재가 대체
         if (last_price is None) and (df is not None) and (not df.empty):
-            try:
-                last_price = float(df["Close"].iloc[-1])
-            except Exception:
-                last_price = None
+            last_price = _as_float(df["Close"].iloc[-1])
 
-        # 4) 그래도 없으면 get_last_and_prev_close 폴백
+        # get_last_and_prev_close 폴백
         if last_price is None:
             try:
                 lp, _ = get_last_and_prev_close(t)
-                last_price = float(lp) if lp is not None else None
+                last_price = _as_float(lp)
             except Exception:
                 last_price = None
 
-        # 5) 최종 폴백: 보유시트 평단가
+        # 최종 폴백: 보유시트 평단가
         if last_price is None or pd.isna(last_price) or float(last_price) == 0:
             ap = avg_map.get(t, 0.0)
             last_price = float(ap) if ap else None
 
-        # 가격을 끝내 구하지 못해도 표는 유지(정보 부족 표기)
+        # 가격을 끝내 구하지 못해도 표 유지
         if last_price is None:
             rows.append({
                 "Ticker (종목)": t,
@@ -854,38 +732,74 @@ def build_strategy_table(df_hold, last_prices):
 
         last_price = float(last_price)
 
-        # 이동평균 계산 (없으면 현재가로 대체)
-        ma20 = ma60 = last_price
+        # ---- 이동평균/최근 저가 계산 (❗️기본값을 현재가로 두지 않음)
+        ma20 = ma60 = None
+        lows10 = lows20 = None
         if df is not None and not df.empty:
-            try:
-                ma20 = df["Close"].rolling(20).mean().iloc[-1]
-                ma60 = df["Close"].rolling(60).mean().iloc[-1]
-                if pd.isna(ma20): ma20 = last_price
-                if pd.isna(ma60): ma60 = last_price
-            except Exception:
-                ma20 = ma60 = last_price
+            cl = df["Close"].astype(float)
+            try: ma20 = _as_float(cl.rolling(20).mean().iloc[-1])
+            except Exception: ma20 = None
+            try: ma60 = _as_float(cl.rolling(60).mean().iloc[-1])
+            except Exception: ma60 = None
 
-        stop = round(float(ma60 if t in etf_list else ma20), 2)
+            try:
+                lw = df["Low"].astype(float)
+                lows10 = lw.tail(10)
+                lows20 = lw.tail(20)
+            except Exception:
+                lows10 = lows20 = None
+
+        # 손절선 결정: MA → 최근 저가 → 퍼센트 폴백
+        use_ma = ma60 if t in etf_list else ma20
+        stop_val = None
+
+        # 1) MA가 유효하고 현재가와 충분히 다르면 MA 사용
+        if use_ma is not None:
+            if abs(last_price - use_ma) / max(abs(use_ma), 1e-9) > EPS:
+                stop_val = float(use_ma)
+
+        # 2) 최근 저가 사용(현재가보다 낮을 때만)
+        if stop_val is None:
+            lows = lows10 if (lows10 is not None and len(lows10) >= 3) else \
+                   (lows20 if (lows20 is not None and len(lows20) >= 5) else None)
+            if lows is not None and len(lows) > 0:
+                try:
+                    rl = float(np.nanmin(np.asarray(lows, dtype="float64")))
+                    if np.isfinite(rl) and rl < last_price:
+                        stop_val = rl
+                except Exception:
+                    pass
+
+        # 3) 퍼센트 폴백
+        if stop_val is None:
+            pct = FB_ETF if t in etf_list else FB_STOCK
+            stop_val = round(last_price * (1 - pct), 2)
+
         tp1 = round(last_price * 1.08, 2)
         tp2 = round(last_price * 1.15, 2)
 
         rows.append({
             "Ticker (종목)": t,
             "Price (현재가)": round(last_price, 2),
-            "Stop (손절)": stop,
+            "Stop (손절)": round(float(stop_val), 2),
             "TP1 (1차 매도)": tp1,
             "TP2 (2차 매도)": tp2
         })
 
-        # 요약 문구
-        if last_price > ma20 and last_price > ma60:
+        # ---- 요약 문구 (MA가 있을 때만 비교)
+        up20 = (ma20 is not None and last_price > ma20)
+        up60 = (ma60 is not None and last_price > ma60)
+        dn20 = (ma20 is not None and last_price < ma20)
+        dn60 = (ma60 is not None and last_price < ma60)
+
+        if up20 and up60:
             summary.append(f"🟢 <b>{t}</b>: 매수 - 기술 지표 긍정적, 상승 여력")
-        elif last_price < ma20 and last_price < ma60:
+        elif dn20 and dn60:
             summary.append(f"🔴 <b>{t}</b>: 매도 - 하락 추세, 추가 조정 가능")
         else:
             summary.append(f"🟡 <b>{t}</b>: 관망 - 추세 불확실, 확인 필요")
 
-    # 표/요약 HTML (행이 비어도 이 로직까지 도달하도록 보강했음)
+    # 표/요약 HTML
     df_out = pd.DataFrame(rows) if rows else pd.DataFrame(
         [{"Ticker (종목)": "-", "Price (현재가)": "-", "Stop (손절)": "-", "TP1 (1차 매도)": "-", "TP2 (2차 매도)": "-"}]
     )
