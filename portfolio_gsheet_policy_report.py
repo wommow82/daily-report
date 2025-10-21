@@ -227,180 +227,6 @@ def build_signals_table(tickers):
 #         })
 #     return pd.DataFrame(rows)
 
-def build_strategy_table(df_hold, last_prices):
-    """
-    🧭 종목별 매매 전략 (Stop=Price 버그 수정)
-    - ETF/주식 구분(ETF=MA60, 주식=MA20)하되, MA가 없거나 현재가와 사실상 같으면
-      최근 저가/퍼센트 폴백으로 손절선을 산출.
-    - 요약 문구는 MA20/MA60 기준으로 상·하향 판단.
-    """
-    import pandas as pd
-    import numpy as np
-    import yfinance as yf
-
-    # ---------- 설정 ----------
-    EPS = 0.005              # 현재가와 MA가 0.5% 이내면 '사실상 동일'
-    FB_PCT_STOCK = 0.05      # 주식 폴백 손절 5%
-    FB_PCT_ETF   = 0.04      # ETF  폴백 손절 4%
-    RECENT_LOW_SHORT = 10    # 최근 10일 저가
-    RECENT_LOW_LONG  = 20    # 최근 20일 저가
-
-    # yfinance 메타에서 ETF 여부 판별(캐시)
-    _etf_cache = {}
-    def is_etf(ticker: str) -> bool:
-        t = str(ticker).upper().strip()
-        if t in _etf_cache:
-            return _etf_cache[t]
-        try:
-            ti = yf.Ticker(t)
-            info = {}
-            try:
-                info = ti.get_info() or {}
-            except Exception:
-                info = getattr(ti, "info", {}) or {}
-            qt = str(info.get("quoteType", "")).lower()
-            st = str(info.get("securityType", "")).lower()
-            nm = (info.get("shortName") or info.get("longName") or "")
-            hit = ("etf" in qt) or ("etf" in st) or ("ETF" in str(nm).upper())
-        except Exception:
-            hit = False
-        _etf_cache[t] = bool(hit)
-        return _etf_cache[t]
-
-    # 안전한 손절 계산
-    def pick_stop(last_price, base_ma, lows, is_etf_flag):
-        lp = float(last_price)
-        # 1) MA 사용: 유효하고 현재가와 충분히 다르면 채택
-        if base_ma is not None and np.isfinite(base_ma):
-            if abs(lp - base_ma) / max(abs(base_ma), 1e-9) > EPS:
-                return float(base_ma)
-        # 2) 최근 저가: 10일 우선, 부족하면 20일. 현재가보다 낮을 때만
-        if lows is not None and len(lows) > 0:
-            try:
-                rl = float(np.nanmin(lows.values if hasattr(lows, "values") else lows))
-                if np.isfinite(rl) and rl < lp:
-                    return rl
-            except Exception:
-                pass
-        # 3) 퍼센트 폴백
-        pct = FB_PCT_ETF if is_etf_flag else FB_PCT_STOCK
-        return round(lp * (1 - pct), 2)
-
-    # ---------- 입력 정리 ----------
-    tickers = [str(t).strip().upper() for t in df_hold["Ticker"].dropna().tolist()]
-    avg_map = {
-        str(r["Ticker"]).strip().upper(): float(r.get("AvgPrice", 0) or 0)
-        for _, r in df_hold.iterrows()
-    }
-
-    rows, summary = [], []
-
-    for t in tickers:
-        etf_flag = is_etf(t)
-
-        # 현재가 확보: last_prices → yfinance → 보유 평단가
-        lp = last_prices.get(t)
-        if lp is None or pd.isna(lp) or float(lp) == 0:
-            lp = None
-
-        hist = None
-        try:
-            hist = yf.download(t, period="6mo", interval="1d", progress=False)
-            if hist is None or hist.empty:
-                hist = yf.download(t, period="3mo", interval="1d", progress=False)
-        except Exception:
-            hist = None
-
-        if lp is None and hist is not None and not hist.empty:
-            try:
-                lp = float(hist["Close"].iloc[-1])
-            except Exception:
-                lp = None
-
-        if lp is None:
-            try:
-                # 프로젝트에 이미 있는 헬퍼라면 그대로 사용
-                lpx, _ = get_last_and_prev_close(t)
-                lp = float(lpx) if lpx is not None else None
-            except Exception:
-                lp = None
-
-        if lp is None or pd.isna(lp) or float(lp) == 0:
-            ap = avg_map.get(t, 0.0)
-            lp = float(ap) if ap else None
-
-        # 가격을 못 구하면 행은 유지하되 “계산 불가”
-        if lp is None:
-            rows.append({
-                "Ticker (종목)": t, "Price (현재가)": "N/A", "Stop (손절)": "N/A",
-                "TP1 (1차 매도)": "N/A", "TP2 (2차 매도)": "N/A"
-            })
-            summary.append(f"🟡 <b>{t}</b>: 데이터 부족으로 계산 불가")
-            continue
-
-        last_price = float(lp)
-
-        # 이동평균/저가 계산 (❗️기본값을 '현재가'로 두지 않음)
-        ma20 = ma60 = None
-        lows10 = lows20 = None
-        if hist is not None and not hist.empty:
-            cl = hist["Close"].astype(float)
-            try: ma20 = cl.rolling(20).mean().iloc[-1]
-            except Exception: ma20 = None
-            try: ma60 = cl.rolling(60).mean().iloc[-1]
-            except Exception: ma60 = None
-            try:
-                lw = hist["Low"].astype(float)
-                lows10 = lw.tail(RECENT_LOW_SHORT)
-                lows20 = lw.tail(RECENT_LOW_LONG)
-            except Exception:
-                lows10 = lows20 = None
-
-        base_ma = ma60 if etf_flag else ma20
-        lows_fb = lows10 if (lows10 is not None and len(lows10) >= 3) else (
-                  lows20 if (lows20 is not None and len(lows20) >= 5) else None)
-
-        stop_val = pick_stop(last_price, base_ma, lows_fb, etf_flag)
-        tp1 = round(last_price * 1.08, 2)
-        tp2 = round(last_price * 1.15, 2)
-
-        rows.append({
-            "Ticker (종목)": t,
-            "Price (현재가)": round(last_price, 2),
-            "Stop (손절)": round(stop_val, 2),
-            "TP1 (1차 매도)": tp1,
-            "TP2 (2차 매도)": tp2
-        })
-
-        # 전략 요약: MA20/MA60 기준
-        up20 = (ma20 is not None and np.isfinite(ma20) and last_price > ma20)
-        up60 = (ma60 is not None and np.isfinite(ma60) and last_price > ma60)
-        dn20 = (ma20 is not None and np.isfinite(ma20) and last_price < ma20)
-        dn60 = (ma60 is not None and np.isfinite(ma60) and last_price < ma60)
-
-        if up20 and up60:
-            summary.append(f"🟢 <b>{t}</b>: 매수 - 기술 지표 긍정적")
-        elif dn20 and dn60:
-            summary.append(f"🔴 <b>{t}</b>: 매도 - 하락 추세")
-        else:
-            summary.append(f"🟡 <b>{t}</b>: 관망 - 추세 불확실, 확인 필요")
-
-    df_out = pd.DataFrame(rows) if rows else pd.DataFrame(
-        [{"Ticker (종목)": "-", "Price (현재가)": "-", "Stop (손절)": "-", "TP1 (1차 매도)": "-", "TP2 (2차 매도)": "-"}]
-    )
-    table_html = "<h2>🧭 Strategies (종목별 매매 전략)</h2>" + df_out.to_html(index=False, escape=False)
-
-    summary_items = "".join([f"<li>{s}</li>" for s in summary]) if summary else "<li>🟡 데이터 확인 필요</li>"
-    summary_html = f"""
-    <h3>📝 Strategy Summary (전략 요약)</h3>
-    <div class='card'>
-        <ul style="list-style-type:none; padding-left:0;">
-            {summary_items}
-        </ul>
-    </div>
-    """
-    return table_html + summary_html
-
 def gpt_strategy_summary(holdings_news, watchlist_news, market_news, policy_focus):
     """
     GPT에게 뉴스와 정책 포커스를 전달하고,
@@ -552,7 +378,6 @@ def extract_article_date(article):
     except Exception:
         # RSS나 기타 포맷 → 앞 10자리만 슬라이싱
         return date_raw[:10]
-
 
 def holdings_news_section(tickers):
     api_key = os.environ.get("NEWS_API_KEY")
@@ -960,122 +785,122 @@ def indices_section():
 
 #     return html
 
-# def build_strategy_table(df_hold, last_prices):
-#     """
-#     🧭 보유 종목별 매매 전략
-#     - yfinance가 빈 데이터(네트워크/레이트리밋 등)를 주더라도
-#       다단계 폴백으로 행을 채워 '전략 데이터 없음' 문구가 뜨지 않도록 보강.
-#     """
+def build_strategy_table(df_hold, last_prices):
+    """
+    🧭 보유 종목별 매매 전략
+    - yfinance가 빈 데이터(네트워크/레이트리밋 등)를 주더라도
+      다단계 폴백으로 행을 채워 '전략 데이터 없음' 문구가 뜨지 않도록 보강.
+    """
 
-#     # ✅ ETF 목록: ETF는 MA60을 손절 기준으로, 개별주는 MA20 사용
-#     etf_list = ["SCHD", "VOO", "SPY", "QQQ"]
+    # ✅ ETF 목록: ETF는 MA60을 손절 기준으로, 개별주는 MA20 사용
+    etf_list = ["SCHD", "VOO", "SPY", "QQQ"]
 
-#     # 보유 종목 티커 / 평단가 맵
-#     tickers = [str(t).strip().upper() for t in df_hold["Ticker"].dropna().tolist()]
-#     avg_map = {
-#         str(r["Ticker"]).strip().upper(): float(r.get("AvgPrice", 0) or 0)
-#         for _, r in df_hold.iterrows()
-#     }
+    # 보유 종목 티커 / 평단가 맵
+    tickers = [str(t).strip().upper() for t in df_hold["Ticker"].dropna().tolist()]
+    avg_map = {
+        str(r["Ticker"]).strip().upper(): float(r.get("AvgPrice", 0) or 0)
+        for _, r in df_hold.iterrows()
+    }
 
-#     rows, summary = [], []
+    rows, summary = [], []
 
-#     for t in tickers:
-#         last_price = last_prices.get(t)
+    for t in tickers:
+        last_price = last_prices.get(t)
 
-#         # 1) last_prices 폴백 점검
-#         if last_price is None or pd.isna(last_price) or float(last_price) == 0:
-#             last_price = None
+        # 1) last_prices 폴백 점검
+        if last_price is None or pd.isna(last_price) or float(last_price) == 0:
+            last_price = None
 
-#         # 2) 시세 히스토리 (6mo → 실패 시 3mo) 시도
-#         df = None
-#         try:
-#             df = yf.download(t, period="6mo", interval="1d", progress=False)
-#             if df is None or df.empty:
-#                 df = yf.download(t, period="3mo", interval="1d", progress=False)
-#         except Exception:
-#             df = None
+        # 2) 시세 히스토리 (6mo → 실패 시 3mo) 시도
+        df = None
+        try:
+            df = yf.download(t, period="6mo", interval="1d", progress=False)
+            if df is None or df.empty:
+                df = yf.download(t, period="3mo", interval="1d", progress=False)
+        except Exception:
+            df = None
 
-#         # 3) 히스토리가 있으면 여기서 현재가 대체
-#         if (last_price is None) and (df is not None) and (not df.empty):
-#             try:
-#                 last_price = float(df["Close"].iloc[-1])
-#             except Exception:
-#                 last_price = None
+        # 3) 히스토리가 있으면 여기서 현재가 대체
+        if (last_price is None) and (df is not None) and (not df.empty):
+            try:
+                last_price = float(df["Close"].iloc[-1])
+            except Exception:
+                last_price = None
 
-#         # 4) 그래도 없으면 get_last_and_prev_close 폴백
-#         if last_price is None:
-#             try:
-#                 lp, _ = get_last_and_prev_close(t)
-#                 last_price = float(lp) if lp is not None else None
-#             except Exception:
-#                 last_price = None
+        # 4) 그래도 없으면 get_last_and_prev_close 폴백
+        if last_price is None:
+            try:
+                lp, _ = get_last_and_prev_close(t)
+                last_price = float(lp) if lp is not None else None
+            except Exception:
+                last_price = None
 
-#         # 5) 최종 폴백: 보유시트 평단가
-#         if last_price is None or pd.isna(last_price) or float(last_price) == 0:
-#             ap = avg_map.get(t, 0.0)
-#             last_price = float(ap) if ap else None
+        # 5) 최종 폴백: 보유시트 평단가
+        if last_price is None or pd.isna(last_price) or float(last_price) == 0:
+            ap = avg_map.get(t, 0.0)
+            last_price = float(ap) if ap else None
 
-#         # 가격을 끝내 구하지 못해도 표는 유지(정보 부족 표기)
-#         if last_price is None:
-#             rows.append({
-#                 "Ticker (종목)": t,
-#                 "Price (현재가)": "N/A",
-#                 "Stop (손절)": "N/A",
-#                 "TP1 (1차 매도)": "N/A",
-#                 "TP2 (2차 매도)": "N/A",
-#             })
-#             summary.append(f"🟡 <b>{t}</b>: 데이터 부족(네트워크/티커 이슈)으로 계산 불가")
-#             continue
+        # 가격을 끝내 구하지 못해도 표는 유지(정보 부족 표기)
+        if last_price is None:
+            rows.append({
+                "Ticker (종목)": t,
+                "Price (현재가)": "N/A",
+                "Stop (손절)": "N/A",
+                "TP1 (1차 매도)": "N/A",
+                "TP2 (2차 매도)": "N/A",
+            })
+            summary.append(f"🟡 <b>{t}</b>: 데이터 부족(네트워크/티커 이슈)으로 계산 불가")
+            continue
 
-#         last_price = float(last_price)
+        last_price = float(last_price)
 
-#         # 이동평균 계산 (없으면 현재가로 대체)
-#         ma20 = ma60 = last_price
-#         if df is not None and not df.empty:
-#             try:
-#                 ma20 = df["Close"].rolling(20).mean().iloc[-1]
-#                 ma60 = df["Close"].rolling(60).mean().iloc[-1]
-#                 if pd.isna(ma20): ma20 = last_price
-#                 if pd.isna(ma60): ma60 = last_price
-#             except Exception:
-#                 ma20 = ma60 = last_price
+        # 이동평균 계산 (없으면 현재가로 대체)
+        ma20 = ma60 = last_price
+        if df is not None and not df.empty:
+            try:
+                ma20 = df["Close"].rolling(20).mean().iloc[-1]
+                ma60 = df["Close"].rolling(60).mean().iloc[-1]
+                if pd.isna(ma20): ma20 = last_price
+                if pd.isna(ma60): ma60 = last_price
+            except Exception:
+                ma20 = ma60 = last_price
 
-#         stop = round(float(ma60 if t in etf_list else ma20), 2)
-#         tp1 = round(last_price * 1.08, 2)
-#         tp2 = round(last_price * 1.15, 2)
+        stop = round(float(ma60 if t in etf_list else ma20), 2)
+        tp1 = round(last_price * 1.08, 2)
+        tp2 = round(last_price * 1.15, 2)
 
-#         rows.append({
-#             "Ticker (종목)": t,
-#             "Price (현재가)": round(last_price, 2),
-#             "Stop (손절)": stop,
-#             "TP1 (1차 매도)": tp1,
-#             "TP2 (2차 매도)": tp2
-#         })
+        rows.append({
+            "Ticker (종목)": t,
+            "Price (현재가)": round(last_price, 2),
+            "Stop (손절)": stop,
+            "TP1 (1차 매도)": tp1,
+            "TP2 (2차 매도)": tp2
+        })
 
-#         # 요약 문구
-#         if last_price > ma20 and last_price > ma60:
-#             summary.append(f"🟢 <b>{t}</b>: 매수 - 기술 지표 긍정적, 상승 여력")
-#         elif last_price < ma20 and last_price < ma60:
-#             summary.append(f"🔴 <b>{t}</b>: 매도 - 하락 추세, 추가 조정 가능")
-#         else:
-#             summary.append(f"🟡 <b>{t}</b>: 관망 - 추세 불확실, 확인 필요")
+        # 요약 문구
+        if last_price > ma20 and last_price > ma60:
+            summary.append(f"🟢 <b>{t}</b>: 매수 - 기술 지표 긍정적, 상승 여력")
+        elif last_price < ma20 and last_price < ma60:
+            summary.append(f"🔴 <b>{t}</b>: 매도 - 하락 추세, 추가 조정 가능")
+        else:
+            summary.append(f"🟡 <b>{t}</b>: 관망 - 추세 불확실, 확인 필요")
 
-#     # 표/요약 HTML (행이 비어도 이 로직까지 도달하도록 보강했음)
-#     df_out = pd.DataFrame(rows) if rows else pd.DataFrame(
-#         [{"Ticker (종목)": "-", "Price (현재가)": "-", "Stop (손절)": "-", "TP1 (1차 매도)": "-", "TP2 (2차 매도)": "-"}]
-#     )
-#     table_html = "<h2>🧭 Strategies (종목별 매매 전략)</h2>" + df_out.to_html(index=False, escape=False)
+    # 표/요약 HTML (행이 비어도 이 로직까지 도달하도록 보강했음)
+    df_out = pd.DataFrame(rows) if rows else pd.DataFrame(
+        [{"Ticker (종목)": "-", "Price (현재가)": "-", "Stop (손절)": "-", "TP1 (1차 매도)": "-", "TP2 (2차 매도)": "-"}]
+    )
+    table_html = "<h2>🧭 Strategies (종목별 매매 전략)</h2>" + df_out.to_html(index=False, escape=False)
 
-#     summary_items = "".join([f"<li>{s}</li>" for s in summary]) if summary else "<li>🟡 데이터 확인 필요</li>"
-#     summary_html = f"""
-#     <h3>📝 Strategy Summary (전략 요약)</h3>
-#     <div class='card'>
-#         <ul style="list-style-type:none; padding-left:0;">
-#             {summary_items}
-#         </ul>
-#     </div>
-#     """
-#     return table_html + summary_html
+    summary_items = "".join([f"<li>{s}</li>" for s in summary]) if summary else "<li>🟡 데이터 확인 필요</li>"
+    summary_html = f"""
+    <h3>📝 Strategy Summary (전략 요약)</h3>
+    <div class='card'>
+        <ul style="list-style-type:none; padding-left:0;">
+            {summary_items}
+        </ul>
+    </div>
+    """
+    return table_html + summary_html
 
 def send_email_html(subject, html_body):
     sender = os.environ.get("EMAIL_SENDER")
