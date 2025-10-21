@@ -229,22 +229,25 @@ def build_signals_table(tickers):
 
 def build_strategy_table(df_hold, last_prices):
     """
-    🧭 종목별 매매 전략 테이블 생성 (버그 수정판)
-    - ETF/개별주 구분: yfinance 메타데이터에서 'etf' 여부 감지
-    - 손절선 계산 규칙:
-        1) 기준 MA(ETF=MA60, 주식=MA20)가 유효하고 현재가와 충분히 차이 나면 MA 사용
-        2) 아니면 최근 저가(min Low, 10일→20일) 사용
-        3) 그래도 적절치 않으면 퍼센트 폴백(ETF 4%, 주식 5%)
-    - TP1/TP2는 +8%, +15% 고정
-    - 요약(매수/매도/관망)은 MA20/MA60 대비로 판단
+    🧭 종목별 매매 전략 (Stop=Price 버그 수정)
+    - ETF/주식 구분(ETF=MA60, 주식=MA20)하되, MA가 없거나 현재가와 사실상 같으면
+      최근 저가/퍼센트 폴백으로 손절선을 산출.
+    - 요약 문구는 MA20/MA60 기준으로 상·하향 판단.
     """
     import pandas as pd
     import numpy as np
     import yfinance as yf
 
-    # ---------- ETF 판별(캐시) ----------
+    # ---------- 설정 ----------
+    EPS = 0.005              # 현재가와 MA가 0.5% 이내면 '사실상 동일'
+    FB_PCT_STOCK = 0.05      # 주식 폴백 손절 5%
+    FB_PCT_ETF   = 0.04      # ETF  폴백 손절 4%
+    RECENT_LOW_SHORT = 10    # 최근 10일 저가
+    RECENT_LOW_LONG  = 20    # 최근 20일 저가
+
+    # yfinance 메타에서 ETF 여부 판별(캐시)
     _etf_cache = {}
-    def meta_is_etf(ticker: str) -> bool:
+    def is_etf(ticker: str) -> bool:
         t = str(ticker).upper().strip()
         if t in _etf_cache:
             return _etf_cache[t]
@@ -259,29 +262,19 @@ def build_strategy_table(df_hold, last_prices):
             st = str(info.get("securityType", "")).lower()
             nm = (info.get("shortName") or info.get("longName") or "")
             hit = ("etf" in qt) or ("etf" in st) or ("ETF" in str(nm).upper())
-            _etf_cache[t] = bool(hit)
         except Exception:
-            _etf_cache[t] = False
+            hit = False
+        _etf_cache[t] = bool(hit)
         return _etf_cache[t]
 
-    # ---------- 파라미터 ----------
-    eps = 0.005               # '사실상 동일' 판단 오차(0.5%)
-    fb_pct_stock = 0.05       # 주식 폴백 손절 5%
-    fb_pct_etf   = 0.04       # ETF  폴백 손절 4%
-    lb_short = 10             # 최근 10일 저가
-    lb_long  = 20             # 최근 20일 저가
-
-    def safe_stop(last_price, base_ma, is_etf, lows=None):
-        """손절선 최종 결정 로직"""
-        try:
-            lp = float(last_price)
-        except Exception:
-            return None
-        # 1) MA 사용: MA가 유효하고 현재가와 충분히 차이날 때
+    # 안전한 손절 계산
+    def pick_stop(last_price, base_ma, lows, is_etf_flag):
+        lp = float(last_price)
+        # 1) MA 사용: 유효하고 현재가와 충분히 다르면 채택
         if base_ma is not None and np.isfinite(base_ma):
-            if abs(lp - base_ma) / max(abs(base_ma), 1e-9) > eps:
+            if abs(lp - base_ma) / max(abs(base_ma), 1e-9) > EPS:
                 return float(base_ma)
-        # 2) 최근 저가 사용(현재가보다 낮을 때만)
+        # 2) 최근 저가: 10일 우선, 부족하면 20일. 현재가보다 낮을 때만
         if lows is not None and len(lows) > 0:
             try:
                 rl = float(np.nanmin(lows.values if hasattr(lows, "values") else lows))
@@ -290,10 +283,10 @@ def build_strategy_table(df_hold, last_prices):
             except Exception:
                 pass
         # 3) 퍼센트 폴백
-        pct = fb_pct_etf if is_etf else fb_pct_stock
+        pct = FB_PCT_ETF if is_etf_flag else FB_PCT_STOCK
         return round(lp * (1 - pct), 2)
 
-    # ---------- 입력 맵 ----------
+    # ---------- 입력 정리 ----------
     tickers = [str(t).strip().upper() for t in df_hold["Ticker"].dropna().tolist()]
     avg_map = {
         str(r["Ticker"]).strip().upper(): float(r.get("AvgPrice", 0) or 0)
@@ -303,29 +296,30 @@ def build_strategy_table(df_hold, last_prices):
     rows, summary = [], []
 
     for t in tickers:
-        is_etf = meta_is_etf(t)
+        etf_flag = is_etf(t)
 
-        # ---- 현재가 확보: last_prices -> yfinance close -> 헬퍼 -> 평단가 ----
+        # 현재가 확보: last_prices → yfinance → 보유 평단가
         lp = last_prices.get(t)
         if lp is None or pd.isna(lp) or float(lp) == 0:
             lp = None
 
-        df = None
+        hist = None
         try:
-            df = yf.download(t, period="6mo", interval="1d", progress=False)
-            if df is None or df.empty:
-                df = yf.download(t, period="3mo", interval="1d", progress=False)
+            hist = yf.download(t, period="6mo", interval="1d", progress=False)
+            if hist is None or hist.empty:
+                hist = yf.download(t, period="3mo", interval="1d", progress=False)
         except Exception:
-            df = None
+            hist = None
 
-        if lp is None and df is not None and not df.empty:
+        if lp is None and hist is not None and not hist.empty:
             try:
-                lp = float(df["Close"].iloc[-1])
+                lp = float(hist["Close"].iloc[-1])
             except Exception:
                 lp = None
 
         if lp is None:
             try:
+                # 프로젝트에 이미 있는 헬퍼라면 그대로 사용
                 lpx, _ = get_last_and_prev_close(t)
                 lp = float(lpx) if lpx is not None else None
             except Exception:
@@ -335,6 +329,7 @@ def build_strategy_table(df_hold, last_prices):
             ap = avg_map.get(t, 0.0)
             lp = float(ap) if ap else None
 
+        # 가격을 못 구하면 행은 유지하되 “계산 불가”
         if lp is None:
             rows.append({
                 "Ticker (종목)": t, "Price (현재가)": "N/A", "Stop (손절)": "N/A",
@@ -345,54 +340,51 @@ def build_strategy_table(df_hold, last_prices):
 
         last_price = float(lp)
 
-        # ---- MA/저가 산출 (없으면 None 유지) ----
+        # 이동평균/저가 계산 (❗️기본값을 '현재가'로 두지 않음)
         ma20 = ma60 = None
         lows10 = lows20 = None
-        if df is not None and not df.empty:
-            close = df["Close"].astype(float)
+        if hist is not None and not hist.empty:
+            cl = hist["Close"].astype(float)
+            try: ma20 = cl.rolling(20).mean().iloc[-1]
+            except Exception: ma20 = None
+            try: ma60 = cl.rolling(60).mean().iloc[-1]
+            except Exception: ma60 = None
             try:
-                ma20 = close.rolling(20).mean().iloc[-1]
-            except Exception:
-                ma20 = None
-            try:
-                ma60 = close.rolling(60).mean().iloc[-1]
-            except Exception:
-                ma60 = None
-            try:
-                lows10 = df["Low"].astype(float).tail(lb_short)
-                lows20 = df["Low"].astype(float).tail(lb_long)
+                lw = hist["Low"].astype(float)
+                lows10 = lw.tail(RECENT_LOW_SHORT)
+                lows20 = lw.tail(RECENT_LOW_LONG)
             except Exception:
                 lows10 = lows20 = None
 
-        base_ma = ma60 if is_etf else ma20
-        lows_fb = lows10 if (lows10 is not None and len(lows10) >= 3) else (lows20 if (lows20 is not None and len(lows20) >= 5) else None)
+        base_ma = ma60 if etf_flag else ma20
+        lows_fb = lows10 if (lows10 is not None and len(lows10) >= 3) else (
+                  lows20 if (lows20 is not None and len(lows20) >= 5) else None)
 
-        stop_val = safe_stop(last_price, base_ma, is_etf, lows=lows_fb)
+        stop_val = pick_stop(last_price, base_ma, lows_fb, etf_flag)
         tp1 = round(last_price * 1.08, 2)
         tp2 = round(last_price * 1.15, 2)
 
         rows.append({
             "Ticker (종목)": t,
             "Price (현재가)": round(last_price, 2),
-            "Stop (손절)": round(stop_val, 2) if stop_val is not None else "N/A",
+            "Stop (손절)": round(stop_val, 2),
             "TP1 (1차 매도)": tp1,
             "TP2 (2차 매도)": tp2
         })
 
-        # ---- 요약 문구 ----
-        up_ma20 = (ma20 is not None and np.isfinite(ma20) and last_price > ma20)
-        up_ma60 = (ma60 is not None and np.isfinite(ma60) and last_price > ma60)
-        down_ma20 = (ma20 is not None and np.isfinite(ma20) and last_price < ma20)
-        down_ma60 = (ma60 is not None and np.isfinite(ma60) and last_price < ma60)
+        # 전략 요약: MA20/MA60 기준
+        up20 = (ma20 is not None and np.isfinite(ma20) and last_price > ma20)
+        up60 = (ma60 is not None and np.isfinite(ma60) and last_price > ma60)
+        dn20 = (ma20 is not None and np.isfinite(ma20) and last_price < ma20)
+        dn60 = (ma60 is not None and np.isfinite(ma60) and last_price < ma60)
 
-        if up_ma20 and up_ma60:
-            summary.append(f"🟢 <b>{t}</b>: 매수 - 기술 지표 긍정적, 상승 여력")
-        elif down_ma20 and down_ma60:
-            summary.append(f"🔴 <b>{t}</b>: 매도 - 하락 추세, 추가 조정 가능")
+        if up20 and up60:
+            summary.append(f"🟢 <b>{t}</b>: 매수 - 기술 지표 긍정적")
+        elif dn20 and dn60:
+            summary.append(f"🔴 <b>{t}</b>: 매도 - 하락 추세")
         else:
             summary.append(f"🟡 <b>{t}</b>: 관망 - 추세 불확실, 확인 필요")
 
-    # ---- HTML 구성 ----
     df_out = pd.DataFrame(rows) if rows else pd.DataFrame(
         [{"Ticker (종목)": "-", "Price (현재가)": "-", "Stop (손절)": "-", "TP1 (1차 매도)": "-", "TP2 (2차 매도)": "-"}]
     )
