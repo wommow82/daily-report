@@ -838,6 +838,203 @@ def send_email_html(subject, html_body):
         print("✅ Email sent to:", receiver)
     except Exception as e:
         print("❌ Email send failed:", e)
+def analyst_advice_section_news_aware(as_of=None):
+    """
+    🧠 투자 애널리스트 조언 (뉴스 인지형, 동적)
+    - 지수( ^GSPC, ^VIX ) + 최신 시장 뉴스 헤드라인(NewsAPI)을 함께 고려해
+      '시장 위치/반등 창구/전략 스테이징'을 자동 생성.
+    - 기존 코드의 requests/NewsAPI 의존성 그대로 사용.
+    - 환경변수: NEWS_API_KEY (없으면 '뉴스 미포함'으로 동작)
+    """
+    import os, re, math, requests
+    import pandas as pd
+    import numpy as np
+    from datetime import datetime, timedelta
+    import yfinance as yf
+
+    today = as_of or datetime.utcnow().strftime("%Y-%m-%d")
+
+    # ---------- 1) 지수 데이터 (S&P500, VIX) ----------
+    end = datetime.utcnow()
+    start = end - timedelta(days=400)
+    spx = yf.download("^GSPC", start=start, end=end, interval="1d", progress=False)["Close"].dropna()
+    vix = yf.download("^VIX",  start=start, end=end, interval="1d", progress=False)["Close"].dropna()
+
+    if spx.empty or vix.empty:
+        return f"<h2>🧠 투자 애널리스트 조언</h2><div class='card'><p class='muted'>기준일: {today}</p><div class='gpt-box'>지수 데이터 부족</div></div>"
+
+    spx_last = float(spx.iloc[-1])
+    vix_last = float(vix.iloc[-1])
+    ma50  = float(spx.rolling(50).mean().iloc[-1]) if len(spx) >= 50 else None
+    ma200 = float(spx.rolling(200).mean().iloc[-1]) if len(spx) >= 200 else None
+    drawdown_pct = (spx_last / (float(spx.tail(252).max()) if len(spx) >= 252 else float(spx.max())) - 1.0) * 100.0
+
+    cross_state = "골든크로스(중기 우상향)" if (ma50 and ma200 and ma50 > ma200) else ("데드크로스(중기 약세)" if (ma50 and ma200 and ma50 < ma200) else "중립")
+    price_vs_ma50 = "상회" if (ma50 and spx_last > ma50) else "하회"
+
+    # ---------- 2) 시장 뉴스 수집 (최신 헤드라인) ----------
+    api_key = os.environ.get("NEWS_API_KEY")
+    news_items = []
+    if api_key:
+        try:
+            url = f"https://newsapi.org/v2/top-headlines?language=en&category=business&pageSize=12&apiKey={api_key}"
+            r = requests.get(url, timeout=20)
+            if r.status_code == 200:
+                arts = r.json().get("articles", []) or []
+                for a in arts:
+                    title = (a.get("title") or "").strip()
+                    desc  = (a.get("description") or "").strip()
+                    news_items.append(f"{title}. {desc}")
+        except Exception:
+            pass  # 뉴스 불가 시 지수만으로 판단
+
+    # ---------- 3) 뉴스 스코어링 (간단 키워드 규칙 기반) ----------
+    # 부정/공포 키워드(+가중치) vs 긍정/완화 키워드(−가중치)
+    neg_kw = {
+        r"\b(miss|weak|downbeat|cut guidance|profit warning)\b": 2.0,
+        r"\b(slowdown|recession|hard landing)\b": 2.0,
+        r"\b(tariff|ban|sanction|export curb|trade tension)\b": 1.6,
+        r"\b(valuation bubble|bubble|overvalued)\b": 1.5,
+        r"\b(fed hawkish|rate hike|higher for longer)\b": 1.3,
+        r"\b(geopolitical|war|conflict|escalation)\b": 1.4,
+        r"\b(selloff|plunge|crash|freefall)\b": 2.2,
+        r"\b(volatility spike|fear gauge surges|VIX surges)\b": 1.7,
+        r"\b(antitrust|regulatory probe|lawsuit)\b": 1.2,
+    }
+    pos_kw = {
+        r"\b(beat|surprise to the upside|record revenue|strong demand)\b": -1.6,
+        r"\b(fed dovish|rate cut|easing|pivot)\b": -1.4,
+        r"\b(rebound|stabilize|bottoming|soft landing)\b": -1.2,
+        r"\b(deal reached|truce|tariff relief)\b": -1.3,
+    }
+
+    def score_text(txt):
+        s = 0.0
+        t = txt.lower()
+        for pat, w in neg_kw.items():
+            if re.search(pat, t): s += w
+        for pat, w in pos_kw.items():
+            if re.search(pat, t): s += w
+        return s
+
+    news_score = 0.0
+    for it in news_items:
+        news_score += score_text(it)
+    # 뉴스 영향 한도(너무 과대하지 않게)
+    news_score = max(min(news_score, 8.0), -6.0)
+
+    # ---------- 4) 지수 레짐 + 뉴스 융합 판단 ----------
+    # 기본: 지수 기반
+    if drawdown_pct <= -20:
+        market_phase = "약세장(Bear Market)"
+        base_window = "분기 단위(6–12개월) 소요 가능"
+    elif drawdown_pct <= -8:
+        market_phase = "조정(Correction) 국면"
+        base_window = "수주~1–2개월 내 저점 확인 가능성" if vix_last >= 25 else "수주 내 점진 반등 가능성"
+    elif drawdown_pct < 0:
+        market_phase = "완만한 조정/눌림 구간"
+        base_window = "수주 내 추세 재확인"
+    else:
+        market_phase = "사상고점 인접/강세 지속"
+        base_window = "단기 조정 리스크 주시"
+
+    # 뉴스 스코어에 따른 톤 조정
+    # +값일수록 부정(공포) → 반등창구를 늦추고, 방어비중 권고 강화
+    if news_score >= 4:
+        phase_note = "뉴스 톤: 강한 부정/공포"
+        window_adj = " → 반등 지연/변동성 확대 가능성"
+        staging_bias = "defensive"
+    elif news_score >= 2:
+        phase_note = "뉴스 톤: 부정 우세"
+        window_adj = " → 저점 확인까지 다소 시간 소요"
+        staging_bias = "lean_defensive"
+    elif news_score <= -2:
+        phase_note = "뉴스 톤: 긍정/완화"
+        window_adj = " → 반등 신호 조기 가능"
+        staging_bias = "offensive"
+    else:
+        phase_note = "뉴스 톤: 중립"
+        window_adj = ""
+        staging_bias = "neutral"
+
+    rebound_window = base_window + window_adj
+
+    # ---------- 5) 전략 스테이징 ----------
+    if "약세장" in market_phase:
+        staging = [
+            "① 방어 강화: 헬스케어·유틸리티·현금 비중 확대",
+            "② 공포 피크(패닉/VIX 급등)에서 분할 매수 시작",
+            "③ 50일선 회복·골든크로스 전후 비중 확대",
+            "④ 추세 확정 구간 리밸런싱/익절",
+        ]
+    elif "조정" in market_phase:
+        staging = [
+            "① 관망/방어기: 헬스케어·유틸리티로 변동성 완충(현금 유지)",
+            "② 공포 확산 시: 반도체·AI 인프라 대형주/ETF 분할 1차 진입",
+            "③ 50일선 재탈환/골든크로스: 산업재·소재·금융 확대",
+            "④ 반등 추세 확인: 리밸런싱/익절 병행",
+        ]
+    else:
+        staging = [
+            "① 눌림 매수 대기: 50일선 하향 이탈 여부 주시",
+            "② 추세 유지 시: 승자 보유/익절 분할",
+            "③ 리스크: VIX 급등, 실적/정책 쇼크 모니터링",
+        ]
+
+    # 뉴스 바이어스에 따라 한 줄 가이드 보정
+    if staging_bias == "defensive":
+        staging[0] += " (뉴스 부정: 방어/현금 비중 추가 상향 권고)"
+    elif staging_bias == "lean_defensive":
+        staging[0] += " (뉴스 부정 우세: 신규 공격 비중은 '분할·점진')"
+    elif staging_bias == "offensive":
+        staging[2] += " (뉴스 완화: 반등 신호 조기 가능 → 확대 타이밍 경계)"
+
+    sector_hint = {
+        "방어(조정기)": ["헬스케어(배당/현금흐름 안정)", "유틸리티(금리↓ 시 리레이팅)"],
+        "공격(반등초기)": ["반도체·AI 인프라", "산업재(경기 회복 베타)", "소재/에너지(원자재 사이클)"],
+    }
+
+    # ---------- 6) HTML ----------
+    def _li(items): return "".join([f"<li>{x}</li>" for x in items])
+    html = f"""
+    <h2>🧠 투자 애널리스트 조언</h2>
+    <div class='card' style="line-height:1.6; font-size:14px">
+      <p class='muted'>기준일: {today}</p>
+
+      <h3>📈 현재 시장 위치</h3>
+      <ul>
+        <li><b>판단:</b> {market_phase} · VIX {vix_last:.1f} · {phase_note}</li>
+        <li><b>지수 상태:</b> S&P500 {spx_last:,.0f}p · 52주 고점 대비 {drawdown_pct:.1f}%</li>
+        <li><b>이동평균:</b> 50일선 {ma50:,.0f if ma50 else 'N/A'} · 200일선 {ma200:,.0f if ma200 else 'N/A'} · {cross_state} · 가격은 50일선 {price_vs_ma50}</li>
+        <li><b>반등 창구:</b> {rebound_window}</li>
+      </ul>
+
+      <h3>💡 전략적 제안 (현금 보유자 기준)</h3>
+      <table border="1" cellspacing="0" cellpadding="6" style="width:100%; border-collapse:collapse; text-align:center">
+        <thead><tr><th>전략</th><th>시점</th><th>행동</th></tr></thead>
+        <tbody>
+          <tr><td>1단계: 관망/방어</td><td>현재 구간</td><td>{staging[0] if len(staging)>0 else '-'}</td></tr>
+          <tr><td>2단계: 공포 확산</td><td>VIX 급등/하락 가속</td><td>{staging[1] if len(staging)>1 else '-'}</td></tr>
+          <tr><td>3단계: 반등 신호</td><td>50일선 회복·골든크로스</td><td>{staging[2] if len(staging)>2 else '-'}</td></tr>
+          <tr><td>4단계: 추세 확정</td><td>반등 1개월+</td><td>{staging[3] if len(staging)>3 else '-'}</td></tr>
+        </tbody>
+      </table>
+
+      <h3>📦 섹터/ETF 힌트</h3>
+      <ul>
+        <li><b>방어(조정기):</b> {', '.join(sector_hint['방어(조정기)'])}</li>
+        <li><b>공격(반등초기):</b> {', '.join(sector_hint['공격(반등초기)'])}</li>
+      </ul>
+
+      <h3>🎯 요약</h3>
+      <div class='gpt-box'>
+        현재 판정 <b>{market_phase}</b> (+ 뉴스 톤: {phase_note}).<br>
+        전략: 현금 유지 → 방어로 완충 → 공포 심화 시 기술/반도체 분할 진입 → 
+        50일선 회복·추세 전환 확인 후 산업재/소재 확대 → 반등 확인 시 리밸런싱/익절.
+      </div>
+    </div>
+    """
+    return html
 
 def build_report_html():
     df_hold, df_watch, settings = load_holdings_watchlist_settings()
@@ -966,13 +1163,16 @@ def build_report_html():
     econ_html = econ_section()
     indices_html = indices_section()
 
-    # -------- GPT Opinion Section --------
-    gpt_html = gpt_strategy_summary(
-        hold_news_html,
-        watch_news_html,
-        market_html,
-        policy_html
-    )
+    # # -------- GPT Opinion Section --------
+    # gpt_html = gpt_strategy_summary(
+    #     hold_news_html,
+    #     watch_news_html,
+    #     market_html,
+    #     policy_html
+    # )
+
+    # -------- 투자 애널리스트 조언 Section (뉴스 인지형) --------
+    gpt_html = analyst_advice_section_news_aware()
 
     # -------- 보유 종목 현재가 가져오기 --------
     last_prices = {}
