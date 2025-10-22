@@ -88,14 +88,6 @@ def emoji_from_change_pct(pct):
         return "🔴"
     return "🟡"
 
-# def get_gspread_client():
-#     scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
-#     creds = ServiceAccountCredentials.from_json_keyfile_name(os.environ.get("GOOGLE_APPLICATION_CREDENTIALS"), scope)
-#     return gspread.authorize(creds)
-
-# def open_gsheet(gs_id):
-#     return get_gspread_client().open_by_key(gs_id)
-
 def get_gspread_client():
     scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
     creds = ServiceAccountCredentials.from_json_keyfile_name(
@@ -233,28 +225,39 @@ def build_signals_table(tickers):
             })
     return pd.DataFrame(rows)
 
-# def build_strategy_table(tickers, last_prices, settings):
-#     sl_floor = float(settings.get("RiskStopLossFloor", 0.90))
-#     tp1 = float(settings.get("TakeProfit1", 1.08))
-#     tp2 = float(settings.get("TakeProfit2", 1.15))
-#     rows = []
-#     for t in tickers:
-#         p = last_prices.get(t)
-#         if p is None:
-#             last = s1 = t1 = t2 = None
-#         else:
-#             last = round(p, 2)
-#             s1 = round(last * sl_floor, 2)
-#             t1 = round(last * tp1, 2)
-#             t2 = round(last * tp2, 2)
-#         rows.append({
-#             "Ticker (종목)": t,
-#             "Price (현재가)": fmt_2(last) if last is not None else "N/A",
-#             "Stop (손절)": fmt_2(s1) if s1 is not None else "N/A",
-#             "TP1 (1차 매도)": fmt_2(t1) if t1 is not None else "N/A",
-#             "TP2 (2차 매도)": fmt_2(t2) if t2 is not None else "N/A"
-#         })
-#     return pd.DataFrame(rows)
+def fetch_fear_greed_index():
+    """
+    CNN Fear & Greed Index (공포·탐욕지수) 실시간 조회
+    출처: https://money.cnn.com/data/fear-and-greed/
+    """
+    import requests, datetime
+
+    url = "https://production.dataviz.cnn.io/index/fearandgreed/graphdata"
+    try:
+        r = requests.get(url, timeout=10)
+        r.raise_for_status()
+        data = r.json()
+        now_value = data["fear_and_greed"]["score"]
+        now_rating = data["fear_and_greed"]["rating"]
+        last_close = data["fear_and_greed_historical"]["data"][-2]["score"]
+        change = now_value - last_close
+        pct_change = (change / last_close * 100) if last_close else 0
+
+        color = "green" if change > 0 else "red" if change < 0 else "black"
+        arrow = "🟢" if change > 0 else "🔴" if change < 0 else "⚫"
+
+        html_row = (
+            f"<tr>"
+            f"<td>Fear & Greed Index (공포·탐욕지수)</td>"
+            f"<td>{last_close:.1f}</td>"
+            f"<td><span style='color:{color}'>{now_value:.1f} "
+            f"({change:+.1f}, {pct_change:+.1f}%) {arrow} "
+            f"→ <b>{now_rating}</b></span></td>"
+            f"</tr>"
+        )
+        return html_row
+    except Exception as e:
+        return f"<tr><td>Fear & Greed Index</td><td colspan='2'>Error: {e}</td></tr>"
 
 def gpt_strategy_summary(holdings_news, watchlist_news, market_news, policy_focus):
     """
@@ -658,6 +661,8 @@ def indices_section():
             )
         except Exception as e:
             rows.append(f"<tr><td>{name}</td><td colspan='3'>Error: {str(e)}</td></tr>")
+            # ✅ 공포·탐욕지수 추가
+            rows.append(fetch_fear_greed_index())
 
     # ✅ M2 통화량 관련 부분은 삭제했음
 
