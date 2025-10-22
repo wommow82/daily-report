@@ -661,8 +661,8 @@ def indices_section():
             )
         except Exception as e:
             rows.append(f"<tr><td>{name}</td><td colspan='3'>Error: {str(e)}</td></tr>")
-            # ✅ 공포·탐욕지수 추가
-            rows.append(fetch_fear_greed_index())
+    # ✅ 공포·탐욕지수 추가
+    rows.append(fetch_fear_greed_index())
 
     # ✅ M2 통화량 관련 부분은 삭제했음
 
