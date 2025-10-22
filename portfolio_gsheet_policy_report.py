@@ -868,201 +868,6 @@ def send_email_html(subject, html_body):
     except Exception as e:
         print("❌ Email send failed:", e)
 
-def build_report_html():
-    df_hold, df_watch, settings = load_holdings_watchlist_settings()
-
-    # --- Holdings 데이터 전처리 ---
-    if "Shares" in df_hold.columns:
-        df_hold["Shares"] = pd.to_numeric(df_hold["Shares"], errors="coerce").fillna(0.0)
-    if "AvgPrice" in df_hold.columns:
-        df_hold["AvgPrice"] = pd.to_numeric(df_hold["AvgPrice"], errors="coerce").fillna(0.0)
-
-    cash_usd = float(settings.get("CashUSD", 0) or 0)
-
-    # ✅ 원본 df_hold 사용
-    total_today, total_yday = compute_portfolio_values(df_hold, cash_usd)
-
-    # 총자산 증감
-    diff = total_today - total_yday
-    total_change_pct = round(((diff) / total_yday * 100.0), 2) if total_yday != 0 else 0.0
-    emo = emoji_from_change_pct(total_change_pct)
-
-    # 현금 행 추가
-    cash_row = {
-        "Ticker": "CASH", "Shares": np.nan, "AvgPrice": np.nan,
-        "LastPrice": 1.00, "PrevClose": 1.00,
-        "Value": cash_usd, "PrevValue": cash_usd
-    }
-    df_disp = pd.concat([df_hold, pd.DataFrame([cash_row])], ignore_index=True)
-
-    # ---- Profit/Loss 계산 ----
-    def calc_profit_loss(row):
-        try:
-            sh = float(row.get("Shares", 0) or 0)
-            avg = float(row.get("AvgPrice", 0) or 0)
-            val = float(row.get("Value", 0) or 0)
-            cost = sh * avg
-            profit = val - cost
-            if profit > 0:
-                return f"<span style='color:green'>+{fmt_money_2(profit)}</span>"
-            elif profit < 0:
-                return f"<span style='color:red'>{fmt_money_2(profit)}</span>"
-            else:
-                return f"<span style='color:black'>{fmt_money_2(profit)}</span>"
-        except Exception:
-            return "-"
-    df_disp["Profit/Loss (수익/손실)"] = df_disp.apply(calc_profit_loss, axis=1)
-
-    # ---- 포맷팅 함수 ----
-    def fmt_price_with_change(row):
-        try:
-            last = float(row["LastPrice"])
-            prev = float(row["PrevClose"])
-            if prev == 0:
-                return fmt_money_2(last)
-            pct = round((last - prev) / prev * 100, 2)
-            color = "green" if pct > 0 else ("red" if pct < 0 else "black")
-            return f"<span style='color:{color}'>{fmt_money_2(last)} ({pct}%)</span>"
-        except Exception:
-            return "-"
-
-    def fmt_value_with_change(row):
-        try:
-            val = float(row["Value"])
-            prev = float(row["PrevValue"])
-            if prev == 0:
-                return fmt_money_2(val)
-            pct = round((val - prev) / prev * 100, 2)
-            color = "green" if pct > 0 else ("red" if pct < 0 else "black")
-            return f"<span style='color:{color}'>{fmt_money_2(val)} ({pct}%)</span>"
-        except Exception:
-            return "-"
-
-    # ---- 표 컬럼 포맷팅 ----
-    if "Shares" in df_disp.columns:
-        df_disp["Shares"] = df_disp["Shares"].apply(lambda x: fmt_2(x) if pd.notna(x) else "-")
-    if "AvgPrice" in df_disp.columns:
-        df_disp["AvgPrice"] = df_disp["AvgPrice"].apply(lambda x: fmt_money_2(x) if pd.notna(x) else "-")
-
-    df_disp["LastPrice"] = df_disp.apply(fmt_price_with_change, axis=1)
-    df_disp["Value"] = df_disp.apply(fmt_value_with_change, axis=1)
-    df_disp["PrevClose"] = df_disp["PrevClose"].apply(fmt_money_2)
-    df_disp["PrevValue"] = df_disp["PrevValue"].apply(fmt_money_2)
-
-    # 컬럼 이름 변경
-    df_disp = df_disp.rename(columns={
-        "Ticker": "Ticker (종목)",
-        "Shares": "Shares (수량)",
-        "AvgPrice": "Avg Price (평단가)",
-        "LastPrice": "Last Price (현재가)",
-        "PrevClose": "Prev Close (전일종가)",
-        "Value": "Value (자산가치)",
-        "PrevValue": "Prev Value (전일자산)",
-        "Profit/Loss (수익/손실)": "Profit/Loss (수익/손실)"
-    })
-
-    # 총자산 변화 표시
-    total_color = "green" if diff > 0 else ("red" if diff < 0 else "black")
-    holdings_html = f"""
-    <h2>📂 Holdings (보유 종목)</h2>
-    <p><b>Total Assets (총 자산):</b> {fmt_money_2(total_today)} &nbsp;&nbsp;
-       <b>Δ vs. Yesterday (전일 대비 변화):</b>
-       <span style='color:{total_color}'>{fmt_money_2(diff)} ({fmt_2(total_change_pct)}%)</span> {emo}</p>
-    {df_disp.to_html(index=False, escape=False)}
-    """
-
-    # -------- Signals Section --------
-    tickers_hold = [str(t).strip().upper() for t in df_hold["Ticker"].dropna().tolist()]
-    tickers_watch = [str(t).strip().upper() for t in df_watch["Ticker"].dropna().tolist()]
-
-    signals_df_hold = build_signals_table(tickers_hold)
-    signals_html_hold = f"<h2>📈 Signals – Holdings (보유 종목)</h2>{signals_df_hold.to_html(index=False)}"
-
-    signals_html_watch = ""
-    if tickers_watch:
-        signals_df_watch = build_signals_table(tickers_watch)
-        signals_html_watch = f"<h2>📊 Signals – Watchlist (관심 종목)</h2>{signals_df_watch.to_html(index=False)}"
-
-    signals_html = signals_html_hold + signals_html_watch
-
-    # -------- News Section --------
-    hold_news_html = holdings_news_section(tickers_hold)
-    watch_news_html = watchlist_news_section(tickers_watch) if tickers_watch else ""
-    market_html = market_news_section()
-    policy_html = policy_focus_section()
-
-    # -------- Econ / Indices Section --------
-    econ_html = econ_section()
-    indices_html = indices_section()
-
-    # -------- GPT Opinion Section --------
-    gpt_html = analyst_advice_section_news_aware()
-
-    # -------- 보유 종목 현재가 가져오기 --------
-    last_prices = {}
-    for t in tickers_hold:
-        try:
-            lp, prev = get_last_and_prev_close(t)
-            if lp is None or lp == 0:
-                df_tmp = yf.download(t, period="5d", interval="1d", progress=False, auto_adjust=False)
-                if not df_tmp.empty:
-                    lp = df_tmp["Close"].iloc[-1]
-            last_prices[t] = lp
-        except Exception as e:
-            print(f"⚠️ {t} 가격 조회 실패: {e}")
-            last_prices[t] = None
-
-    # -------- Strategies Section --------
-    strategy_html = build_strategy_table(df_hold, last_prices)
-
-    # -------- HTML 최종 출력 --------
-    now = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
-    style = """
-    <style>
-    body { font-family: Arial, sans-serif; margin: 20px; background:#fafafa; }
-    h1 { text-align:center; }
-    h2 { margin-top:30px; color:#2c3e50; border-bottom:2px solid #ddd; padding-bottom:5px; }
-    table { border-collapse: collapse; width:100%; margin:10px 0; }
-    th, td { border:1px solid #ddd; padding:8px; text-align:center; }
-    th { background:#f4f6f6; }
-    .card { background:white; border:1px solid #ddd; border-radius:8px; padding:10px; margin:10px 0; }
-    .gpt-box { background:#f0f4ff; padding:15px; border-radius:10px; }
-    .muted { color:#666; }
-    </style>
-    """
-    html = f"""
-    <html><head><meta charset='utf-8'>{style}</head><body>
-    <h1>📊 Portfolio Report (포트폴리오 리포트)</h1>
-    <p style='text-align:center' class='muted'>Generated at {now}</p>
-
-    {holdings_html}
-    {signals_html}
-    {strategy_html}   <!-- 전략 섹션을 보유종목 뉴스 뒤에 추가 -->
-    {hold_news_html}
-    {watch_news_html}
-    {market_html}
-    {policy_html}
-    {econ_html}
-    {indices_html}
-    {gpt_html}
-
-    </body></html>
-    """
-    return html
-
-def main():
-    html_doc = build_report_html()
-    outname = f"portfolio_gsheet_policy_report_{datetime.now().strftime('%Y%m%d')}.html"
-    with open(outname, "w", encoding="utf-8") as f:
-        f.write(html_doc)
-    print(f"Report saved: {outname}")
-    send_email_html(f"📊 Portfolio Report - {datetime.now().strftime('%Y-%m-%d')}", html_doc)
-
-if __name__ == "__main__":
-    main()
-
-
-
 # ===== 뉴스 인지형 투자 애널리스트 조언 (build_report_html 위에 위치) =====
 def analyst_advice_section_news_aware(as_of=None):
     """
@@ -1264,3 +1069,195 @@ def analyst_advice_section_news_aware(as_of=None):
     """
     return html
 
+def build_report_html():
+    df_hold, df_watch, settings = load_holdings_watchlist_settings()
+
+    # --- Holdings 데이터 전처리 ---
+    if "Shares" in df_hold.columns:
+        df_hold["Shares"] = pd.to_numeric(df_hold["Shares"], errors="coerce").fillna(0.0)
+    if "AvgPrice" in df_hold.columns:
+        df_hold["AvgPrice"] = pd.to_numeric(df_hold["AvgPrice"], errors="coerce").fillna(0.0)
+
+    cash_usd = float(settings.get("CashUSD", 0) or 0)
+
+    # ✅ 원본 df_hold 사용
+    total_today, total_yday = compute_portfolio_values(df_hold, cash_usd)
+
+    # 총자산 증감
+    diff = total_today - total_yday
+    total_change_pct = round(((diff) / total_yday * 100.0), 2) if total_yday != 0 else 0.0
+    emo = emoji_from_change_pct(total_change_pct)
+
+    # 현금 행 추가
+    cash_row = {
+        "Ticker": "CASH", "Shares": np.nan, "AvgPrice": np.nan,
+        "LastPrice": 1.00, "PrevClose": 1.00,
+        "Value": cash_usd, "PrevValue": cash_usd
+    }
+    df_disp = pd.concat([df_hold, pd.DataFrame([cash_row])], ignore_index=True)
+
+    # ---- Profit/Loss 계산 ----
+    def calc_profit_loss(row):
+        try:
+            sh = float(row.get("Shares", 0) or 0)
+            avg = float(row.get("AvgPrice", 0) or 0)
+            val = float(row.get("Value", 0) or 0)
+            cost = sh * avg
+            profit = val - cost
+            if profit > 0:
+                return f"<span style='color:green'>+{fmt_money_2(profit)}</span>"
+            elif profit < 0:
+                return f"<span style='color:red'>{fmt_money_2(profit)}</span>"
+            else:
+                return f"<span style='color:black'>{fmt_money_2(profit)}</span>"
+        except Exception:
+            return "-"
+    df_disp["Profit/Loss (수익/손실)"] = df_disp.apply(calc_profit_loss, axis=1)
+
+    # ---- 포맷팅 함수 ----
+    def fmt_price_with_change(row):
+        try:
+            last = float(row["LastPrice"])
+            prev = float(row["PrevClose"])
+            if prev == 0:
+                return fmt_money_2(last)
+            pct = round((last - prev) / prev * 100, 2)
+            color = "green" if pct > 0 else ("red" if pct < 0 else "black")
+            return f"<span style='color:{color}'>{fmt_money_2(last)} ({pct}%)</span>"
+        except Exception:
+            return "-"
+
+    def fmt_value_with_change(row):
+        try:
+            val = float(row["Value"])
+            prev = float(row["PrevValue"])
+            if prev == 0:
+                return fmt_money_2(val)
+            pct = round((val - prev) / prev * 100, 2)
+            color = "green" if pct > 0 else ("red" if pct < 0 else "black")
+            return f"<span style='color:{color}'>{fmt_money_2(val)} ({pct}%)</span>"
+        except Exception:
+            return "-"
+
+    # ---- 표 컬럼 포맷팅 ----
+    if "Shares" in df_disp.columns:
+        df_disp["Shares"] = df_disp["Shares"].apply(lambda x: fmt_2(x) if pd.notna(x) else "-")
+    if "AvgPrice" in df_disp.columns:
+        df_disp["AvgPrice"] = df_disp["AvgPrice"].apply(lambda x: fmt_money_2(x) if pd.notna(x) else "-")
+
+    df_disp["LastPrice"] = df_disp.apply(fmt_price_with_change, axis=1)
+    df_disp["Value"] = df_disp.apply(fmt_value_with_change, axis=1)
+    df_disp["PrevClose"] = df_disp["PrevClose"].apply(fmt_money_2)
+    df_disp["PrevValue"] = df_disp["PrevValue"].apply(fmt_money_2)
+
+    # 컬럼 이름 변경
+    df_disp = df_disp.rename(columns={
+        "Ticker": "Ticker (종목)",
+        "Shares": "Shares (수량)",
+        "AvgPrice": "Avg Price (평단가)",
+        "LastPrice": "Last Price (현재가)",
+        "PrevClose": "Prev Close (전일종가)",
+        "Value": "Value (자산가치)",
+        "PrevValue": "Prev Value (전일자산)",
+        "Profit/Loss (수익/손실)": "Profit/Loss (수익/손실)"
+    })
+
+    # 총자산 변화 표시
+    total_color = "green" if diff > 0 else ("red" if diff < 0 else "black")
+    holdings_html = f"""
+    <h2>📂 Holdings (보유 종목)</h2>
+    <p><b>Total Assets (총 자산):</b> {fmt_money_2(total_today)} &nbsp;&nbsp;
+       <b>Δ vs. Yesterday (전일 대비 변화):</b>
+       <span style='color:{total_color}'>{fmt_money_2(diff)} ({fmt_2(total_change_pct)}%)</span> {emo}</p>
+    {df_disp.to_html(index=False, escape=False)}
+    """
+
+    # -------- Signals Section --------
+    tickers_hold = [str(t).strip().upper() for t in df_hold["Ticker"].dropna().tolist()]
+    tickers_watch = [str(t).strip().upper() for t in df_watch["Ticker"].dropna().tolist()]
+
+    signals_df_hold = build_signals_table(tickers_hold)
+    signals_html_hold = f"<h2>📈 Signals – Holdings (보유 종목)</h2>{signals_df_hold.to_html(index=False)}"
+
+    signals_html_watch = ""
+    if tickers_watch:
+        signals_df_watch = build_signals_table(tickers_watch)
+        signals_html_watch = f"<h2>📊 Signals – Watchlist (관심 종목)</h2>{signals_df_watch.to_html(index=False)}"
+
+    signals_html = signals_html_hold + signals_html_watch
+
+    # -------- News Section --------
+    hold_news_html = holdings_news_section(tickers_hold)
+    watch_news_html = watchlist_news_section(tickers_watch) if tickers_watch else ""
+    market_html = market_news_section()
+    policy_html = policy_focus_section()
+
+    # -------- Econ / Indices Section --------
+    econ_html = econ_section()
+    indices_html = indices_section()
+
+    # -------- GPT Opinion Section --------
+    gpt_html = analyst_advice_section_news_aware()
+
+    # -------- 보유 종목 현재가 가져오기 --------
+    last_prices = {}
+    for t in tickers_hold:
+        try:
+            lp, prev = get_last_and_prev_close(t)
+            if lp is None or lp == 0:
+                df_tmp = yf.download(t, period="5d", interval="1d", progress=False, auto_adjust=False)
+                if not df_tmp.empty:
+                    lp = df_tmp["Close"].iloc[-1]
+            last_prices[t] = lp
+        except Exception as e:
+            print(f"⚠️ {t} 가격 조회 실패: {e}")
+            last_prices[t] = None
+
+    # -------- Strategies Section --------
+    strategy_html = build_strategy_table(df_hold, last_prices)
+
+    # -------- HTML 최종 출력 --------
+    now = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
+    style = """
+    <style>
+    body { font-family: Arial, sans-serif; margin: 20px; background:#fafafa; }
+    h1 { text-align:center; }
+    h2 { margin-top:30px; color:#2c3e50; border-bottom:2px solid #ddd; padding-bottom:5px; }
+    table { border-collapse: collapse; width:100%; margin:10px 0; }
+    th, td { border:1px solid #ddd; padding:8px; text-align:center; }
+    th { background:#f4f6f6; }
+    .card { background:white; border:1px solid #ddd; border-radius:8px; padding:10px; margin:10px 0; }
+    .gpt-box { background:#f0f4ff; padding:15px; border-radius:10px; }
+    .muted { color:#666; }
+    </style>
+    """
+    html = f"""
+    <html><head><meta charset='utf-8'>{style}</head><body>
+    <h1>📊 Portfolio Report (포트폴리오 리포트)</h1>
+    <p style='text-align:center' class='muted'>Generated at {now}</p>
+
+    {holdings_html}
+    {signals_html}
+    {strategy_html}   <!-- 전략 섹션을 보유종목 뉴스 뒤에 추가 -->
+    {hold_news_html}
+    {watch_news_html}
+    {market_html}
+    {policy_html}
+    {econ_html}
+    {indices_html}
+    {gpt_html}
+
+    </body></html>
+    """
+    return html
+
+def main():
+    html_doc = build_report_html()
+    outname = f"portfolio_gsheet_policy_report_{datetime.now().strftime('%Y%m%d')}.html"
+    with open(outname, "w", encoding="utf-8") as f:
+        f.write(html_doc)
+    print(f"Report saved: {outname}")
+    send_email_html(f"📊 Portfolio Report - {datetime.now().strftime('%Y-%m-%d')}", html_doc)
+
+if __name__ == "__main__":
+    main()
