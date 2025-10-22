@@ -15,15 +15,15 @@ from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from datetime import datetime, timedelta
 
-# ===== Utils: 안전 변환 & 포맷 =====
+# ===== Utils: 안전 변환 & 포맷 (IMPORTS 바로 아래에 위치) =====
 def _to_float_scalar(x):
     import numpy as np
     import pandas as pd
     if isinstance(x, pd.Series):
         if len(x) == 0:
-            return float('nan')
+            return float("nan")
         x = x.iloc[0]
-    if hasattr(x, 'item'):
+    if hasattr(x, "item"):
         try:
             x = x.item()
         except Exception:
@@ -31,20 +31,18 @@ def _to_float_scalar(x):
     try:
         return float(x)
     except Exception:
-        return float('nan')
+        return float("nan")
 
 def _fmt_or_na(x, fmt="{:,.0f}"):
+    if x is None:
+        return "N/A"
     try:
-        if x is None:
-            return "N/A"
         xf = float(x)
         if xf != xf:  # NaN
             return "N/A"
         return fmt.format(xf)
     except Exception:
         return "N/A"
-
-
 
 # FRED 클라이언트
 fred = Fred(api_key=os.environ.get("FRED_API_KEY"))
@@ -1065,32 +1063,32 @@ if __name__ == "__main__":
 
 
 
+# ===== 뉴스 인지형 투자 애널리스트 조언 (build_report_html 위에 위치) =====
 def analyst_advice_section_news_aware(as_of=None):
     """
     🧠 투자 애널리스트 조언 (뉴스 인지형, 동적)
-    - 지수(^GSPC, ^VIX) + 최신 시장 뉴스(NewsAPI) 키워드 스코어를 함께 고려
-    - HTML 문자열을 반환하여 리포트에 삽입
-    - 환경변수: NEWS_API_KEY (없으면 뉴스 미반영)
+    - ^GSPC, ^VIX + NewsAPI 헤드라인 감성 스코어를 함께 반영해
+      시장 위치/전략을 매일 자동 생성.
+    - 환경변수: NEWS_API_KEY (없으면 지수 기반만 동작)
     """
     import os, re, requests
     import pandas as pd
+    import numpy as np
     from datetime import datetime, timedelta
     import yfinance as yf
 
-    today = as_of or datetime.utcnow().strftime('%Y-%m-%d')
+    today = as_of or datetime.utcnow().strftime("%Y-%m-%d")
 
-    # --- 지수 데이터 ---
+    # ---------- 1) 지수 데이터 ----------
     end = datetime.utcnow()
     start = end - timedelta(days=400)
-    try:
-        spx = yf.download('^GSPC', start=start, end=end, interval='1d', progress=False, auto_adjust=False)['Close'].dropna()
-        vix = yf.download('^VIX',  start=start, end=end, interval='1d', progress=False, auto_adjust=False)['Close'].dropna()
-    except Exception:
-        spx = pd.Series(dtype=float)
-        vix = pd.Series(dtype=float)
+    spx = yf.download("^GSPC", start=start, end=end, interval="1d",
+                      progress=False, auto_adjust=False)["Close"].dropna()
+    vix = yf.download("^VIX",  start=start, end=end, interval="1d",
+                      progress=False, auto_adjust=False)["Close"].dropna()
 
     if spx.empty or vix.empty:
-        return f"<h2>🧠 투자 애널리스트 조언</h2><div class='card'><p class='muted'>기준일: {today}</p><div class='gpt-box'>지수 데이터가 비어 있습니다. 네트워크/거래일 상태를 확인하세요.</div></div>"
+        return f"<h2>🧠 투자 애널리스트 조언</h2><div class='card'><p class='muted'>기준일: {today}</p><div class='gpt-box'>지수 데이터 부족</div></div>"
 
     spx_last = _to_float_scalar(spx.iloc[[-1]])
     vix_last = _to_float_scalar(vix.iloc[[-1]])
@@ -1099,38 +1097,28 @@ def analyst_advice_section_news_aware(as_of=None):
 
     spx_52w = spx.tail(252) if len(spx) >= 252 else spx
     spx_52w_high = _to_float_scalar(spx_52w.max())
-    drawdown_pct = (spx_last / spx_52w_high - 1.0) * 100.0 if spx_52w_high else float('nan')
+    drawdown_pct = (spx_last / spx_52w_high - 1.0) * 100.0 if spx_52w_high else float("nan")
 
-    # 이동평균 상태
-    if ma50 and ma200:
-        if ma50 > ma200:
-            cross_state = '골든크로스(중기 우상향)'
-        elif ma50 < ma200:
-            cross_state = '데드크로스(중기 약세)'
-        else:
-            cross_state = '중립'
-    else:
-        cross_state = '계산대기'
-    price_vs_ma50 = '상회' if (ma50 and spx_last > ma50) else '하회'
+    cross_state = "골든크로스(중기 우상향)" if (ma50 and ma200 and ma50 > ma200) else ("데드크로스(중기 약세)" if (ma50 and ma200 and ma50 < ma200) else "중립")
+    price_vs_ma50 = "상회" if (ma50 and spx_last > ma50) else "하회"
 
-    # --- 뉴스 수집 ---
-    api_key = os.environ.get('NEWS_API_KEY')
+    # ---------- 2) 뉴스 수집 ----------
+    api_key = os.environ.get("NEWS_API_KEY")
     news_items = []
     if api_key:
         try:
-            url = f'https://newsapi.org/v2/top-headlines?language=en&category=business&pageSize=12&apiKey={api_key}'
+            url = ("https://newsapi.org/v2/top-headlines"
+                   "?language=en&category=business&pageSize=12&apiKey=" + api_key)
             r = requests.get(url, timeout=20)
             if r.status_code == 200:
-                arts = r.json().get('articles', []) or []
-                for a in arts:
-                    title = (a.get('title') or '').strip()
-                    desc  = (a.get('description') or '').strip()
-                    if title or desc:
-                        news_items.append(f"{title}. {desc}")
+                for a in (r.json().get("articles", []) or []):
+                    title = (a.get("title") or "").strip()
+                    desc  = (a.get("description") or "").strip()
+                    news_items.append(f"{title}. {desc}")
         except Exception:
-            pass
+            pass  # 뉴스 불가 시 지수만으로 판단
 
-    # --- 뉴스 스코어링 ---
+    # ---------- 3) 뉴스 스코어링 ----------
     neg_kw = {
         r"\b(miss|weak|downbeat|cut guidance|profit warning)\b": 2.0,
         r"\b(slowdown|recession|hard landing)\b": 2.0,
@@ -1148,6 +1136,7 @@ def analyst_advice_section_news_aware(as_of=None):
         r"\b(rebound|stabilize|bottoming|soft landing)\b": -1.2,
         r"\b(deal reached|truce|tariff relief)\b": -1.3,
     }
+
     def score_text(txt):
         s = 0.0
         t = txt.lower()
@@ -1162,80 +1151,79 @@ def analyst_advice_section_news_aware(as_of=None):
     news_score = 0.0
     for it in news_items:
         news_score += score_text(it)
-    news_score = max(min(news_score, 8.0), -6.0)
+    news_score = max(min(news_score, 8.0), -6.0)  # 클리핑
 
-    # --- 지수 레짐 + 뉴스 융합 판단 ---
+    # ---------- 4) 레짐 + 반등 창구 ----------
     if drawdown_pct <= -20:
-        market_phase = '약세장(Bear Market)'
-        base_window = '분기 단위(6–12개월) 소요 가능'
+        market_phase = "약세장(Bear Market)"
+        base_window = "분기 단위(6–12개월) 소요 가능"
     elif drawdown_pct <= -8:
-        market_phase = '조정(Correction) 국면'
-        base_window = '수주~1–2개월 내 저점 확인 가능성' if vix_last >= 25 else '수주 내 점진 반등 가능성'
+        market_phase = "조정(Correction) 국면"
+        base_window = "수주~1–2개월 내 저점 확인 가능성" if vix_last >= 25 else "수주 내 점진 반등 가능성"
     elif drawdown_pct < 0:
-        market_phase = '완만한 조정/눌림 구간'
-        base_window = '수주 내 추세 재확인'
+        market_phase = "완만한 조정/눌림 구간"
+        base_window = "수주 내 추세 재확인"
     else:
-        market_phase = '사상고점 인접/강세 지속'
-        base_window = '단기 조정 리스크 주시'
+        market_phase = "사상고점 인접/강세 지속"
+        base_window = "단기 조정 리스크 주시"
 
     if news_score >= 4:
-        phase_note = '뉴스 톤: 강한 부정/공포'
-        window_adj = ' → 반등 지연/변동성 확대 가능성'
-        staging_bias = 'defensive'
+        phase_note = "뉴스 톤: 강한 부정/공포"
+        window_adj = " → 반등 지연/변동성 확대 가능성"
+        staging_bias = "defensive"
     elif news_score >= 2:
-        phase_note = '뉴스 톤: 부정 우세'
-        window_adj = ' → 저점 확인까지 다소 시간 소요'
-        staging_bias = 'lean_defensive'
+        phase_note = "뉴스 톤: 부정 우세"
+        window_adj = " → 저점 확인까지 다소 시간 소요"
+        staging_bias = "lean_defensive"
     elif news_score <= -2:
-        phase_note = '뉴스 톤: 긍정/완화'
-        window_adj = ' → 반등 신호 조기 가능'
-        staging_bias = 'offensive'
+        phase_note = "뉴스 톤: 긍정/완화"
+        window_adj = " → 반등 신호 조기 가능"
+        staging_bias = "offensive"
     else:
-        phase_note = '뉴스 톤: 중립'
-        window_adj = ''
-        staging_bias = 'neutral'
+        phase_note = "뉴스 톤: 중립"
+        window_adj = ""
+        staging_bias = "neutral"
 
     rebound_window = base_window + window_adj
 
-    if '약세장' in market_phase:
+    if "약세장" in market_phase:
         staging = [
-            '① 방어 강화: 헬스케어·유틸리티·현금 비중 확대',
-            '② 공포 피크(패닉/VIX 급등)에서 분할 매수 시작',
-            '③ 50일선 회복·골든크로스 전후 비중 확대',
-            '④ 추세 확정 구간 리밸런싱/익절',
+            "① 방어 강화: 헬스케어·유틸리티·현금 비중 확대",
+            "② 공포 피크(패닉/VIX 급등)에서 분할 매수 시작",
+            "③ 50일선 회복·골든크로스 전후 비중 확대",
+            "④ 추세 확정 구간 리밸런싱/익절",
         ]
-    elif '조정' in market_phase:
+    elif "조정" in market_phase:
         staging = [
-            '① 관망/방어기: 헬스케어·유틸리티로 변동성 완충(현금 유지)',
-            '② 공포 확산 시: 반도체·AI 인프라 대형주/ETF 분할 1차 진입',
-            '③ 50일선 재탈환/골든크로스: 산업재·소재·금융 확대',
-            '④ 반등 추세 확인: 리밸런싱/익절 병행',
+            "① 관망/방어기: 헬스케어·유틸리티로 변동성 완충(현금 유지)",
+            "② 공포 확산 시: 반도체·AI 인프라 대형주/ETF 분할 1차 진입",
+            "③ 50일선 재탈환/골든크로스: 산업재·소재·금융 확대",
+            "④ 반등 추세 확인: 리밸런싱/익절 병행",
         ]
     else:
         staging = [
-            '① 눌림 매수 대기: 50일선 하향 이탈 여부 주시',
-            '② 추세 유지 시: 승자 보유/익절 분할',
-            '③ 리스크: VIX 급등, 실적/정책 쇼크 모니터링',
+            "① 눌림 매수 대기: 50일선 하향 이탈 여부 주시",
+            "② 추세 유지 시: 승자 보유/익절 분할",
+            "③ 리스크: VIX 급등, 실적/정책 쇼크 모니터링",
         ]
 
-    if staging_bias == 'defensive':
-        staging[0] += ' (뉴스 부정: 방어/현금 비중 추가 상향 권고)'
-    elif staging_bias == 'lean_defensive':
+    if staging_bias == "defensive":
+        staging[0] += " (뉴스 부정: 방어/현금 비중 추가 상향 권고)"
+    elif staging_bias == "lean_defensive":
         staging[0] += " (뉴스 부정 우세: 신규 공격 비중은 '분할·점진')"
-    elif staging_bias == 'offensive':
-        staging[2] += ' (뉴스 완화: 반등 신호 조기 가능 → 확대 타이밍 경계)'
+    elif staging_bias == "offensive":
+        staging[2] += " (뉴스 완화: 반등 신호 조기 가능 → 확대 타이밍 경계)"
 
     sector_hint = {
-        '방어(조정기)': ['헬스케어(배당/현금흐름 안정)', '유틸리티(금리↓ 시 리레이팅)'],
-        '공격(반등초기)': ['반도체·AI 인프라', '산업재(경기 회복 베타)', '소재/에너지(원자재 사이클)'],
+        "방어(조정기)": ["헬스케어(배당/현금흐름 안정)", "유틸리티(금리↓ 시 리레이팅)"],
+        "공격(반등초기)": ["반도체·AI 인프라", "산업재(경기 회복 베타)", "소재/에너지(원자재 사이클)"],
     }
 
     ma50_str  = _fmt_or_na(ma50)
     ma200_str = _fmt_or_na(ma200)
 
-    def _li(items):
-        return ''.join([f"<li>{x}</li>" for x in items])
-
+    # ---------- 5) HTML ----------
+    def _li(items): return "".join([f"<li>{x}</li>" for x in items])
     html = f"""
     <h2>🧠 투자 애널리스트 조언</h2>
     <div class='card' style="line-height:1.6; font-size:14px">
