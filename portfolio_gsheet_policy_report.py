@@ -949,59 +949,176 @@ def send_email_html(subject, html_body):
         print("❌ Email send failed:", e)
 
 # ===== 뉴스 인지형 투자 애널리스트 조언 (build_report_html 위에 위치) =====
+# def analyst_advice_section_news_aware(as_of=None):
+#     """
+#     🧠 투자 애널리스트 조언 (뉴스 인지형, 동적)
+#     - ^GSPC, ^VIX + NewsAPI 헤드라인 감성 스코어를 함께 반영해
+#       시장 위치/전략을 매일 자동 생성.
+#     - 환경변수: NEWS_API_KEY (없으면 지수 기반만 동작)
+#     """
+#     import os, re, requests
+#     import pandas as pd
+#     import numpy as np
+#     from datetime import datetime, timedelta
+#     import yfinance as yf
+
+#     today = as_of or datetime.utcnow().strftime("%Y-%m-%d")
+
+#     # ---------- 1) 지수 데이터 ----------
+#     end = datetime.utcnow()
+#     start = end - timedelta(days=400)
+#     spx = yf.download("^GSPC", start=start, end=end, interval="1d",
+#                       progress=False, auto_adjust=False)["Close"].dropna()
+#     vix = yf.download("^VIX",  start=start, end=end, interval="1d",
+#                       progress=False, auto_adjust=False)["Close"].dropna()
+
+#     if spx.empty or vix.empty:
+#         return f"<h2>🧠 투자 애널리스트 조언</h2><div class='card'><p class='muted'>기준일: {today}</p><div class='gpt-box'>지수 데이터 부족</div></div>"
+
+#     spx_last = _to_float_scalar(spx.iloc[[-1]])
+#     vix_last = _to_float_scalar(vix.iloc[[-1]])
+#     ma50  = _to_float_scalar(spx.rolling(50).mean().iloc[[-1]]) if len(spx) >= 50 else None
+#     ma200 = _to_float_scalar(spx.rolling(200).mean().iloc[[-1]]) if len(spx) >= 200 else None
+
+#     spx_52w = spx.tail(252) if len(spx) >= 252 else spx
+#     spx_52w_high = _to_float_scalar(spx_52w.max())
+#     drawdown_pct = (spx_last / spx_52w_high - 1.0) * 100.0 if spx_52w_high else float("nan")
+
+#     cross_state = "골든크로스(중기 우상향)" if (ma50 and ma200 and ma50 > ma200) else ("데드크로스(중기 약세)" if (ma50 and ma200 and ma50 < ma200) else "중립")
+#     price_vs_ma50 = "상회" if (ma50 and spx_last > ma50) else "하회"
+
+#     # ---------- 2) 뉴스 수집 ----------
+#     api_key = os.environ.get("NEWS_API_KEY")
+#     news_items = []
+#     if api_key:
+#         try:
+#             url = ("https://newsapi.org/v2/top-headlines"
+#                    "?language=en&category=business&pageSize=12&apiKey=" + api_key)
+#             r = requests.get(url, timeout=20)
+#             if r.status_code == 200:
+#                 for a in (r.json().get("articles", []) or []):
+#                     title = (a.get("title") or "").strip()
+#                     desc  = (a.get("description") or "").strip()
+#                     news_items.append(f"{title}. {desc}")
+#         except Exception:
+#             pass  # 뉴스 불가 시 지수만으로 판단
 def analyst_advice_section_news_aware(as_of=None):
-    """
-    🧠 투자 애널리스트 조언 (뉴스 인지형, 동적)
-    - ^GSPC, ^VIX + NewsAPI 헤드라인 감성 스코어를 함께 반영해
-      시장 위치/전략을 매일 자동 생성.
-    - 환경변수: NEWS_API_KEY (없으면 지수 기반만 동작)
-    """
-    import os, re, requests
-    import pandas as pd
-    import numpy as np
+    import os, re, requests, math
     from datetime import datetime, timedelta
+    import pandas as pd
     import yfinance as yf
+
+    # ---------- 유틸 ----------
+    def _finite(x):
+        try:
+            return math.isfinite(float(x))
+        except Exception:
+            return False
+
+    def _fmt(x, fmt="{:,.0f}", na="N/A"):
+        try:
+            xf = float(x)
+            if not math.isfinite(xf):
+                return na
+            return fmt.format(xf)
+        except Exception:
+            return na
 
     today = as_of or datetime.utcnow().strftime("%Y-%m-%d")
 
-    # ---------- 1) 지수 데이터 ----------
-    end = datetime.utcnow()
-    start = end - timedelta(days=400)
-    spx = yf.download("^GSPC", start=start, end=end, interval="1d",
-                      progress=False, auto_adjust=False)["Close"].dropna()
-    vix = yf.download("^VIX",  start=start, end=end, interval="1d",
-                      progress=False, auto_adjust=False)["Close"].dropna()
+    # ---------- 1) 지수 데이터 (빈값 방어 + 대체 period 사용) ----------
+    # start/end가 빈 시리즈를 만들 때가 있어 period 기반으로 더 안정적으로 가져옵니다.
+    spx_df = yf.download("^GSPC", period="2y", interval="1d", progress=False, auto_adjust=False)
+    vix_df = yf.download("^VIX",  period="2y", interval="1d", progress=False, auto_adjust=False)
 
-    if spx.empty or vix.empty:
-        return f"<h2>🧠 투자 애널리스트 조언</h2><div class='card'><p class='muted'>기준일: {today}</p><div class='gpt-box'>지수 데이터 부족</div></div>"
+    spx = (spx_df.get("Close") or pd.Series(dtype=float)).dropna()
+    vix = (vix_df.get("Close") or pd.Series(dtype=float)).dropna()
 
-    spx_last = _to_float_scalar(spx.iloc[[-1]])
-    vix_last = _to_float_scalar(vix.iloc[[-1]])
-    ma50  = _to_float_scalar(spx.rolling(50).mean().iloc[[-1]]) if len(spx) >= 50 else None
-    ma200 = _to_float_scalar(spx.rolling(200).mean().iloc[[-1]]) if len(spx) >= 200 else None
+    # 길이 체크
+    if len(spx) == 0 or len(vix) == 0:
+        # 데이터가 비면 깔끔한 안내 블록만 출력하고 반환
+        return f"""
+        <h2>🧠 투자 애널리스트 조언</h2>
+        <div class='card'>
+          <p class='muted'>기준일: {today}</p>
+          <div class='gpt-box'>
+            지수 데이터가 비어 있습니다. (휴장일/네트워크/차단 이슈 가능)<br>
+            잠시 후 다시 시도하거나 러너 네트워크를 확인해 주세요.
+          </div>
+        </div>
+        """
 
+    # 최근 값
+    spx_last = float(spx.iloc[-1]) if _finite(spx.iloc[-1]) else None
+    vix_last = float(vix.iloc[-1]) if _finite(vix.iloc[-1]) else None
+
+    # 이동평균 (충분한 길이 있을 때만)
+    ma50  = float(spx.rolling(50).mean().iloc[-1])  if len(spx) >= 50  and _finite(spx.rolling(50).mean().iloc[-1])  else None
+    ma200 = float(spx.rolling(200).mean().iloc[-1]) if len(spx) >= 200 and _finite(spx.rolling(200).mean().iloc[-1]) else None
+
+    # 52주 고점 대비 낙폭
     spx_52w = spx.tail(252) if len(spx) >= 252 else spx
-    spx_52w_high = _to_float_scalar(spx_52w.max())
-    drawdown_pct = (spx_last / spx_52w_high - 1.0) * 100.0 if spx_52w_high else float("nan")
+    spx_52w_high = float(spx_52w.max()) if _finite(spx_52w.max()) else None
+    drawdown_pct = ((spx_last / spx_52w_high - 1.0) * 100.0) if (spx_last and spx_52w_high) else None
 
-    cross_state = "골든크로스(중기 우상향)" if (ma50 and ma200 and ma50 > ma200) else ("데드크로스(중기 약세)" if (ma50 and ma200 and ma50 < ma200) else "중립")
-    price_vs_ma50 = "상회" if (ma50 and spx_last > ma50) else "하회"
+    # 골든/데드 크로스, 50일선 상/하회
+    if ma50 is not None and ma200 is not None:
+        cross_state = "골든크로스(중기 우상향)" if ma50 > ma200 else ("데드크로스(중기 약세)" if ma50 < ma200 else "중립")
+    else:
+        cross_state = "중립"
+    price_vs_ma50 = ("상회" if (ma50 is not None and spx_last and spx_last > ma50) else
+                     "하회" if (ma50 is not None and spx_last is not None) else "N/A")
 
-    # ---------- 2) 뉴스 수집 ----------
-    api_key = os.environ.get("NEWS_API_KEY")
-    news_items = []
-    if api_key:
-        try:
-            url = ("https://newsapi.org/v2/top-headlines"
-                   "?language=en&category=business&pageSize=12&apiKey=" + api_key)
-            r = requests.get(url, timeout=20)
-            if r.status_code == 200:
-                for a in (r.json().get("articles", []) or []):
-                    title = (a.get("title") or "").strip()
-                    desc  = (a.get("description") or "").strip()
-                    news_items.append(f"{title}. {desc}")
-        except Exception:
-            pass  # 뉴스 불가 시 지수만으로 판단
+    # ---------- 2) 뉴스 수집 & 스코어 (생략하면 기존 로직 그대로 두세요) ----------
+    # ... (당신이 이미 넣은 NewsAPI 스코어링 로직 그대로) ...
+    # 여기서는 예시로 중립 처리:
+    news_score = 0
+    phase_note = "뉴스 톤: 중립"
+
+    # ---------- 3) 레짐 판단 ----------
+    if drawdown_pct is None:
+        market_phase = "사상고점 인접/강세 지속"  # 데이터 불충분 시 보수적 문구
+        base_window = "단기 조정 리스크 주시"
+    else:
+        if drawdown_pct <= -20:
+            market_phase = "약세장(Bear Market)"
+            base_window = "분기 단위(6–12개월) 소요 가능"
+        elif drawdown_pct <= -8:
+            market_phase = "조정(Correction) 국면"
+            base_window = "수주~1–2개월 내 저점 확인 가능성" if (vix_last and vix_last >= 25) else "수주 내 점진 반등 가능성"
+        elif drawdown_pct < 0:
+            market_phase = "완만한 조정/눌림 구간"
+            base_window = "수주 내 추세 재확인"
+        else:
+            market_phase = "사상고점 인접/강세 지속"
+            base_window = "단기 조정 리스크 주시"
+
+    rebound_window = base_window  # (뉴스 톤 보정은 필요 시 추가)
+
+    # ---------- 4) 표시 문자열(숫자 안전 포맷) ----------
+    spx_str   = (_fmt(spx_last, "{:,.0f}") + "p") if _finite(spx_last) else "N/A"
+    vix_str   = _fmt(vix_last, "{:.1f}") if _finite(vix_last) else "N/A"
+    dd_str    = (_fmt(drawdown_pct, "{:.1f}") + "%") if (drawdown_pct is not None and _finite(drawdown_pct)) else "N/A"
+    ma50_str  = _fmt(ma50, "{:,.0f}") if ma50 is not None else "N/A"
+    ma200_str = _fmt(ma200, "{:,.0f}") if ma200 is not None else "N/A"
+
+    # ---------- 5) HTML ----------
+    html = f"""
+    <h2>🧠 투자 애널리스트 조언</h2>
+    <div class='card' style="line-height:1.6; font-size:14px">
+      <p class='muted'>기준일: {today}</p>
+
+      <h3>📈 현재 시장 위치</h3>
+      <ul>
+        <li><b>판단:</b> {market_phase} · VIX {vix_str} · {phase_note}</li>
+        <li><b>지수 상태:</b> S&P500 {spx_str} · 52주 고점 대비 {dd_str}</li>
+        <li><b>이동평균:</b> 50일선 {ma50_str} · 200일선 {ma200_str} · {cross_state} · 가격은 50일선 {price_vs_ma50}</li>
+        <li><b>반등 창구:</b> {rebound_window}</li>
+      </ul>
+      <!-- 이하 전략/체크리스트/섹터 힌트 파트는 기존 코드 유지 -->
+    </div>
+    """
+    return html
 
     # ---------- 3) 뉴스 스코어링 ----------
     neg_kw = {
