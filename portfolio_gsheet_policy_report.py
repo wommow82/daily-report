@@ -227,11 +227,12 @@ def build_signals_table(tickers):
 
 def fetch_fear_greed_index_row():
     """
-    CNN Fear & Greed Index(공포·탐욕지수)를 표 한 줄(<tr>)로 반환
-    - 418/403 방지를 위해 브라우저 UA·헤더 사용 + 3회 재시도
-    - 실패 시에도 링크 없이 깔끔한 사유만 출력
+    CNN Fear & Greed Index(공포·탐욕지수) 표 <tr>을 반환.
+    - 브라우저 UA/헤더 + 3회 재시도
+    - prev 값을 여러 경로로 안전 파싱(score | y | previousClose)
+    - 숫자가 없거나 0이면 변화/퍼센트는 N/A로 처리(더 이상 nan / nan% 없음)
     """
-    import requests, time, html
+    import requests, time, math, html
 
     url = "https://production.dataviz.cnn.io/index/fearandgreed/graphdata"
     headers = {
@@ -243,6 +244,34 @@ def fetch_fear_greed_index_row():
         "Origin": "https://money.cnn.com",
     }
 
+    def _finite(x):
+        try:
+            xf = float(x)
+            return math.isfinite(xf)
+        except Exception:
+            return False
+
+    def _num(x):
+        try:
+            return float(x)
+        except Exception:
+            return None
+
+    def _fmt1(x):
+        try:
+            return f"{float(x):.1f}"
+        except Exception:
+            return "N/A"
+
+    def _pick_score(d):
+        # CNN이 가끔 'score' 대신 'y' 로 값을 주는 경우가 있어 둘 다 시도
+        if isinstance(d, dict):
+            if "score" in d and _finite(d["score"]):
+                return float(d["score"])
+            if "y" in d and _finite(d["y"]):
+                return float(d["y"])
+        return None
+
     last_err = None
     for attempt in range(3):
         try:
@@ -250,45 +279,58 @@ def fetch_fear_greed_index_row():
             r.raise_for_status()
             j = r.json()
 
-            fg   = (j.get("fear_and_greed") or {})
-            now  = fg.get("score")
-            rate = (fg.get("rating") or "").title()
+            fg = (j.get("fear_and_greed") or {})
+            now_val = _num(fg.get("score"))
+            if now_val is None:
+                # 혹시 여기도 'y' 로 올 수도 있으니 한 번 더 방어
+                now_val = _num(fg.get("y"))
+            rating = (fg.get("rating") or "").title()
 
-            hist = (j.get("fear_and_greed_historical") or {}).get("data", []) or []
-            prev = hist[-2]["score"] if len(hist) >= 2 and "score" in hist[-2] else None
+            # prev 값은 여러 소스 중 하나에서 확보
+            prev_val = None
+            # 1) 별도 previous close 필드가 있으면 우선
+            prev_blob = j.get("fear_and_greed_previous_close") or {}
+            if prev_blob:
+                pv = prev_blob.get("score", prev_blob.get("y"))
+                if _finite(pv):
+                    prev_val = float(pv)
 
-            # 변화 계산
-            change = None if (now is None or prev in (None, 0)) else (float(now) - float(prev))
-            pct    = None if (change is None or prev in (None, 0)) else (change / float(prev) * 100.0)
-            arrow  = "🟢" if (change is not None and change > 0) else ("🔴" if (change is not None and change < 0) else "⚫")
-            color  = "green" if arrow == "🟢" else ("red" if arrow == "🔴" else "black")
+            # 2) 히스토리에서 직전 항목
+            if prev_val is None:
+                hist = (j.get("fear_and_greed_historical") or {}).get("data", []) or []
+                if len(hist) >= 2:
+                    prev_val = _pick_score(hist[-2])
 
-            def _fmt(x):
-                try:
-                    return f"{float(x):.1f}"
-                except Exception:
-                    return "N/A"
+            # 변화/퍼센트 계산(둘 다 유한값이고 prev!=0일 때만)
+            change = pct = None
+            if _finite(now_val) and _finite(prev_val) and float(prev_val) != 0.0:
+                change = float(now_val) - float(prev_val)
+                pct = change / float(prev_val) * 100.0
+
+            arrow = "🟢" if (change is not None and change > 0) else ("🔴" if (change is not None and change < 0) else "⚫")
+            color = "green" if arrow == "🟢" else ("red" if arrow == "🔴" else "black")
 
             return (
                 "<tr>"
                 "<td>Fear &amp; Greed Index (공포·탐욕지수)</td>"
-                f"<td>{_fmt(prev)}</td>"
-                f"<td><span style='color:{color}'>{_fmt(now)} "
-                f"({('+' if (change is not None and change >= 0) else '') + _fmt(change) if change is not None else 'N/A'}, "
-                f"{('+' if (pct is not None and pct >= 0) else '') + _fmt(pct) if pct is not None else 'N/A'}%) "
-                f"{arrow} → <b>{rate}</b></span></td>"
+                f"<td>{_fmt1(prev_val) if _finite(prev_val) else 'N/A'}</td>"
+                f"<td><span style='color:{color}'>"
+                f"{_fmt1(now_val) if _finite(now_val) else 'N/A'} "
+                f"({('+' if (change is not None and change >= 0) else '') + _fmt1(change) if change is not None else 'N/A'}, "
+                f"{('+' if (pct is not None and pct >= 0) else '') + (f'{pct:.1f}' if pct is not None else 'N/A')}{'%' if pct is not None else ''}) "
+                f"{arrow} → <b>{rating}</b></span></td>"
                 "</tr>"
             )
         except Exception as e:
             last_err = str(e)
             time.sleep(1.2 * (attempt + 1))
 
-    # 모두 실패: 링크 대신 요약 사유만 노출
-    safe_reason = html.escape(last_err or "fetch_failed")
+    # 모두 실패 시: 링크 없이 이유만 깔끔히
+    safe = html.escape(last_err or "fetch_failed")
     return (
         "<tr>"
         "<td>Fear &amp; Greed Index (공포·탐욕지수)</td>"
-        f"<td colspan='2'><i>unavailable</i> (reason: {safe_reason})</td>"
+        f"<td colspan='2'><i>unavailable</i> (reason: {safe})</td>"
         "</tr>"
     )
 
