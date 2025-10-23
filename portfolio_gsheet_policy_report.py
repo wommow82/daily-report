@@ -1019,12 +1019,22 @@ def _get_close_series(df):
         return pd.Series(dtype=float)
 
 def analyst_advice_section_news_aware(as_of=None):
-    import os, re, requests, math
-    from datetime import datetime, timedelta
+    """
+    🧠 투자 애널리스트 조언 (뉴스 인지형, 동적)
+    - S&P500(^GSPC), VIX(^VIX) + (옵션) NewsAPI 최신 헤드라인 감성점수
+    - 안전 포맷팅으로 NaN/N/A 처리, 휴장일/빈 데이터 방어
+    - HTML 문자열 반환 (리포트에 그대로 삽입)
+
+    필요 패키지: pandas, yfinance, (옵션) requests
+    환경변수: NEWS_API_KEY (없으면 뉴스는 건너뜀)
+    """
+    # ---------- imports ----------
+    import os, re, math, requests
+    from datetime import datetime
     import pandas as pd
     import yfinance as yf
 
-    # ---------- 유틸 ----------
+    # ---------- utils ----------
     def _finite(x):
         try:
             return math.isfinite(float(x))
@@ -1040,44 +1050,50 @@ def analyst_advice_section_news_aware(as_of=None):
         except Exception:
             return na
 
+    def _pct(x, na="N/A"):
+        try:
+            xf = float(x)
+            if not math.isfinite(xf):
+                return na
+            return f"{xf:.1f}%"
+        except Exception:
+            return na
+
     today = as_of or datetime.utcnow().strftime("%Y-%m-%d")
 
-    # ---------- 1) 지수 데이터 (빈값 방어 + 대체 period 사용) ----------
-    # start/end가 빈 시리즈를 만들 때가 있어 period 기반으로 더 안정적으로 가져옵니다.
-    spx_df = yf.download("^GSPC", period="2y", interval="1d", progress=False, auto_adjust=False)
-    vix_df = yf.download("^VIX",  period="2y", interval="1d", progress=False, auto_adjust=False)
+    # ---------- 1) 지수 데이터 (빈값/휴장일 방어) ----------
+    try:
+        spx_df = yf.download("^GSPC", period="2y", interval="1d", progress=False, auto_adjust=False)
+        vix_df = yf.download("^VIX",  period="2y", interval="1d", progress=False, auto_adjust=False)
+    except Exception:
+        spx_df, vix_df = pd.DataFrame(), pd.DataFrame()
 
-    spx = _get_close_series(spx_df)
-    vix = _get_close_series(vix_df)
+    spx = (spx_df["Close"] if "Close" in spx_df.columns else pd.Series(dtype=float)).dropna()
+    vix = (vix_df["Close"] if "Close" in vix_df.columns else pd.Series(dtype=float)).dropna()
 
-    # 길이 체크
     if len(spx) == 0 or len(vix) == 0:
-        # 데이터가 비면 깔끔한 안내 블록만 출력하고 반환
+        # 데이터가 비면 안내만 출력
         return f"""
         <h2>🧠 투자 애널리스트 조언</h2>
         <div class='card'>
           <p class='muted'>기준일: {today}</p>
           <div class='gpt-box'>
             지수 데이터가 비어 있습니다. (휴장일/네트워크/차단 이슈 가능)<br>
-            잠시 후 다시 시도하거나 러너 네트워크를 확인해 주세요.
+            잠시 후 다시 시도해 주세요.
           </div>
         </div>
         """
 
-    # 최근 값
     spx_last = float(spx.iloc[-1]) if _finite(spx.iloc[-1]) else None
     vix_last = float(vix.iloc[-1]) if _finite(vix.iloc[-1]) else None
 
-    # 이동평균 (충분한 길이 있을 때만)
     ma50  = float(spx.rolling(50).mean().iloc[-1])  if len(spx) >= 50  and _finite(spx.rolling(50).mean().iloc[-1])  else None
     ma200 = float(spx.rolling(200).mean().iloc[-1]) if len(spx) >= 200 and _finite(spx.rolling(200).mean().iloc[-1]) else None
 
-    # 52주 고점 대비 낙폭
     spx_52w = spx.tail(252) if len(spx) >= 252 else spx
     spx_52w_high = float(spx_52w.max()) if _finite(spx_52w.max()) else None
     drawdown_pct = ((spx_last / spx_52w_high - 1.0) * 100.0) if (spx_last and spx_52w_high) else None
 
-    # 골든/데드 크로스, 50일선 상/하회
     if ma50 is not None and ma200 is not None:
         cross_state = "골든크로스(중기 우상향)" if ma50 > ma200 else ("데드크로스(중기 약세)" if ma50 < ma200 else "중립")
     else:
@@ -1085,15 +1101,59 @@ def analyst_advice_section_news_aware(as_of=None):
     price_vs_ma50 = ("상회" if (ma50 is not None and spx_last and spx_last > ma50) else
                      "하회" if (ma50 is not None and spx_last is not None) else "N/A")
 
-    # ---------- 2) 뉴스 수집 & 스코어 (생략하면 기존 로직 그대로 두세요) ----------
-    # ... (당신이 이미 넣은 NewsAPI 스코어링 로직 그대로) ...
-    # 여기서는 예시로 중립 처리:
-    news_score = 0
-    phase_note = "뉴스 톤: 중립"
+    # ---------- 2) 뉴스 수집 & 감성 스코어 (옵션) ----------
+    news_score, phase_note = 0.0, "뉴스 톤: 중립"
+    api_key = os.environ.get("NEWS_API_KEY")
+    if api_key:
+        news_items = []
+        try:
+            url = f"https://newsapi.org/v2/top-headlines?language=en&category=business&pageSize=12&apiKey={api_key}"
+            r = requests.get(url, timeout=15)
+            if r.status_code == 200:
+                for art in r.json().get("articles", []):
+                    title = (art.get("title") or "").strip()
+                    desc  = (art.get("description") or "").strip()
+                    if title:
+                        news_items.append(f"{title}. {desc}")
+        except Exception:
+            news_items = []
 
-    # ---------- 3) 레짐 판단 ----------
+        neg_kw = {
+            r"\b(slowdown|recession|bear market|plunge|crash|selloff|profit warning|miss)\b": 2.0,
+            r"\b(tariff|ban|sanction|export curb|trade tension)\b": 1.6,
+            r"\b(fed hawkish|rate hike|higher for longer)\b": 1.4,
+            r"\b(war|conflict|geopolitical)\b": 1.3,
+            r"\b(volatility spike|vix surges)\b": 1.2,
+        }
+        pos_kw = {
+            r"\b(rebound|stabilize|soft landing|strong demand|record revenue)\b": -1.4,
+            r"\b(rate cut|dovish|easing|pivot)\b": -1.3,
+            r"\b(deal reached|truce|tariff relief)\b": -1.1,
+        }
+
+        def _score_txt(txt):
+            s, t = 0.0, txt.lower()
+            for p, w in neg_kw.items():
+                if re.search(p, t): s += w
+            for p, w in pos_kw.items():
+                if re.search(p, t): s += w
+            return s
+
+        news_score = sum(_score_txt(n) for n in news_items)
+        news_score = max(min(news_score, 8.0), -6.0)
+
+        if news_score >= 3:
+            phase_note = "뉴스 톤: 부정적 (공포 확산)"
+        elif news_score >= 1:
+            phase_note = "뉴스 톤: 약간 부정"
+        elif news_score <= -2:
+            phase_note = "뉴스 톤: 긍정적 (안도/완화)"
+        else:
+            phase_note = "뉴스 톤: 중립"
+
+    # ---------- 3) 레짐/반등 창구 ----------
     if drawdown_pct is None:
-        market_phase = "사상고점 인접/강세 지속"  # 데이터 불충분 시 보수적 문구
+        market_phase = "사상고점 인접/강세 지속"
         base_window = "단기 조정 리스크 주시"
     else:
         if drawdown_pct <= -20:
@@ -1109,101 +1169,21 @@ def analyst_advice_section_news_aware(as_of=None):
             market_phase = "사상고점 인접/강세 지속"
             base_window = "단기 조정 리스크 주시"
 
-    rebound_window = base_window  # (뉴스 톤 보정은 필요 시 추가)
-
-    # ---------- 4) 표시 문자열(숫자 안전 포맷) ----------
-    spx_str   = (_fmt(spx_last, "{:,.0f}") + "p") if _finite(spx_last) else "N/A"
-    vix_str   = _fmt(vix_last, "{:.1f}") if _finite(vix_last) else "N/A"
-    dd_str    = (_fmt(drawdown_pct, "{:.1f}") + "%") if (drawdown_pct is not None and _finite(drawdown_pct)) else "N/A"
-    ma50_str  = _fmt(ma50, "{:,.0f}") if ma50 is not None else "N/A"
-    ma200_str = _fmt(ma200, "{:,.0f}") if ma200 is not None else "N/A"
-
-    # ---------- 5) HTML ----------
-    html = f"""
-    <h2>🧠 투자 애널리스트 조언</h2>
-    <div class='card' style="line-height:1.6; font-size:14px">
-      <p class='muted'>기준일: {today}</p>
-
-      <h3>📈 현재 시장 위치</h3>
-      <ul>
-        <li><b>판단:</b> {market_phase} · VIX {vix_str} · {phase_note}</li>
-        <li><b>지수 상태:</b> S&P500 {spx_str} · 52주 고점 대비 {dd_str}</li>
-        <li><b>이동평균:</b> 50일선 {ma50_str} · 200일선 {ma200_str} · {cross_state} · 가격은 50일선 {price_vs_ma50}</li>
-        <li><b>반등 창구:</b> {rebound_window}</li>
-      </ul>
-      <!-- 이하 전략/체크리스트/섹터 힌트 파트는 기존 코드 유지 -->
-    </div>
-    """
-    return html
-
-    # ---------- 3) 뉴스 스코어링 ----------
-    neg_kw = {
-        r"\b(miss|weak|downbeat|cut guidance|profit warning)\b": 2.0,
-        r"\b(slowdown|recession|hard landing)\b": 2.0,
-        r"\b(tariff|ban|sanction|export curb|trade tension)\b": 1.6,
-        r"\b(valuation bubble|bubble|overvalued)\b": 1.5,
-        r"\b(fed hawkish|rate hike|higher for longer)\b": 1.3,
-        r"\b(geopolitical|war|conflict|escalation)\b": 1.4,
-        r"\b(selloff|plunge|crash|freefall)\b": 2.2,
-        r"\b(volatility spike|fear gauge surges|vix surges)\b": 1.7,
-        r"\b(antitrust|regulatory probe|lawsuit)\b": 1.2,
-    }
-    pos_kw = {
-        r"\b(beat|surprise to the upside|record revenue|strong demand)\b": -1.6,
-        r"\b(fed dovish|rate cut|easing|pivot)\b": -1.4,
-        r"\b(rebound|stabilize|bottoming|soft landing)\b": -1.2,
-        r"\b(deal reached|truce|tariff relief)\b": -1.3,
-    }
-
-    def score_text(txt):
-        s = 0.0
-        t = txt.lower()
-        for pat, w in neg_kw.items():
-            if re.search(pat, t):
-                s += w
-        for pat, w in pos_kw.items():
-            if re.search(pat, t):
-                s += w
-        return s
-
-    news_score = 0.0
-    for it in news_items:
-        news_score += score_text(it)
-    news_score = max(min(news_score, 8.0), -6.0)  # 클리핑
-
-    # ---------- 4) 레짐 + 반등 창구 ----------
-    if drawdown_pct <= -20:
-        market_phase = "약세장(Bear Market)"
-        base_window = "분기 단위(6–12개월) 소요 가능"
-    elif drawdown_pct <= -8:
-        market_phase = "조정(Correction) 국면"
-        base_window = "수주~1–2개월 내 저점 확인 가능성" if vix_last >= 25 else "수주 내 점진 반등 가능성"
-    elif drawdown_pct < 0:
-        market_phase = "완만한 조정/눌림 구간"
-        base_window = "수주 내 추세 재확인"
-    else:
-        market_phase = "사상고점 인접/강세 지속"
-        base_window = "단기 조정 리스크 주시"
-
+    # 뉴스 보정
     if news_score >= 4:
-        phase_note = "뉴스 톤: 강한 부정/공포"
-        window_adj = " → 반등 지연/변동성 확대 가능성"
+        rebound_window = base_window + " → 반등 지연/변동성 확대 가능성"
         staging_bias = "defensive"
     elif news_score >= 2:
-        phase_note = "뉴스 톤: 부정 우세"
-        window_adj = " → 저점 확인까지 다소 시간 소요"
+        rebound_window = base_window + " → 저점 확인까지 다소 시간 소요"
         staging_bias = "lean_defensive"
     elif news_score <= -2:
-        phase_note = "뉴스 톤: 긍정/완화"
-        window_adj = " → 반등 신호 조기 가능"
+        rebound_window = base_window + " → 반등 신호 조기 가능"
         staging_bias = "offensive"
     else:
-        phase_note = "뉴스 톤: 중립"
-        window_adj = ""
+        rebound_window = base_window
         staging_bias = "neutral"
 
-    rebound_window = base_window + window_adj
-
+    # ---------- 4) 전략 스테이징 ----------
     if "약세장" in market_phase:
         staging = [
             "① 방어 강화: 헬스케어·유틸리티·현금 비중 확대",
@@ -1237,11 +1217,14 @@ def analyst_advice_section_news_aware(as_of=None):
         "공격(반등초기)": ["반도체·AI 인프라", "산업재(경기 회복 베타)", "소재/에너지(원자재 사이클)"],
     }
 
-    ma50_str  = _fmt_or_na(ma50)
-    ma200_str = _fmt_or_na(ma200)
+    # ---------- 5) 숫자 표시 문자열 ----------
+    spx_str   = (_fmt(spx_last, "{:,.0f}") + "p") if _finite(spx_last) else "N/A"
+    vix_str   = _fmt(vix_last, "{:.1f}") if _finite(vix_last) else "N/A"
+    dd_str    = _pct(drawdown_pct) if (drawdown_pct is not None and _finite(drawdown_pct)) else "N/A"
+    ma50_str  = _fmt(ma50, "{:,.0f}") if ma50 is not None else "N/A"
+    ma200_str = _fmt(ma200, "{:,.0f}") if ma200 is not None else "N/A"
 
-    # ---------- 5) HTML ----------
-    def _li(items): return "".join([f"<li>{x}</li>" for x in items])
+    # ---------- 6) HTML ----------
     html = f"""
     <h2>🧠 투자 애널리스트 조언</h2>
     <div class='card' style="line-height:1.6; font-size:14px">
@@ -1249,8 +1232,8 @@ def analyst_advice_section_news_aware(as_of=None):
 
       <h3>📈 현재 시장 위치</h3>
       <ul>
-        <li><b>판단:</b> {market_phase} · VIX {vix_last:.1f} · {phase_note}</li>
-        <li><b>지수 상태:</b> S&P500 {spx_last:,.0f}p · 52주 고점 대비 {drawdown_pct:.1f}%</li>
+        <li><b>판단:</b> {market_phase} · VIX {vix_str} · {phase_note}</li>
+        <li><b>지수 상태:</b> S&P500 {spx_str} · 52주 고점 대비 {dd_str}</li>
         <li><b>이동평균:</b> 50일선 {ma50_str} · 200일선 {ma200_str} · {cross_state} · 가격은 50일선 {price_vs_ma50}</li>
         <li><b>반등 창구:</b> {rebound_window}</li>
       </ul>
@@ -1274,13 +1257,14 @@ def analyst_advice_section_news_aware(as_of=None):
 
       <h3>🎯 요약</h3>
       <div class='gpt-box'>
-        현재 판정 <b>{market_phase}</b> (+ 뉴스 톤: {phase_note}).<br>
+        현재 판정 <b>{market_phase}</b> (+ {phase_note}).<br>
         전략: 현금 유지 → 방어로 완충 → 공포 심화 시 기술/반도체 분할 진입 → 
         50일선 회복·추세 전환 확인 후 산업재/소재 확대 → 반등 확인 시 리밸런싱/익절.
       </div>
     </div>
     """
     return html
+
 
 def build_report_html():
     df_hold, df_watch, settings = load_holdings_watchlist_settings()
