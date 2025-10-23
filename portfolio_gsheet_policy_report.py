@@ -1002,6 +1002,22 @@ def send_email_html(subject, html_body):
 #                     news_items.append(f"{title}. {desc}")
 #         except Exception:
 #             pass  # 뉴스 불가 시 지수만으로 판단
+
+def _get_close_series(df):
+    import pandas as pd
+    if df is None or getattr(df, "empty", True):
+        return pd.Series(dtype=float)
+    cols = getattr(df, "columns", [])
+    # 가장 흔한 키들 순서대로 시도
+    for key in ("Close", "close"):
+        if key in cols:
+            return df[key].dropna()
+    # 멀티인덱스 예외 처리
+    try:
+        return df["Close"].dropna()
+    except Exception:
+        return pd.Series(dtype=float)
+
 def analyst_advice_section_news_aware(as_of=None):
     import os, re, requests, math
     from datetime import datetime, timedelta
@@ -1031,8 +1047,8 @@ def analyst_advice_section_news_aware(as_of=None):
     spx_df = yf.download("^GSPC", period="2y", interval="1d", progress=False, auto_adjust=False)
     vix_df = yf.download("^VIX",  period="2y", interval="1d", progress=False, auto_adjust=False)
 
-    spx = (spx_df.get("Close") or pd.Series(dtype=float)).dropna()
-    vix = (vix_df.get("Close") or pd.Series(dtype=float)).dropna()
+    spx = _get_close_series(spx_df)
+    vix = _get_close_series(vix_df)
 
     # 길이 체크
     if len(spx) == 0 or len(vix) == 0:
