@@ -225,39 +225,72 @@ def build_signals_table(tickers):
             })
     return pd.DataFrame(rows)
 
-def fetch_fear_greed_index():
+def fetch_fear_greed_index_row():
     """
-    CNN Fear & Greed Index (공포·탐욕지수) 실시간 조회
-    출처: https://money.cnn.com/data/fear-and-greed/
+    CNN Fear & Greed Index(공포·탐욕지수)를 표 한 줄(<tr>)로 반환
+    - 418/403 방지를 위해 브라우저 UA·헤더 사용 + 3회 재시도
+    - 실패 시에도 링크 없이 깔끔한 사유만 출력
     """
-    import requests, datetime
+    import requests, time, html
 
     url = "https://production.dataviz.cnn.io/index/fearandgreed/graphdata"
-    try:
-        r = requests.get(url, timeout=10)
-        r.raise_for_status()
-        data = r.json()
-        now_value = data["fear_and_greed"]["score"]
-        now_rating = data["fear_and_greed"]["rating"]
-        last_close = data["fear_and_greed_historical"]["data"][-2]["score"]
-        change = now_value - last_close
-        pct_change = (change / last_close * 100) if last_close else 0
+    headers = {
+        "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                       "AppleWebKit/537.36 (KHTML, like Gecko) "
+                       "Chrome/127.0.0.0 Safari/537.36"),
+        "Accept": "application/json, text/plain, */*",
+        "Referer": "https://money.cnn.com/data/fear-and-greed/",
+        "Origin": "https://money.cnn.com",
+    }
 
-        color = "green" if change > 0 else "red" if change < 0 else "black"
-        arrow = "🟢" if change > 0 else "🔴" if change < 0 else "⚫"
+    last_err = None
+    for attempt in range(3):
+        try:
+            r = requests.get(url, headers=headers, timeout=10)
+            r.raise_for_status()
+            j = r.json()
 
-        html_row = (
-            f"<tr>"
-            f"<td>Fear & Greed Index (공포·탐욕지수)</td>"
-            f"<td>{last_close:.1f}</td>"
-            f"<td><span style='color:{color}'>{now_value:.1f} "
-            f"({change:+.1f}, {pct_change:+.1f}%) {arrow} "
-            f"→ <b>{now_rating}</b></span></td>"
-            f"</tr>"
-        )
-        return html_row
-    except Exception as e:
-        return f"<tr><td>Fear & Greed Index</td><td colspan='2'>Error: {e}</td></tr>"
+            fg   = (j.get("fear_and_greed") or {})
+            now  = fg.get("score")
+            rate = (fg.get("rating") or "").title()
+
+            hist = (j.get("fear_and_greed_historical") or {}).get("data", []) or []
+            prev = hist[-2]["score"] if len(hist) >= 2 and "score" in hist[-2] else None
+
+            # 변화 계산
+            change = None if (now is None or prev in (None, 0)) else (float(now) - float(prev))
+            pct    = None if (change is None or prev in (None, 0)) else (change / float(prev) * 100.0)
+            arrow  = "🟢" if (change is not None and change > 0) else ("🔴" if (change is not None and change < 0) else "⚫")
+            color  = "green" if arrow == "🟢" else ("red" if arrow == "🔴" else "black")
+
+            def _fmt(x):
+                try:
+                    return f"{float(x):.1f}"
+                except Exception:
+                    return "N/A"
+
+            return (
+                "<tr>"
+                "<td>Fear &amp; Greed Index (공포·탐욕지수)</td>"
+                f"<td>{_fmt(prev)}</td>"
+                f"<td><span style='color:{color}'>{_fmt(now)} "
+                f"({('+' if (change is not None and change >= 0) else '') + _fmt(change) if change is not None else 'N/A'}, "
+                f"{('+' if (pct is not None and pct >= 0) else '') + _fmt(pct) if pct is not None else 'N/A'}%) "
+                f"{arrow} → <b>{rate}</b></span></td>"
+                "</tr>"
+            )
+        except Exception as e:
+            last_err = str(e)
+            time.sleep(1.2 * (attempt + 1))
+
+    # 모두 실패: 링크 대신 요약 사유만 노출
+    safe_reason = html.escape(last_err or "fetch_failed")
+    return (
+        "<tr>"
+        "<td>Fear &amp; Greed Index (공포·탐욕지수)</td>"
+        f"<td colspan='2'><i>unavailable</i> (reason: {safe_reason})</td>"
+        "</tr>"
+    )
 
 def gpt_strategy_summary(holdings_news, watchlist_news, market_news, policy_focus):
     """
