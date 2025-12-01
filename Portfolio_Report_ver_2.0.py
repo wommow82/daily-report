@@ -393,6 +393,282 @@ def enrich_holdings_with_prices(
 
 
 # =========================
+# 추가 분석용 헬퍼
+# =========================
+
+def _last_ma(series, window):
+    """rollling MA; 데이터 부족시 마지막 값 사용."""
+    series = series.dropna()
+    if len(series) == 0:
+        return None
+    if len(series) < window:
+        return float(series.iloc[-1])
+    return float(series.rolling(window).mean().iloc[-1])
+
+
+def build_midterm_analysis_table(df_enriched):
+    """
+    TFSA 종목(단, SCHD 제외)에 대해:
+      - 중기 상승 확률 %
+      - 매수 타이밍 %
+      - 매도 타이밍 %
+      - 1년 목표수익 범위 (USD, 보유수량 기준)
+      - 리스크 요인 (텍스트)
+    """
+    df_tfsa = df_enriched[df_enriched["Type"].str.upper() == "TFSA"].copy()
+    if df_tfsa.empty:
+        return "<p>No TFSA holdings.</p>"
+
+    tickers = sorted(df_tfsa["Ticker"].unique())
+    tickers_mid = [t for t in tickers if t != "SCHD"]
+    rows = []
+
+    for ticker in tickers_mid:
+        sub = df_tfsa[df_tfsa["Ticker"] == ticker]
+        shares = safe_float(sub["Shares"].sum(), 0.0)
+
+        try:
+            hist = yf.Ticker(ticker).history(period="1y")
+        except Exception:
+            hist = None
+
+        if hist is None or hist.empty or shares == 0:
+            rows.append(
+                {
+                    "Ticker": ticker,
+                    "중기 상승 확률 %": "N/A",
+                    "매수 타이밍 %": "N/A",
+                    "매도 타이밍 %": "N/A",
+                    "1년 목표수익 범위 (USD)": "N/A",
+                    "리스크 요인": "데이터 부족",
+                }
+            )
+            continue
+
+        close = hist["Close"].dropna()
+        last = float(close.iloc[-1])
+        ma20 = _last_ma(close, 20)
+        ma50 = _last_ma(close, 50)
+        ma200 = _last_ma(close, 200)
+        high_52w = float(close.max())
+        low_52w = float(close.min())
+
+        # 1) 중기 상승 확률 (단순 규칙 기반 스코어)
+        score = 50
+        if ma200 is not None and last > ma200:
+            score += 15
+        elif ma200 is not None:
+            score -= 15
+
+        if ma50 is not None and last > ma50:
+            score += 10
+        elif ma50 is not None:
+            score -= 10
+
+        if ma20 is not None and last > ma20:
+            score += 5
+        elif ma20 is not None:
+            score -= 5
+
+        mid_prob = max(5, min(95, score))
+
+        # 2) 매도/매수 타이밍: 52주 밴드 내 위치
+        if high_52w == low_52w:
+            pos = 0.5
+        else:
+            pos = (last - low_52w) / (high_52w - low_52w)  # 0=저점,1=고점
+
+        sell_timing = int(round(20 + 80 * pos))      # 고점 근처일수록 높음
+        buy_timing = int(round(90 - 70 * pos))       # 저점 근처일수록 높음
+        sell_timing = max(5, min(95, sell_timing))
+        buy_timing = max(5, min(95, buy_timing))
+
+        # 3) 1년 목표수익 범위 (USD, 보유수량 기준, 과거 수익/변동성 기준)
+        daily_ret = close.pct_change().dropna()
+        if len(daily_ret) > 20:
+            ann_ret = float(daily_ret.mean() * 252)
+            ann_vol = float(daily_ret.std() * np.sqrt(252))
+        else:
+            ann_ret = 0.0
+            ann_vol = 0.3  # default
+
+        low_ret = ann_ret - 0.5 * ann_vol
+        high_ret = ann_ret + 0.5 * ann_vol
+        # 범위 sanity
+        low_ret = max(low_ret, -0.9)   # -90% 이하 잘라냄
+        high_ret = min(high_ret, 1.5)  # +150% 이상 잘라냄
+
+        cur_val = shares * last
+        profit_low = cur_val * low_ret
+        profit_high = cur_val * high_ret
+        if profit_low > profit_high:
+            profit_low, profit_high = profit_high, profit_low
+        profit_range_str = f"{fmt_money(profit_low, '$')} ~ {fmt_money(profit_high, '$')}"
+
+        # 4) 리스크 요인 (변동성 기준 텍스트)
+        vol = abs(ann_vol)
+        if vol >= 0.5:
+            risk_text = "매우 높은 변동성, 급락 리스크 큼"
+        elif vol >= 0.35:
+            risk_text = "높은 변동성, 실적·뉴스에 민감"
+        elif vol >= 0.25:
+            risk_text = "중간 변동성, 경기·금리 변화 영향"
+        else:
+            risk_text = "비교적 안정적, 시장 전반 리스크 중심"
+
+        rows.append(
+            {
+                "Ticker": ticker,
+                "중기 상승 확률 %": f"{mid_prob}%",
+                "매수 타이밍 %": f"{buy_timing}%",
+                "매도 타이밍 %": f"{sell_timing}%",
+                "1년 목표수익 범위 (USD)": profit_range_str,
+                "리스크 요인": risk_text,
+            }
+        )
+
+    if not rows:
+        return "<p>No TFSA tickers for mid-term analysis.</p>"
+
+    df_mid = pd.DataFrame(rows)
+    return df_mid.to_html(index=False, escape=False)
+
+
+def build_schd_dividend_table():
+    """
+    SCHD 지난 10년 연간 배당 + 연말가 + 배당수익률,
+    최근 5년 배당 성장률 기반으로 향후 2년 예상 배당.
+    """
+    ticker = "SCHD"
+    try:
+        tkr = yf.Ticker(ticker)
+        hist = tkr.history(period="10y")
+        div = tkr.dividends
+    except Exception:
+        hist = None
+        div = None
+
+    if hist is None or hist.empty or div is None or div.empty:
+        return "<p>SCHD 배당 데이터를 불러오지 못했습니다.</p>"
+
+    price_year = hist["Close"].resample("Y").last()
+    div_year = div.resample("Y").sum()
+
+    df = pd.concat([price_year, div_year], axis=1)
+    df.columns = ["Price", "Dividend"]
+    df = df.dropna()
+    df["Year"] = df.index.year
+    df["YieldPct"] = (df["Dividend"] / df["Price"]) * 100.0
+
+    df_hist = df.tail(10).copy()
+
+    # 최근 5년 배당 CAGR 기반 예측
+    recent = df_hist.tail(5)
+    if len(recent) >= 2 and recent["Dividend"].iloc[0] > 0:
+        cagr = (
+            recent["Dividend"].iloc[-1] / recent["Dividend"].iloc[0]
+        ) ** (1.0 / (len(recent) - 1)) - 1.0
+    else:
+        cagr = 0.0
+
+    last_year = int(df_hist["Year"].iloc[-1])
+    last_div = float(df_hist["Dividend"].iloc[-1])
+
+    f1_div = last_div * (1 + cagr)
+    f2_div = f1_div * (1 + cagr)
+
+    rows = []
+    for _, r in df_hist.iterrows():
+        rows.append(
+            {
+                "Year": int(r["Year"]),
+                "Annual Dividend (USD)": fmt_money(r["Dividend"], "$"),
+                "Year-end Price (USD)": fmt_money(r["Price"], "$"),
+                "Dividend Yield %": fmt_pct(r["YieldPct"]),
+                "Type": "Actual",
+            }
+        )
+
+    # 예상 2년 (가격은 N/A)
+    rows.append(
+        {
+            "Year": last_year + 1,
+            "Annual Dividend (USD)": fmt_money(f1_div, "$"),
+            "Year-end Price (USD)": "N/A",
+            "Dividend Yield %": "N/A",
+            "Type": "Forecast",
+        }
+    )
+    rows.append(
+        {
+            "Year": last_year + 2,
+            "Annual Dividend (USD)": fmt_money(f2_div, "$"),
+            "Year-end Price (USD)": "N/A",
+            "Dividend Yield %": "N/A",
+            "Type": "Forecast",
+        }
+    )
+
+    df_out = pd.DataFrame(rows)
+    return df_out.to_html(index=False, escape=False)
+
+
+def build_news_table(df_enriched):
+    """
+    TFSA 전체 티커에 대해 yfinance 뉴스 사용.
+    - 한 티커당 최대 3건
+    - 제목을 한 줄 요약 + 링크로 사용
+    """
+    df_tfsa = df_enriched[df_enriched["Type"].str.upper() == "TFSA"].copy()
+    if df_tfsa.empty:
+        return "<p>No TFSA holdings for news.</p>"
+
+    tickers = sorted(df_tfsa["Ticker"].unique())
+    rows = []
+
+    for ticker in tickers:
+        try:
+            news_list = yf.Ticker(ticker).news
+        except Exception:
+            news_list = []
+
+        if not news_list:
+            continue
+
+        for item in news_list[:3]:
+            title = item.get("title", "").strip()
+            link = item.get("link", "")
+            publisher = item.get("publisher", "")
+            ts = item.get("providerPublishTime") or item.get("pubDate") or 0
+            try:
+                date_str = datetime.fromtimestamp(ts).strftime("%Y-%m-%d") if ts else ""
+            except Exception:
+                date_str = ""
+
+            headline_link = (
+                f'<a href="{link}" target="_blank">{title}</a>' if link else title
+            )
+            summary = item.get("summary") or title
+
+            rows.append(
+                {
+                    "Ticker": ticker,
+                    "Date": date_str,
+                    "Source": publisher,
+                    "Headline / Summary": summary,
+                    "Link": headline_link,
+                }
+            )
+
+    if not rows:
+        return "<p>No recent news found via Yahoo Finance.</p>"
+
+    df_news = pd.DataFrame(rows)
+    df_news = df_news.sort_values(["Ticker", "Date"], ascending=[True, False])
+    return df_news.to_html(index=False, escape=False)
+
+
+# =========================
 # HTML 리포트 생성
 # =========================
 
@@ -413,252 +689,4 @@ def build_html_report(df_enriched, account_summary):
     )
     resp_today_cad = account_summary.get("RESP", {}).get(
         "total_today_native", 0.0
-    )  # CAD
-    resp_yest_cad = account_summary.get("RESP", {}).get(
-        "total_yesterday_native", 0.0
     )
-
-    total_today_cad = tfsa_today_usd * usd_cad + resp_today_cad
-    total_yest_cad = tfsa_yest_usd * usd_cad + resp_yest_cad
-    total_diff_cad = total_today_cad - total_yest_cad
-    total_diff_pct = (
-        total_diff_cad / total_yest_cad * 100.0 if total_yest_cad != 0 else 0.0
-    )
-
-    total_today_str = fmt_money(total_today_cad, "$")
-    total_diff_str = fmt_money(total_diff_cad, "$")
-    total_diff_pct_str = fmt_pct(total_diff_pct)
-
-    total_diff_str_colored = colorize_value_html(total_diff_str, total_diff_cad)
-    total_diff_pct_str_colored = colorize_value_html(
-        total_diff_pct_str, total_diff_pct
-    )
-
-    total_assets_line = (
-        f"<p><strong>Total Assets (총 자산, CAD):</strong> "
-        f"{total_today_str}&nbsp;&nbsp;&nbsp;"
-        f"<strong>Δ vs. Yesterday (전일 대비 변화):</strong> "
-        f"{total_diff_str_colored} ({total_diff_pct_str_colored})</p>"
-    )
-
-    # ---------- 1) 계좌 요약 테이블 (TFSA/RESP) ----------
-    summary_rows = []
-    for acc in ["TFSA", "RESP"]:
-        if acc not in account_summary:
-            continue
-        s = account_summary[acc]
-
-        acc_label = "TFSA (USD)" if acc == "TFSA" else "RESP (CAD)"
-
-        total_today = s["total_today_native"]
-        total_diff = s["total_diff_native"]
-        total_diff_pct = s["total_diff_pct_native"]
-        net_dep_native = s.get("net_deposit_native", 0.0)
-        pl_vs_dep_native = s.get("pl_vs_deposit_native", 0.0)
-        pl_vs_dep_pct_native = s.get("pl_vs_deposit_pct_native", 0.0)
-        cash_native = s.get("cash_native", 0.0)
-
-        total_today_str_acc = fmt_money(total_today, ccy_symbol)
-        diff_str = fmt_money(total_diff, ccy_symbol)
-        diff_pct_str = fmt_pct(total_diff_pct)
-        net_dep_str = fmt_money(net_dep_native, ccy_symbol)
-        pl_vs_dep_str = fmt_money(pl_vs_dep_native, ccy_symbol)
-        pl_vs_dep_pct_str = fmt_pct(pl_vs_dep_pct_native)
-        cash_str = fmt_money(cash_native, ccy_symbol)
-
-        diff_str_colored = colorize_value_html(diff_str, total_diff)
-        diff_pct_str_colored = colorize_value_html(diff_pct_str, total_diff_pct)
-        pl_vs_dep_str_colored = colorize_value_html(pl_vs_dep_str, pl_vs_dep_native)
-        pl_vs_dep_pct_str_colored = colorize_value_html(
-            pl_vs_dep_pct_str, pl_vs_dep_pct_native
-        )
-
-        summary_rows.append(
-            {
-                "Account": acc_label,
-                "Net Deposit (Base)": net_dep_str,
-                "Total (Today, Base)": total_today_str_acc,
-                "Δ vs Yesterday (Base)": diff_str_colored,
-                "Δ %": diff_pct_str_colored,
-                "P/L vs Deposit (Base)": pl_vs_dep_str_colored,
-                "P/L vs Deposit %": pl_vs_dep_pct_str_colored,
-                "Cash (Base)": cash_str,
-            }
-        )
-
-    df_summary = pd.DataFrame(summary_rows)
-
-    # ---------- 2) 상세 보유 종목 테이블 (TFSA: USD, RESP: CAD) ----------
-    def make_holdings_table(acc_type):
-        sub = df_enriched[df_enriched["Type"].str.upper() == acc_type].copy()
-        if sub.empty:
-            return f"<p>No holdings for {acc_type}.</p>"
-
-        # 공통 포맷
-        sub["Shares"] = sub["Shares"].map(lambda x: f"{float(x):,.2f}")
-        sub["AvgPrice"] = sub["AvgPrice"].map(lambda x: fmt_money(x, ccy_symbol))
-
-        # native 가격/평가/손익
-        sub["LastPriceNativeFmt"] = sub["LastPrice"].map(
-            lambda x: fmt_money(x, ccy_symbol)
-        )
-        sub["PositionValueNativeFmt"] = sub["PositionValueNative"].map(
-            lambda x: fmt_money(x, ccy_symbol)
-        )
-
-        # Profit/Loss native + 색상
-        raw_pl_native = sub["ProfitLossNative"].tolist()
-        raw_pl_pct = sub["ProfitLossPct"].tolist()
-
-        pl_native_fmt = []
-        for v in raw_pl_native:
-            v_num = safe_float(v, 0.0)
-            text = fmt_money(v_num, ccy_symbol)
-            pl_native_fmt.append(colorize_value_html(text, v_num))
-
-        pl_pct_fmt = []
-        for v in raw_pl_pct:
-            v_num = safe_float(v, 0.0)
-            text = fmt_pct(v_num)
-            pl_pct_fmt.append(colorize_value_html(text, v_num))
-
-        sub["ProfitLossNativeFmt"] = pl_native_fmt
-        sub["ProfitLossPctFmt"] = pl_pct_fmt
-
-        cols = [
-            "Ticker",
-            "Type",
-            "Shares",
-            "AvgPrice",
-            "LastPriceNativeFmt",
-            "PositionValueNativeFmt",
-            "ProfitLossNativeFmt",
-            "ProfitLossPctFmt",
-        ]
-        rename_map = {
-            "LastPriceNativeFmt": "LastPrice",
-            "PositionValueNativeFmt": "PositionValue",
-            "ProfitLossNativeFmt": "Profit/Loss",
-            "ProfitLossPctFmt": "Profit/Loss %",
-        }
-
-        sub = sub[cols].rename(columns=rename_map)
-        return sub.to_html(index=False, escape=False)
-
-    tfsa_table = make_holdings_table("TFSA")
-    resp_table = make_holdings_table("RESP")
-
-    # ---------- 3) HTML 템플릿 ----------
-    style = """
-    <style>
-    body { font-family: Arial, sans-serif; margin: 20px; background:#fafafa; }
-    h1 { text-align:center; }
-    h2 { margin-top:30px; color:#2c3e50; border-bottom:2px solid #ddd; padding-bottom:5px; }
-    table { border-collapse: collapse; width:100%; margin:10px 0; }
-    th, td { border:1px solid #ddd; padding:6px; text-align:center; font-size:13px; }
-    th { background:#f4f6f6; }
-    .muted { color:#666; font-size:12px; }
-    .section { background:white; border:1px solid #ddd; border-radius:8px; padding:10px; margin:15px 0; }
-    </style>
-    """
-
-    html = f"""
-    <html>
-      <head>
-        <meta charset="utf-8" />
-        {style}
-      </head>
-      <body>
-        <h1>📊 Daily Portfolio Report</h1>
-        <p class="muted" style="text-align:center">
-          Generated at {now_str} (BaseCurrency: {base_ccy})
-        </p>
-
-        <div class="section">
-          <h2>🏦 Account Summary (TFSA / RESP / Total)</h2>
-          {total_assets_line}
-          {df_summary.to_html(index=False, escape=False)}
-        </div>
-
-        <div class="section">
-          <h2>📂 TFSA Holdings (in USD)</h2>
-          {tfsa_table}
-        </div>
-
-        <div class="section">
-          <h2>🎓 RESP Holdings (in CAD)</h2>
-          {resp_table}
-        </div>
-      </body>
-    </html>
-    """
-    return html
-
-
-# =========================
-# 이메일 전송
-# =========================
-
-def send_email_html(subject, html_body):
-    sender = os.environ.get("EMAIL_SENDER")
-    password = os.environ.get("EMAIL_PASSWORD")
-    receiver = os.environ.get("EMAIL_RECEIVER")
-    smtp_host = os.environ.get("SMTP_HOST", "smtp.gmail.com")
-    smtp_port = int(os.environ.get("SMTP_PORT", "587"))
-
-    if not (sender and password and receiver):
-        print("⚠️ Missing email settings → Email not sent")
-        return
-
-    msg = MIMEMultipart("alternative")
-    msg["Subject"] = subject
-    msg["From"] = sender
-    msg["To"] = receiver
-    msg.attach(MIMEText(html_body, "html", _charset="utf-8"))
-
-    try:
-        with smtplib.SMTP(smtp_host, smtp_port) as server:
-            server.starttls()
-            server.login(sender, password)
-            server.sendmail(sender, receiver, msg.as_string())
-        print("✅ Email sent to:", receiver)
-    except Exception as e:
-        print("❌ Email send failed:", e)
-
-
-# =========================
-# main
-# =========================
-
-def main():
-    (
-        df_hold,
-        tfsa_cash_usd,
-        resp_cash_cad,
-        base_currency,
-        tfsa_netdep_cad,
-        resp_netdep_cad,
-    ) = load_portfolio_from_gsheet()
-
-    df_enriched, acc_summary = enrich_holdings_with_prices(
-        df_hold,
-        base_currency=base_currency,
-        tfsa_cash_usd=tfsa_cash_usd,
-        resp_cash_cad=resp_cash_cad,
-        tfsa_netdep_cad=tfsa_netdep_cad,
-        resp_netdep_cad=resp_netdep_cad,
-    )
-
-    html_doc = build_html_report(df_enriched, acc_summary)
-
-    outname = f"portfolio_daily_report_{datetime.now().strftime('%Y%m%d')}.html"
-    with open(outname, "w", encoding="utf-8") as f:
-        f.write(html_doc)
-    print(f"Report saved: {outname}")
-
-    subject = f"📊 Portfolio Daily Report - {datetime.now().strftime('%Y-%m-%d')}"
-    send_email_html(subject, html_doc)
-
-
-if __name__ == "__main__":
-    main()
