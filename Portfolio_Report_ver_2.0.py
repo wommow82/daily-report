@@ -261,14 +261,15 @@ def enrich_holdings_with_prices(
     summary["RESP"]["net_deposit_native"] = resp_netdep_cad              # CAD
 
     # 결과 컬럼 초기화
-    df["LastPrice"] = np.nan
-    df["PrevClose"] = np.nan
+    df["LastPrice"] = np.nan                 # native
+    df["PrevClose"] = np.nan                 # native
     df["LastPriceBase"] = np.nan
     df["PrevCloseBase"] = np.nan
-    df["PositionValueNative"] = np.nan
+    df["PositionValueNative"] = np.nan       # native
     df["PositionValueBase"] = np.nan
     df["PositionPrevValueBase"] = np.nan
     df["ProfitLossBase"] = np.nan
+    df["ProfitLossNative"] = np.nan          # native
     df["ProfitLossPct"] = np.nan
 
     for idx, row in df.iterrows():
@@ -300,6 +301,7 @@ def enrich_holdings_with_prices(
         cost_native = shares * avg_price
         cost_base = cost_native * fx_to_base
         profit_base = position_value_base - cost_base
+        profit_native = profit_base / fx_to_base if fx_to_base != 0 else profit_base
         profit_pct = (profit_base / cost_base * 100.0) if cost_base != 0 else 0.0
 
         df.at[idx, "LastPrice"] = last
@@ -310,6 +312,7 @@ def enrich_holdings_with_prices(
         df.at[idx, "PositionValueBase"] = position_value_base
         df.at[idx, "PositionPrevValueBase"] = position_prev_value_base
         df.at[idx, "ProfitLossBase"] = profit_base
+        df.at[idx, "ProfitLossNative"] = profit_native
         df.at[idx, "ProfitLossPct"] = profit_pct
 
         summary[acc_type]["holdings_value_today"] += position_value_base
@@ -485,60 +488,65 @@ def build_html_report(df_enriched, account_summary):
 
     df_summary = pd.DataFrame(summary_rows)
 
-    # ---------- 2) 상세 보유 종목 테이블 (BaseCurrency 기준) ----------
-    df_view = df_enriched.copy()
-
-    df_view["Shares"] = df_view["Shares"].map(lambda x: f"{float(x):,.2f}")
-    df_view["AvgPrice"] = df_view["AvgPrice"].map(
-        lambda x: fmt_money(x, ccy_symbol)
-    )
-    df_view["LastPriceBase"] = df_view["LastPriceBase"].map(
-        lambda x: fmt_money(x, ccy_symbol)
-    )
-    df_view["PositionValueBase"] = df_view["PositionValueBase"].map(
-        lambda x: fmt_money(x, ccy_symbol)
-    )
-
-    raw_pl_base = df_enriched["ProfitLossBase"].tolist()
-    raw_pl_pct = df_enriched["ProfitLossPct"].tolist()
-
-    pl_base_str_list = []
-    for v in raw_pl_base:
-        v_num = safe_float(v, 0.0)
-        text = fmt_money(v_num, ccy_symbol)
-        pl_base_str_list.append(colorize_value_html(text, v_num))
-
-    pl_pct_str_list = []
-    for v in raw_pl_pct:
-        v_num = safe_float(v, 0.0)
-        text = fmt_pct(v_num)
-        pl_pct_str_list.append(colorize_value_html(text, v_num))
-
-    df_view["ProfitLossBase"] = pl_base_str_list
-    df_view["ProfitLossPct"] = pl_pct_str_list
-
-    cols_order = [
-        "Ticker",
-        "Type",
-        "Shares",
-        "AvgPrice",
-        "LastPriceBase",
-        "PositionValueBase",
-        "ProfitLossBase",
-        "ProfitLossPct",
-    ]
-    for col in cols_order:
-        if col not in df_view.columns:
-            raise ValueError(f"Missing column in df_view: {col}")
-
-    def _table_for_account(acc_type):
-        sub = df_view[df_view["Type"].str.upper() == acc_type].copy()
+    # ---------- 2) 상세 보유 종목 테이블 (TFSA: USD, RESP: CAD) ----------
+    def make_holdings_table(acc_type):
+        sub = df_enriched[df_enriched["Type"].str.upper() == acc_type].copy()
         if sub.empty:
             return f"<p>No holdings for {acc_type}.</p>"
-        return sub[cols_order].to_html(index=False, escape=False)
 
-    tfsa_table = _table_for_account("TFSA")
-    resp_table = _table_for_account("RESP")
+        # 공통 포맷
+        sub["Shares"] = sub["Shares"].map(lambda x: f"{float(x):,.2f}")
+        sub["AvgPrice"] = sub["AvgPrice"].map(lambda x: fmt_money(x, ccy_symbol))
+
+        # native 가격/평가/손익
+        sub["LastPriceNativeFmt"] = sub["LastPrice"].map(
+            lambda x: fmt_money(x, ccy_symbol)
+        )
+        sub["PositionValueNativeFmt"] = sub["PositionValueNative"].map(
+            lambda x: fmt_money(x, ccy_symbol)
+        )
+
+        # Profit/Loss native + 색상
+        raw_pl_native = sub["ProfitLossNative"].tolist()
+        raw_pl_pct = sub["ProfitLossPct"].tolist()
+
+        pl_native_fmt = []
+        for v in raw_pl_native:
+            v_num = safe_float(v, 0.0)
+            text = fmt_money(v_num, ccy_symbol)
+            pl_native_fmt.append(colorize_value_html(text, v_num))
+
+        pl_pct_fmt = []
+        for v in raw_pl_pct:
+            v_num = safe_float(v, 0.0)
+            text = fmt_pct(v_num)
+            pl_pct_fmt.append(colorize_value_html(text, v_num))
+
+        sub["ProfitLossNativeFmt"] = pl_native_fmt
+        sub["ProfitLossPctFmt"] = pl_pct_fmt
+
+        cols = [
+            "Ticker",
+            "Type",
+            "Shares",
+            "AvgPrice",
+            "LastPriceNativeFmt",
+            "PositionValueNativeFmt",
+            "ProfitLossNativeFmt",
+            "ProfitLossPctFmt",
+        ]
+        rename_map = {
+            "LastPriceNativeFmt": "LastPrice",
+            "PositionValueNativeFmt": "PositionValue",
+            "ProfitLossNativeFmt": "Profit/Loss",
+            "ProfitLossPctFmt": "Profit/Loss %",
+        }
+
+        sub = sub[cols].rename(columns=rename_map)
+        return sub.to_html(index=False, escape=False)
+
+    tfsa_table = make_holdings_table("TFSA")
+    resp_table = make_holdings_table("RESP")
 
     # ---------- 3) HTML 템플릿 ----------
     style = """
@@ -573,7 +581,7 @@ def build_html_report(df_enriched, account_summary):
         </div>
 
         <div class="section">
-          <h2>📂 TFSA Holdings (in {base_ccy})</h2>
+          <h2>📂 TFSA Holdings (in USD)</h2>
           {tfsa_table}
         </div>
 
