@@ -393,6 +393,303 @@ def enrich_holdings_with_prices(
 
 
 # =========================
+# 투자 분석 보조 함수 (중단기 + SCHD 배당 + 뉴스)
+# =========================
+
+def analyze_midterm_ticker(ticker):
+    """
+    yfinance 가격 데이터를 사용해
+    - 6개월 모멘텀, 1년 변동성 등을 기반으로
+      '중기 상승 확률, 매수/매도 타이밍, 1년 목표수익 범위, 리스크 요인'을
+      단순 휴리스틱으로 계산한다.
+    """
+    try:
+        hist = yf.Ticker(ticker).history(period="2y")
+        closes = hist["Close"].dropna()
+        if len(closes) < 60:
+            raise ValueError("가격 데이터 부족")
+    except Exception:
+        return {
+            "Ticker": ticker,
+            "UpProb": "N/A",
+            "BuyTiming": "N/A",
+            "SellTiming": "N/A",
+            "TargetRange": "데이터 부족",
+            "Risk": "시세 데이터 부족",
+        }
+
+    last = float(closes.iloc[-1])
+
+    # 6개월, 1년 수익률 (가능한 경우만)
+    def pct_ret(days):
+        if len(closes) <= days:
+            return None
+        start = float(closes.iloc[-days])
+        return (last / start - 1.0) * 100.0 if start != 0 else None
+
+    ret_6m = pct_ret(126)
+    ret_1y = pct_ret(252)
+
+    # 일간 로그수익률 → 연간 변동성
+    rets = np.log(closes / closes.shift(1)).dropna()
+    vol_annual = float(rets.std() * np.sqrt(252)) if len(rets) > 0 else 0.0
+
+    # 상승 확률 휴리스틱: 50% + 모멘텀/2 - 변동성*10 (클리핑)
+    base_prob = 50.0
+    if ret_6m is not None:
+        base_prob += ret_6m / 2.0
+    prob = base_prob - vol_annual * 10.0
+    prob = max(5.0, min(95.0, prob))
+
+    # 매수 타이밍: 52주 고점 대비 괴리
+    max_52w = float(closes[-252:].max()) if len(closes) >= 20 else float(closes.max())
+    drawdown = (last / max_52w - 1.0) if max_52w > 0 else 0.0
+    buy_timing = max(0.0, min(100.0, -drawdown * 200.0))  # 싸질수록 ↑
+
+    # 매도 타이밍: 6개월 수익률과 변동성 결합
+    sell_base = 0.0
+    if ret_6m is not None:
+        sell_base = max(0.0, min(100.0, (ret_6m - vol_annual * 100.0)))
+    sell_timing = sell_base
+
+    # 1년 목표 수익 범위: (모멘텀 기반 기대수익 ± 변동성)
+    if ret_6m is not None:
+        exp_ret = ret_6m * 2.0  # 단순 annualize
+    elif ret_1y is not None:
+        exp_ret = ret_1y
+    else:
+        exp_ret = 0.0
+
+    vol_pct = vol_annual * 100.0
+    low = exp_ret - vol_pct
+    high = exp_ret + vol_pct
+    low = max(-80.0, low)
+    high = min(150.0, high)
+    target_range = f"{low:,.1f}% ~ {high:,.1f}%"
+
+    # 리스크 요인 텍스트
+    if vol_annual > 0.6:
+        risk = "매우 높은 변동성, 단기 급락 위험 큼"
+    elif vol_annual > 0.4:
+        risk = "높은 변동성, 거시/실적에 매우 민감"
+    elif vol_annual > 0.25:
+        risk = "중간 이상의 변동성, 조정 구간 주의"
+    else:
+        risk = "비교적 안정적이나 시장/섹터 리스크 존재"
+
+    return {
+        "Ticker": ticker,
+        "UpProb": prob,
+        "BuyTiming": buy_timing,
+        "SellTiming": sell_timing,
+        "TargetRange": target_range,
+        "Risk": risk,
+    }
+
+
+def build_midterm_analysis_html(df_enriched):
+    """
+    TFSA 종목 중 SCHD를 제외한 티커에 대해
+    중단기 투자 통합 분석 표를 HTML로 생성.
+    """
+    tfsa_tickers = (
+        df_enriched[df_enriched["Type"].str.upper() == "TFSA"]["Ticker"]
+        .dropna()
+        .unique()
+        .tolist()
+    )
+    tickers = [t for t in tfsa_tickers if t.upper() != "SCHD"]
+
+    if not tickers:
+        return "<p>TFSA 중단기 대상 종목이 없습니다.</p>"
+
+    rows_raw = []
+    for t in sorted(tickers):
+        stat = analyze_midterm_ticker(t)
+        rows_raw.append(stat)
+
+    rows = []
+    for stat in rows_raw:
+        rows.append(
+            {
+                "Ticker": stat["Ticker"],
+                "중기 상승 확률 %": stat["UpProb"],
+                "매수 타이밍 %": stat["BuyTiming"],
+                "매도 타이밍 %": stat["SellTiming"],
+                "1년 목표수익 범위": stat["TargetRange"],
+                "리스크 요인": stat["Risk"],
+            }
+        )
+
+    df_mid = pd.DataFrame(rows)
+
+    # 색깔 적용 (상승확률, 매수/매도 타이밍)
+    def colorize_pct_series(series):
+        out = []
+        for v in series:
+            if isinstance(v, (int, float, float)):
+                text = fmt_pct(v)
+                out.append(colorize_value_html(text, v))
+            else:
+                out.append(v)
+        return out
+
+    df_mid["중기 상승 확률 %"] = colorize_pct_series(df_mid["중기 상승 확률 %"])
+    df_mid["매수 타이밍 %"] = colorize_pct_series(df_mid["매수 타이밍 %"])
+    df_mid["매도 타이밍 %"] = colorize_pct_series(df_mid["매도 타이밍 %"])
+
+    return df_mid[
+        ["Ticker", "중기 상승 확률 %", "매수 타이밍 %", "매도 타이밍 %", "1년 목표수익 범위", "리스크 요인"]
+    ].to_html(index=False, escape=False)
+
+
+def build_schd_dividend_html():
+    """
+    SCHD 지난 10년 배당/가격 기반으로 향후 2년 배당 예상 표 생성.
+    """
+    ticker = yf.Ticker("SCHD")
+    try:
+        hist = ticker.history(period="10y")
+        divs = ticker.dividends.dropna()
+    except Exception:
+        return "<p>SCHD 배당 데이터를 불러오지 못했습니다.</p>"
+
+    if hist is None or hist.empty or divs.empty:
+        return "<p>SCHD 배당 데이터가 충분하지 않습니다.</p>"
+
+    # 연도별 배당 합계
+    div_by_year = divs.groupby(divs.index.year).sum()
+
+    # 연도별 평균 가격
+    price_by_year = hist["Close"].groupby(hist.index.year).mean()
+
+    years = sorted(set(div_by_year.index) & set(price_by_year.index))
+    if len(years) < 3:
+        return "<p>SCHD 연도별 배당 데이터가 부족합니다.</p>"
+
+    records = []
+    for y in years:
+        div_ps = float(div_by_year.get(y, 0.0))
+        price_avg = float(price_by_year.get(y, np.nan))
+        yield_pct = div_ps / price_avg * 100.0 if price_avg > 0 else np.nan
+        records.append(
+            {
+                "Year": y,
+                "Type": "Historical",
+                "Avg Price": price_avg,
+                "Dividend / Share": div_ps,
+                "Dividend Yield %": yield_pct,
+            }
+        )
+
+    df_hist = pd.DataFrame(records).sort_values("Year")
+
+    # 최근 5년 기준 CAGR 계산 (배당, 가격)
+    recent = df_hist[df_hist["Type"] == "Historical"].tail(5)
+    if len(recent) >= 2:
+        y0 = recent["Year"].iloc[0]
+        yN = recent["Year"].iloc[-1]
+        n_years = yN - y0
+        if n_years <= 0:
+            div_cagr = 0.0
+            price_cagr = 0.0
+        else:
+            div_cagr = (
+                (recent["Dividend / Share"].iloc[-1] / recent["Dividend / Share"].iloc[0]) ** (1 / n_years) - 1
+            )
+            price_cagr = (
+                (recent["Avg Price"].iloc[-1] / recent["Avg Price"].iloc[0]) ** (1 / n_years) - 1
+            )
+    else:
+        div_cagr = 0.0
+        price_cagr = 0.0
+
+    last_year = int(df_hist["Year"].max())
+    last_div = float(df_hist[df_hist["Year"] == last_year]["Dividend / Share"].iloc[0])
+    last_price = float(df_hist[df_hist["Year"] == last_year]["Avg Price"].iloc[0])
+
+    forecast_records = []
+    for i in range(1, 3):  # 향후 2년
+        year_f = last_year + i
+        div_f = last_div * ((1 + div_cagr) ** i)
+        price_f = last_price * ((1 + price_cagr) ** i)
+        yield_f = div_f / price_f * 100.0 if price_f > 0 else np.nan
+        forecast_records.append(
+            {
+                "Year": year_f,
+                "Type": "Forecast",
+                "Avg Price": price_f,
+                "Dividend / Share": div_f,
+                "Dividend Yield %": yield_f,
+            }
+        )
+
+    df_all = pd.concat([df_hist, pd.DataFrame(forecast_records)], ignore_index=True)
+    df_all["Avg Price"] = df_all["Avg Price"].map(lambda x: fmt_money(x, "$"))
+    df_all["Dividend / Share"] = df_all["Dividend / Share"].map(lambda x: fmt_money(x, "$"))
+    df_all["Dividend Yield %"] = df_all["Dividend Yield %"].map(lambda x: fmt_pct(x) if pd.notnull(x) else "N/A")
+
+    return df_all[["Year", "Type", "Avg Price", "Dividend / Share", "Dividend Yield %"]].to_html(
+        index=False, escape=False
+    )
+
+
+def build_news_section_html(df_enriched):
+    """
+    TFSA 티커별로 yfinance 뉴스(.news)를 가져와
+    날짜/출처/제목(링크)을 표로 만든다.
+    """
+    tfsa_tickers = (
+        df_enriched[df_enriched["Type"].str.upper() == "TFSA"]["Ticker"]
+        .dropna()
+        .unique()
+        .tolist()
+    )
+    if not tfsa_tickers:
+        return "<p>TFSA 종목이 없습니다.</p>"
+
+    sections = []
+    for t in sorted(tfsa_tickers):
+        try:
+            news_items = yf.Ticker(t).news or []
+        except Exception:
+            news_items = []
+
+        if not news_items:
+            sections.append(f"<h3>{t}</h3><p>관련 뉴스 데이터를 불러올 수 없습니다.</p>")
+            continue
+
+        rows = []
+        for item in news_items[:5]:
+            title = item.get("title", "No title")
+            link = item.get("link", "#")
+            provider = item.get("provider", "") or item.get("publisher", "")
+            ts = item.get("providerPublishTime") or item.get("published_time", None)
+            if ts is not None:
+                try:
+                    dt = datetime.fromtimestamp(int(ts))
+                    date_str = dt.strftime("%Y-%m-%d")
+                except Exception:
+                    date_str = ""
+            else:
+                date_str = ""
+
+            title_link = f'<a href="{link}">{title}</a>'
+            rows.append(
+                {
+                    "Date": date_str,
+                    "Source": provider,
+                    "Title / Summary": title_link,
+                }
+            )
+
+        df_news = pd.DataFrame(rows)
+        sections.append(f"<h3>{t}</h3>" + df_news.to_html(index=False, escape=False))
+
+    return "<br/>".join(sections)
+
+
+# =========================
 # HTML 리포트 생성
 # =========================
 
@@ -548,12 +845,22 @@ def build_html_report(df_enriched, account_summary):
     tfsa_table = make_holdings_table("TFSA")
     resp_table = make_holdings_table("RESP")
 
-    # ---------- 3) HTML 템플릿 ----------
+    # ---------- 3) 중단기 투자 분석 (TFSA, SCHD 제외) ----------
+    midterm_html = build_midterm_analysis_html(df_enriched)
+
+    # ---------- 4) SCHD 배당 분석 ----------
+    schd_div_html = build_schd_dividend_html()
+
+    # ---------- 5) 뉴스/분석 섹션 ----------
+    news_html = build_news_section_html(df_enriched)
+
+    # ---------- 6) HTML 템플릿 ----------
     style = """
     <style>
     body { font-family: Arial, sans-serif; margin: 20px; background:#fafafa; }
     h1 { text-align:center; }
     h2 { margin-top:30px; color:#2c3e50; border-bottom:2px solid #ddd; padding-bottom:5px; }
+    h3 { margin-top:20px; color:#34495e; }
     table { border-collapse: collapse; width:100%; margin:10px 0; }
     th, td { border:1px solid #ddd; padding:6px; text-align:center; font-size:13px; }
     th { background:#f4f6f6; }
@@ -588,6 +895,22 @@ def build_html_report(df_enriched, account_summary):
         <div class="section">
           <h2>🎓 RESP Holdings (in CAD)</h2>
           {resp_table}
+        </div>
+
+        <div class="section">
+          <h2>📈 중단기 투자의 통합 분석 (TFSA, SCHD 제외)</h2>
+          <p class="muted">※ 단순 가격 모멘텀·변동성 기반 휴리스틱으로 계산된 참고용 지표입니다. 실제 투자 판단은 별도 리스크 검토가 필요합니다.</p>
+          {midterm_html}
+        </div>
+
+        <div class="section">
+          <h2>💰 장기 투자의 배당금 분석 (SCHD)</h2>
+          {schd_div_html}
+        </div>
+
+        <div class="section">
+          <h2>🔎 참고한 주요 뉴스/분석 (TFSA 보유 종목)</h2>
+          {news_html}
         </div>
       </body>
     </html>
