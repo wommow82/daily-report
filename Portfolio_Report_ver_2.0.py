@@ -18,13 +18,9 @@ from email.mime.multipart import MIMEMultipart
 
 def fmt_money(x, currency_symbol="$", digits=2):
     try:
-        return f"{float(x):,.{digits}f}{'' if currency_symbol == '' else ''}".join([currency_symbol, ""])[0:len(currency_symbol)+len(f"{float(x):,.{digits}f}")]
+        return f"{currency_symbol}{float(x):,.{digits}f}"
     except Exception:
-        try:
-            float(x)
-            return f"{currency_symbol}{float(x):,.{digits}f}"
-        except Exception:
-            return "N/A"
+        return "N/A"
 
 
 def fmt_pct(x, digits=2):
@@ -44,11 +40,7 @@ def safe_float(x, default=0.0):
 
 
 def colorize_value_html(text, raw_value):
-    """
-    값이 양수면 초록, 음수면 빨강 폰트로 감싸는 helper.
-    text: 이미 포맷된 문자열 (예: "$123.45", "3.21%")
-    raw_value: 부호 판단용 숫자값
-    """
+    """양수 → 초록, 음수 → 빨강."""
     try:
         val = float(raw_value)
     except Exception:
@@ -69,11 +61,6 @@ def colorize_value_html(text, raw_value):
 # =========================
 
 def get_gspread_client():
-    """
-    ServiceAccountCredentials + gspread 로 Google Sheets 클라이언트를 생성.
-    필요 환경변수:
-        - GOOGLE_APPLICATION_CREDENTIALS: 서비스 계정 JSON 파일 경로
-    """
     json_keyfile = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
     if not json_keyfile:
         raise EnvironmentError(
@@ -89,12 +76,6 @@ def get_gspread_client():
 
 
 def open_gsheet(gs_id, retries=3, delay=5):
-    """
-    Google Sheet 열기 (503 에러 대비 재시도 포함)
-
-    필요 환경변수:
-        - GSHEET_ID: 포트폴리오 스프레드시트 ID
-    """
     if not gs_id:
         raise EnvironmentError("환경변수 GSHEET_ID 가 설정되어 있지 않습니다.")
 
@@ -118,10 +99,6 @@ def open_gsheet(gs_id, retries=3, delay=5):
 # =========================
 
 def get_last_and_prev_close(ticker, period="5d"):
-    """
-    단일 종목의 마지막 종가 / 그 전 종가를 반환.
-    조회 실패 시 (None, None) 반환.
-    """
     try:
         hist = yf.Ticker(ticker).history(period=period)
         if hist is None or hist.empty:
@@ -137,11 +114,7 @@ def get_last_and_prev_close(ticker, period="5d"):
 
 
 def get_usd_cad_rate():
-    """
-    Yahoo Finance 의 'CAD=X' (USD/CAD) 환율 사용.
-    - 반환값: 1 USD = rate CAD
-    - 실패하면 1.35 (기본값) 사용
-    """
+    """1 USD = ? CAD"""
     try:
         hist = yf.Ticker("CAD=X").history(period="5d")
         if hist is None or hist.empty:
@@ -153,13 +126,6 @@ def get_usd_cad_rate():
 
 
 def get_fx_multipliers(base_currency):
-    """
-    BaseCurrency 에 따라 USD/CAD → 기준통화 변환 계수 리턴.
-    - base_currency: 'USD' 또는 'CAD'
-
-    반환:
-        fx_usd_to_base, fx_cad_to_base
-    """
     base = (base_currency or "USD").upper()
     usd_cad = get_usd_cad_rate()  # 1 USD = usd_cad CAD
 
@@ -170,7 +136,6 @@ def get_fx_multipliers(base_currency):
         fx_usd_to_base = usd_cad
         fx_cad_to_base = 1.0
     else:
-        # 기타 통화는 임시로 1:1
         fx_usd_to_base = 1.0
         fx_cad_to_base = 1.0
 
@@ -183,34 +148,20 @@ def get_fx_multipliers(base_currency):
 
 def load_portfolio_from_gsheet():
     """
-    Google Sheet (GSHEET_ID)에서
-    - Holdings 시트
-    - Settings 시트
-    를 읽어 포트폴리오 정보를 반환.
-
-    구조:
-        Holdings:
-            - Ticker
-            - Shares
-            - AvgPrice
-            - Type (TFSA / RESP)
-
-        Settings:
-            - TFSA_CashUSD
-            - RESP_CashCAD
-            - TFSA_NetDepositCAD
-            - RESP_NetDepositCAD
-            - BaseCurrency ('USD' 또는 'CAD')
-        (기존 CashUSD 만 있던 경우 TFSA_CashUSD가 없으면 fallback)
+    Sheets 구조:
+      Holdings:
+        - Ticker, Shares, AvgPrice, Type(TFSA/RESP)
+      Settings:
+        - TFSA_CashUSD, RESP_CashCAD
+        - TFSA_NetDepositCAD, RESP_NetDepositCAD
+        - BaseCurrency
     """
     gs_id = os.environ.get("GSHEET_ID")
     sh = open_gsheet(gs_id)
 
-    # Holdings
     ws_hold = sh.worksheet("Holdings")
     df_hold = pd.DataFrame(ws_hold.get_all_records())
 
-    # Settings
     ws_settings = sh.worksheet("Settings")
     df_settings = pd.DataFrame(ws_settings.get_all_records())
 
@@ -219,19 +170,16 @@ def load_portfolio_from_gsheet():
 
     settings = dict(zip(df_settings["Key"].astype(str), df_settings["Value"]))
 
-    # 현금
     tfsa_cash_usd = safe_float(
         settings.get("TFSA_CashUSD", settings.get("CashUSD", 0.0)), 0.0
     )
     resp_cash_cad = safe_float(settings.get("RESP_CashCAD", 0.0), 0.0)
 
-    # 순투입자본 (CAD 기준)
     tfsa_netdep_cad = safe_float(settings.get("TFSA_NetDepositCAD", 0.0), 0.0)
     resp_netdep_cad = safe_float(settings.get("RESP_NetDepositCAD", 0.0), 0.0)
 
     base_currency = str(settings.get("BaseCurrency", "USD")).upper()
 
-    # Holdings 전처리
     for col in ["Ticker", "Shares", "AvgPrice"]:
         if col not in df_hold.columns:
             raise ValueError(f"'Holdings' 시트에 '{col}' 열이 없습니다.")
@@ -242,7 +190,6 @@ def load_portfolio_from_gsheet():
         0.0
     )
 
-    # Type 열: 없으면 기본값 TFSA
     if "Type" not in df_hold.columns:
         df_hold["Type"] = "TFSA"
     else:
@@ -273,15 +220,16 @@ def enrich_holdings_with_prices(
     resp_netdep_cad,
 ):
     """
-    Holdings DataFrame 에 시세와 평가액/손익을 붙이고,
-    TFSA / RESP / TOTAL 요약을 함께 반환.
-
-    반환:
-        df_enriched, account_summary
+    TFSA: USD 계좌
+    RESP: CAD 계좌
+    - summary[acc]["*_native"]는 계좌 통화 기준 값
+    - summary[acc]["*"] (base)은 BaseCurrency 기준 값
     """
     df = df_hold.copy()
 
     fx_usd_to_base, fx_cad_to_base = get_fx_multipliers(base_currency)
+    usd_cad = get_usd_cad_rate()
+    cad_to_usd = 1.0 / usd_cad if usd_cad != 0 else 1.0
 
     accounts = ["TFSA", "RESP"]
     summary = {
@@ -290,27 +238,27 @@ def enrich_holdings_with_prices(
             "holdings_value_yesterday": 0.0,
             "cash_native": 0.0,
             "cash_base": 0.0,
+            "holdings_value_today_native": 0.0,
+            "holdings_value_yesterday_native": 0.0,
             "net_deposit_cad": 0.0,
-            "net_deposit_base": 0.0,
-            "pl_vs_deposit_base": 0.0,
-            "pl_vs_deposit_pct": 0.0,
+            "net_deposit_native": 0.0,
         }
         for acc in accounts
     }
 
-    # 계좌별 현금
-    summary["TFSA"]["cash_native"] = tfsa_cash_usd
+    # 현금 (native)
+    summary["TFSA"]["cash_native"] = tfsa_cash_usd   # USD
+    summary["RESP"]["cash_native"] = resp_cash_cad   # CAD
+    # 현금 (base)
     summary["TFSA"]["cash_base"] = tfsa_cash_usd * fx_usd_to_base
-
-    summary["RESP"]["cash_native"] = resp_cash_cad
     summary["RESP"]["cash_base"] = resp_cash_cad * fx_cad_to_base
 
-    # 순투입자본(CAD) → 기준통화로 환산
+    # 순투입자본 CAD
     summary["TFSA"]["net_deposit_cad"] = tfsa_netdep_cad
     summary["RESP"]["net_deposit_cad"] = resp_netdep_cad
-
-    summary["TFSA"]["net_deposit_base"] = tfsa_netdep_cad * fx_cad_to_base
-    summary["RESP"]["net_deposit_base"] = resp_netdep_cad * fx_cad_to_base
+    # 순투입자본 native
+    summary["TFSA"]["net_deposit_native"] = tfsa_netdep_cad * cad_to_usd  # USD
+    summary["RESP"]["net_deposit_native"] = resp_netdep_cad              # CAD
 
     # 결과 컬럼 초기화
     df["LastPrice"] = np.nan
@@ -332,7 +280,6 @@ def enrich_holdings_with_prices(
             acc_type = "TFSA"
             df.at[idx, "Type"] = "TFSA"
 
-        # 계좌별 통화 가정
         if acc_type == "TFSA":
             fx_to_base = fx_usd_to_base
         else:
@@ -367,58 +314,70 @@ def enrich_holdings_with_prices(
 
         summary[acc_type]["holdings_value_today"] += position_value_base
         summary[acc_type]["holdings_value_yesterday"] += position_prev_value_base
+        summary[acc_type]["holdings_value_today_native"] += position_value_native
+        summary[acc_type]["holdings_value_yesterday_native"] += position_prev_native
 
-    # 계좌별 today / yesterday / Δ 및 deposit 대비 손익
+    # 계좌별 today/yesterday/Δ (native) + deposit 대비 손익 (native)
     for acc in accounts:
-        today = summary[acc]["holdings_value_today"] + summary[acc]["cash_base"]
-        yesterday = summary[acc]["holdings_value_yesterday"] + summary[acc]["cash_base"]
-        diff = today - yesterday
-        pct = (diff / yesterday * 100.0) if yesterday != 0 else 0.0
+        hv_today_native = summary[acc]["holdings_value_today_native"]
+        hv_yesterday_native = summary[acc]["holdings_value_yesterday_native"]
+        cash_native = summary[acc]["cash_native"]
+        net_dep_native = summary[acc]["net_deposit_native"]
 
-        net_dep_base = summary[acc]["net_deposit_base"]
-        pl_vs_dep = today - net_dep_base
-        pl_vs_dep_pct = (pl_vs_dep / net_dep_base * 100.0) if net_dep_base != 0 else 0.0
+        today_native = hv_today_native + cash_native
+        yesterday_native = hv_yesterday_native + cash_native
+        diff_native = today_native - yesterday_native
+        pct_native = (
+            diff_native / yesterday_native * 100.0 if yesterday_native != 0 else 0.0
+        )
 
-        summary[acc]["total_today"] = today
-        summary[acc]["total_yesterday"] = yesterday
-        summary[acc]["total_diff"] = diff
-        summary[acc]["total_diff_pct"] = pct
-        summary[acc]["pl_vs_deposit_base"] = pl_vs_dep
-        summary[acc]["pl_vs_deposit_pct"] = pl_vs_dep_pct
+        pl_vs_dep_native = today_native - net_dep_native
+        pl_vs_dep_pct_native = (
+            pl_vs_dep_native / net_dep_native * 100.0
+            if net_dep_native != 0
+            else 0.0
+        )
 
-    # TOTAL (TFSA + RESP)
-    total_today = summary["TFSA"]["total_today"] + summary["RESP"]["total_today"]
-    total_yesterday = (
+        summary[acc]["total_today_native"] = today_native
+        summary[acc]["total_yesterday_native"] = yesterday_native
+        summary[acc]["total_diff_native"] = diff_native
+        summary[acc]["total_diff_pct_native"] = pct_native
+        summary[acc]["pl_vs_deposit_native"] = pl_vs_dep_native
+        summary[acc]["pl_vs_deposit_pct_native"] = pl_vs_dep_pct_native
+
+        # 기준통화 기준 (detail/table 용)
+        hv_today_base = summary[acc]["holdings_value_today"]
+        hv_yesterday_base = summary[acc]["holdings_value_yesterday"]
+        cash_base = summary[acc]["cash_base"]
+        today_base = hv_today_base + cash_base
+        yesterday_base = hv_yesterday_base + cash_base
+        diff_base = today_base - yesterday_base
+        pct_base = (
+            diff_base / yesterday_base * 100.0 if yesterday_base != 0 else 0.0
+        )
+
+        summary[acc]["total_today"] = today_base
+        summary[acc]["total_yesterday"] = yesterday_base
+        summary[acc]["total_diff"] = diff_base
+        summary[acc]["total_diff_pct"] = pct_base
+
+    # TOTAL (기준통화 기준, 참고용)
+    total_today_base = summary["TFSA"]["total_today"] + summary["RESP"]["total_today"]
+    total_yesterday_base = (
         summary["TFSA"]["total_yesterday"] + summary["RESP"]["total_yesterday"]
     )
-    total_diff = total_today - total_yesterday
-    total_pct = (total_diff / total_yesterday * 100.0) if total_yesterday != 0 else 0.0
-
-    total_net_dep_cad = (
-        summary["TFSA"]["net_deposit_cad"] + summary["RESP"]["net_deposit_cad"]
-    )
-    # TOTAL 순투입자본(CAD)도 CAD→base 로 변환
-    fx_usd_to_base, fx_cad_to_base = get_fx_multipliers(base_currency)
-    total_net_dep_base = total_net_dep_cad * fx_cad_to_base
-    total_pl_vs_dep = total_today - total_net_dep_base
-    total_pl_vs_dep_pct = (
-        total_pl_vs_dep / total_net_dep_base * 100.0
-        if total_net_dep_base != 0
+    total_diff_base = total_today_base - total_yesterday_base
+    total_pct_base = (
+        total_diff_base / total_yesterday_base * 100.0
+        if total_yesterday_base != 0
         else 0.0
     )
 
     summary["TOTAL"] = {
-        "total_today": total_today,
-        "total_yesterday": total_yesterday,
-        "total_diff": total_diff,
-        "total_diff_pct": total_pct,
-        "cash_native": summary["TFSA"]["cash_native"]
-        + summary["RESP"]["cash_native"],
-        "cash_base": summary["TFSA"]["cash_base"] + summary["RESP"]["cash_base"],
-        "net_deposit_cad": total_net_dep_cad,
-        "net_deposit_base": total_net_dep_base,
-        "pl_vs_deposit_base": total_pl_vs_dep,
-        "pl_vs_deposit_pct": total_pl_vs_dep_pct,
+        "total_today": total_today_base,
+        "total_yesterday": total_yesterday_base,
+        "total_diff": total_diff_base,
+        "total_diff_pct": total_pct_base,
     }
 
     summary["meta"] = {
@@ -436,63 +395,99 @@ def enrich_holdings_with_prices(
 
 def build_html_report(df_enriched, account_summary):
     base_ccy = account_summary["meta"]["base_currency"]
-    ccy_symbol = "$"  # CAD / USD 모두 $ 표시
+    ccy_symbol = "$"
 
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-    # 1) 계좌 요약 테이블 구성
+    # ---------- 전체 자산 CAD 기준 한 줄 요약 ----------
+    usd_cad = get_usd_cad_rate()
+
+    tfsa_today_usd = account_summary.get("TFSA", {}).get(
+        "total_today_native", 0.0
+    )  # USD
+    tfsa_yest_usd = account_summary.get("TFSA", {}).get(
+        "total_yesterday_native", 0.0
+    )
+    resp_today_cad = account_summary.get("RESP", {}).get(
+        "total_today_native", 0.0
+    )  # CAD
+    resp_yest_cad = account_summary.get("RESP", {}).get(
+        "total_yesterday_native", 0.0
+    )
+
+    total_today_cad = tfsa_today_usd * usd_cad + resp_today_cad
+    total_yest_cad = tfsa_yest_usd * usd_cad + resp_yest_cad
+    total_diff_cad = total_today_cad - total_yest_cad
+    total_diff_pct = (
+        total_diff_cad / total_yest_cad * 100.0 if total_yest_cad != 0 else 0.0
+    )
+
+    total_today_str = fmt_money(total_today_cad, "$")
+    total_diff_str = fmt_money(total_diff_cad, "$")
+    total_diff_pct_str = fmt_pct(total_diff_pct)
+
+    total_diff_str_colored = colorize_value_html(total_diff_str, total_diff_cad)
+    total_diff_pct_str_colored = colorize_value_html(
+        total_diff_pct_str, total_diff_pct
+    )
+
+    total_assets_line = (
+        f"<p><strong>Total Assets (총 자산, CAD):</strong> "
+        f"{total_today_str}&nbsp;&nbsp;&nbsp;"
+        f"<strong>Δ vs. Yesterday (전일 대비 변화):</strong> "
+        f"{total_diff_str_colored} ({total_diff_pct_str_colored})</p>"
+    )
+
+    # ---------- 1) 계좌 요약 테이블 (TFSA/RESP) ----------
     summary_rows = []
-    for acc in ["TFSA", "RESP", "TOTAL"]:
+    for acc in ["TFSA", "RESP"]:
         if acc not in account_summary:
             continue
         s = account_summary[acc]
 
-        # raw values
-        total_today = s["total_today"]
-        total_diff = s["total_diff"]
-        total_diff_pct = s["total_diff_pct"]
-        net_dep_cad = s.get("net_deposit_cad", 0.0)
-        net_dep_base = s.get("net_deposit_base", 0.0)
-        pl_vs_dep = s.get("pl_vs_deposit_base", 0.0)
-        pl_vs_dep_pct = s.get("pl_vs_deposit_pct", 0.0)
+        acc_label = "TFSA (USD)" if acc == "TFSA" else "RESP (CAD)"
 
-        # 포맷
-        total_today_str = fmt_money(total_today, ccy_symbol)
+        total_today = s["total_today_native"]
+        total_diff = s["total_diff_native"]
+        total_diff_pct = s["total_diff_pct_native"]
+        net_dep_native = s.get("net_deposit_native", 0.0)
+        pl_vs_dep_native = s.get("pl_vs_deposit_native", 0.0)
+        pl_vs_dep_pct_native = s.get("pl_vs_deposit_pct_native", 0.0)
+        cash_native = s.get("cash_native", 0.0)
+
+        total_today_str_acc = fmt_money(total_today, ccy_symbol)
         diff_str = fmt_money(total_diff, ccy_symbol)
         diff_pct_str = fmt_pct(total_diff_pct)
-        net_dep_cad_str = fmt_money(net_dep_cad, "C$")
-        net_dep_base_str = fmt_money(net_dep_base, ccy_symbol)
-        pl_vs_dep_str = fmt_money(pl_vs_dep, ccy_symbol)
-        pl_vs_dep_pct_str = fmt_pct(pl_vs_dep_pct)
+        net_dep_str = fmt_money(net_dep_native, ccy_symbol)
+        pl_vs_dep_str = fmt_money(pl_vs_dep_native, ccy_symbol)
+        pl_vs_dep_pct_str = fmt_pct(pl_vs_dep_pct_native)
+        cash_str = fmt_money(cash_native, ccy_symbol)
 
-        # 색상 적용 (오름/내림)
         diff_str_colored = colorize_value_html(diff_str, total_diff)
         diff_pct_str_colored = colorize_value_html(diff_pct_str, total_diff_pct)
-        pl_vs_dep_str_colored = colorize_value_html(pl_vs_dep_str, pl_vs_dep)
+        pl_vs_dep_str_colored = colorize_value_html(pl_vs_dep_str, pl_vs_dep_native)
         pl_vs_dep_pct_str_colored = colorize_value_html(
-            pl_vs_dep_pct_str, pl_vs_dep_pct
+            pl_vs_dep_pct_str, pl_vs_dep_pct_native
         )
 
         summary_rows.append(
             {
-                "Account": acc,
-                f"Total (Today, {base_ccy})": total_today_str,
-                f"Δ vs Yesterday ({base_ccy})": diff_str_colored,
+                "Account": acc_label,
+                "Net Deposit (Base)": net_dep_str,
+                "Total (Today, Base)": total_today_str_acc,
+                "Δ vs Yesterday (Base)": diff_str_colored,
                 "Δ %": diff_pct_str_colored,
-                "Net Deposit (CAD)": net_dep_cad_str,
-                f"Net Deposit ({base_ccy})": net_dep_base_str,
-                "P/L vs Deposit": pl_vs_dep_str_colored,
+                "P/L vs Deposit (Base)": pl_vs_dep_str_colored,
                 "P/L vs Deposit %": pl_vs_dep_pct_str_colored,
-                "Cash (base)": fmt_money(s.get("cash_base", 0.0), ccy_symbol),
+                "Cash (Base)": cash_str,
             }
         )
 
     df_summary = pd.DataFrame(summary_rows)
 
-    # 2) 상세 보유 종목 테이블 (TFSA/RESP)
+    # ---------- 2) 상세 보유 종목 테이블 (BaseCurrency 기준) ----------
     df_view = df_enriched.copy()
 
-    # 기본 포맷
     df_view["Shares"] = df_view["Shares"].map(lambda x: f"{float(x):,.2f}")
     df_view["AvgPrice"] = df_view["AvgPrice"].map(
         lambda x: fmt_money(x, ccy_symbol)
@@ -504,7 +499,6 @@ def build_html_report(df_enriched, account_summary):
         lambda x: fmt_money(x, ccy_symbol)
     )
 
-    # Profit/Loss 컬럼은 색깔 입혀서 포맷
     raw_pl_base = df_enriched["ProfitLossBase"].tolist()
     raw_pl_pct = df_enriched["ProfitLossPct"].tolist()
 
@@ -546,7 +540,7 @@ def build_html_report(df_enriched, account_summary):
     tfsa_table = _table_for_account("TFSA")
     resp_table = _table_for_account("RESP")
 
-    # 3) HTML 템플릿
+    # ---------- 3) HTML 템플릿 ----------
     style = """
     <style>
     body { font-family: Arial, sans-serif; margin: 20px; background:#fafafa; }
@@ -574,16 +568,17 @@ def build_html_report(df_enriched, account_summary):
 
         <div class="section">
           <h2>🏦 Account Summary (TFSA / RESP / Total)</h2>
+          {total_assets_line}
           {df_summary.to_html(index=False, escape=False)}
         </div>
 
         <div class="section">
-          <h2>📂 TFSA Holdings</h2>
+          <h2>📂 TFSA Holdings (in {base_ccy})</h2>
           {tfsa_table}
         </div>
 
         <div class="section">
-          <h2>🎓 RESP Holdings</h2>
+          <h2>🎓 RESP Holdings (in {base_ccy})</h2>
           {resp_table}
         </div>
       </body>
@@ -628,7 +623,6 @@ def send_email_html(subject, html_body):
 # =========================
 
 def main():
-    # 1) Google Sheet 에서 포트폴리오 로드
     (
         df_hold,
         tfsa_cash_usd,
@@ -638,7 +632,6 @@ def main():
         resp_netdep_cad,
     ) = load_portfolio_from_gsheet()
 
-    # 2) 시세/평가액 계산
     df_enriched, acc_summary = enrich_holdings_with_prices(
         df_hold,
         base_currency=base_currency,
@@ -648,16 +641,13 @@ def main():
         resp_netdep_cad=resp_netdep_cad,
     )
 
-    # 3) HTML 리포트 생성
     html_doc = build_html_report(df_enriched, acc_summary)
 
-    # 4) 로컬 파일 저장 (선택)
     outname = f"portfolio_daily_report_{datetime.now().strftime('%Y%m%d')}.html"
     with open(outname, "w", encoding="utf-8") as f:
         f.write(html_doc)
     print(f"Report saved: {outname}")
 
-    # 5) 이메일 발송
     subject = f"📊 Portfolio Daily Report - {datetime.now().strftime('%Y-%m-%d')}"
     send_email_html(subject, html_doc)
 
