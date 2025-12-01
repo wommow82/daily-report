@@ -401,6 +401,7 @@ def analyze_midterm_ticker(ticker):
     가격/변동성/간단 밸류에이션 + 최근 뉴스 제목을 합쳐
     휴리스틱 기반 중단기 분석을 생성.
     - 수치는 5~95% 범위로 클리핑.
+    - 리스크 요인에 PER, Beta 등 숫자를 괄호 안에 포함.
     """
     tk = yf.Ticker(ticker)
     try:
@@ -415,7 +416,7 @@ def analyze_midterm_ticker(ticker):
             "BuyTiming": None,
             "SellTiming": None,
             "TargetRange": "데이터 부족",
-            "Risk": "시세 데이터 부족 / 기본적인 재무·뉴스 확인 필요",
+            "Risk": "시세 데이터 부족 / 기본적인 재무·뉴스·정책 이슈 별도 확인 필요",
         }
 
     last = float(closes.iloc[-1])
@@ -482,33 +483,40 @@ def analyze_midterm_ticker(ticker):
     fpe = safe_float(info.get("forwardPE"), None)
     beta = safe_float(info.get("beta"), None) or safe_float(info.get("beta3Year"), None)
 
-    # 변동성 레벨 설명
+    vol_pct = vol_annual * 100.0
+
+    # 변동성 레벨 설명 (숫자 포함)
     if vol_annual > 0.6:
-        risk_vol = "연간 변동성 매우 높음"
+        risk_vol = f"연간 변동성 매우 높음(약 {vol_pct:.1f}%)"
     elif vol_annual > 0.4:
-        risk_vol = "연간 변동성 높음"
+        risk_vol = f"연간 변동성 높음(약 {vol_pct:.1f}%)"
     elif vol_annual > 0.25:
-        risk_vol = "연간 변동성 중간 이상"
+        risk_vol = f"연간 변동성 중간 이상(약 {vol_pct:.1f}%)"
     else:
-        risk_vol = "연간 변동성 비교적 낮음"
+        risk_vol = f"연간 변동성 비교적 낮음(약 {vol_pct:.1f}%)"
 
-    # 밸류에이션
+    # 밸류에이션 (PER 숫자 괄호 포함)
     if pe and pe > 40:
-        risk_val = "밸류에이션 부담(높은 PER)"
+        risk_val = f"밸류에이션 부담(높은 PER, 약 {pe:.1f}배)"
     elif fpe and fpe > 30:
-        risk_val = "성장 기대 반영된 높은 밸류에이션"
+        risk_val = f"성장 기대 반영된 높은 밸류에이션(Fwd PER 약 {fpe:.1f}배)"
     elif pe and pe < 15:
-        risk_val = "상대적으로 낮은 PER"
+        risk_val = f"상대적으로 낮은 PER(약 {pe:.1f}배)"
     else:
-        risk_val = "밸류에이션 중립"
+        if pe:
+            risk_val = f"밸류에이션 중립(PER 약 {pe:.1f}배)"
+        else:
+            risk_val = "밸류에이션 중립(공개 PER 정보 제한)"
 
-    # 베타
+    # 베타 (숫자 괄호 포함)
     if beta and beta > 1.5:
-        risk_beta = "시장 대비 높은 베타(지수 하락 시 민감)"
+        risk_beta = f"시장 대비 높은 베타(약 {beta:.2f}), 지수·정책 변화에 민감"
     elif beta and beta < 0.8:
-        risk_beta = "시장 대비 방어적 성향"
+        risk_beta = f"시장 대비 방어적 베타(약 {beta:.2f})"
+    elif beta:
+        risk_beta = f"시장과 유사한 베타(약 {beta:.2f})"
     else:
-        risk_beta = "시장과 유사한 베타"
+        risk_beta = "베타 정보 제한(시장 민감도 별도 확인 필요)"
 
     # 최근 뉴스 한 줄
     recent_news = ""
@@ -537,11 +545,12 @@ def analyze_midterm_ticker(ticker):
         "Risk": risk_text,
     }
 
-
 def build_midterm_analysis_html(df_enriched):
     """
     TFSA 종목 중 SCHD를 제외한 티커에 대해
-    중단기 투자 통합 분석 표를 HTML로 생성.
+    1) 요약표: Ticker + 확률/타이밍/목표수익
+    2) 상세표: 위 정보 + 리스크 요인
+    의 두 개 HTML 테이블을 생성.
     """
     tfsa_tickers = (
         df_enriched[df_enriched["Type"].str.upper() == "TFSA"]["Ticker"]
@@ -594,9 +603,25 @@ def build_midterm_analysis_html(df_enriched):
     df_mid["매수 타이밍 %"] = colorize_pct_series(df_mid["매수 타이밍 %"])
     df_mid["매도 타이밍 %"] = colorize_pct_series(df_mid["매도 타이밍 %"])
 
-    return df_mid[
-        ["Ticker", "중기 상승 확률 %", "매수 타이밍 %", "매도 타이밍 %", "1년 목표수익 범위", "리스크 요인"]
-    ].to_html(index=False, escape=False)
+    # 1) 요약표 (리스크 요인 제외)
+    cols_summary = [
+        "Ticker",
+        "중기 상승 확률 %",
+        "매수 타이밍 %",
+        "매도 타이밍 %",
+        "1년 목표수익 범위",
+    ]
+    df_summary = df_mid[cols_summary].copy()
+
+    # 2) 상세표 (리스크 요인 포함)
+    cols_detail = cols_summary + ["리스크 요인"]
+    df_detail = df_mid[cols_detail].copy()
+
+    html_summary = df_summary.to_html(index=False, escape=False)
+    html_detail = df_detail.to_html(index=False, escape=False)
+
+    # 두 표를 위/아래로 배치
+    return html_summary + "<br/><br/>" + html_detail
 
 
 def build_schd_dividend_html():
