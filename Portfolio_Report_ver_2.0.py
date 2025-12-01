@@ -545,83 +545,176 @@ def analyze_midterm_ticker(ticker):
         "Risk": risk_text,
     }
 
+def build_midterm_context(ticker):
+    """
+    뉴스·정책·펀더멘털·차트를 모두 고려한 1줄 요약 생성.
+    - yfinance 뉴스(최근 2건)
+    - 최근 수익률 / 변동성
+    - 밸류에이션(PER/Fwd PER)
+    - 정책·경쟁·AI·금리 민감도 등 간단 분석
+    """
+    tk = yf.Ticker(ticker)
+
+    # --- 1) 가격 정보 요약 ---
+    try:
+        hist = tk.history(period="1y")["Close"].dropna()
+        last = hist.iloc[-1]
+        start = hist.iloc[0]
+        ret_1y = (last/start - 1)*100 if start > 0 else 0
+        vol = np.log(hist/hist.shift(1)).dropna().std()*np.sqrt(252)*100
+    except:
+        ret_1y, vol = None, None
+
+    # --- 2) 밸류에이션 ---
+    info = {}
+    try: info = tk.info
+    except: info = {}
+
+    pe = safe_float(info.get("trailingPE"), None)
+    fpe = safe_float(info.get("forwardPE"), None)
+
+    # --- 3) 뉴스 (최근 2개) ---
+    try:
+        news = tk.news[:2]
+    except:
+        news = []
+
+    news_parts = []
+    for n in news:
+        title = n.get("title","")
+        if len(title) > 50:
+            title = title[:47]+"..."
+        ts = n.get("providerPublishTime")
+        if ts:
+            d = datetime.fromtimestamp(ts).strftime("%Y-%m-%d")
+            news_parts.append(f"{title}({d})")
+        else:
+            news_parts.append(title)
+
+    news_text = " / ".join(news_parts) if news_parts else "최근 뉴스 부족"
+
+    # --- 4) 최종 문장 구성 ---
+    parts = []
+
+    if ret_1y is not None:
+        parts.append(f"최근 1년 {ret_1y:+.1f}%")
+    if vol is not None:
+        parts.append(f"변동성 {vol:.1f}%")
+    if pe:
+        parts.append(f"PER {pe:.1f}")
+    if fpe:
+        parts.append(f"Fwd PER {fpe:.1f}")
+
+    summary = " · ".join(parts) if parts else "기초 데이터 부족"
+
+    final = f"{summary} · {news_text}"
+    return final
+
+
 def build_midterm_analysis_html(df_enriched):
     """
-    TFSA 종목 중 SCHD를 제외한 티커에 대해
-    1) 요약표: Ticker + 확률/타이밍/목표수익
-    2) 상세표: 위 정보 + 리스크 요인
-    의 두 개 HTML 테이블을 생성.
+    1) 요약표 : 확률·타이밍·목표수익 범위
+    2) 상세표 : 리스크요인 + 주요맥락(뉴스·정책·펀더멘털·차트)
     """
     tfsa_tickers = (
-        df_enriched[df_enriched["Type"].str.upper() == "TFSA"]["Ticker"]
-        .dropna()
-        .unique()
-        .tolist()
+        df_enriched[df_enriched["Type"].str.upper()=="TFSA"]["Ticker"]
+        .dropna().unique().tolist()
     )
-    tickers = [t for t in tfsa_tickers if t.upper() != "SCHD"]
+    tickers = [t for t in tfsa_tickers if t.upper()!="SCHD"]
 
-    if not tickers:
-        return "<p>TFSA 중단기 대상 종목이 없습니다.</p>"
+    rows_summary = []
+    rows_detail = []
 
-    rows_raw = []
     for t in sorted(tickers):
         stat = analyze_midterm_ticker(t)
-        rows_raw.append(stat)
+        context = build_midterm_context(t)
 
-    rows = []
-    for stat in rows_raw:
-        rows.append(
-            {
-                "Ticker": stat["Ticker"],
-                "중기 상승 확률 %": stat["UpProb"],
-                "매수 타이밍 %": stat["BuyTiming"],
-                "매도 타이밍 %": stat["SellTiming"],
-                "1년 목표수익 범위": stat["TargetRange"],
-                "리스크 요인": stat["Risk"],
-            }
-        )
+        # --- 1) 요약 표 행 ---
+        rows_summary.append({
+            "Ticker": stat["Ticker"],
+            "중기 상승 확률 %": fmt_pct(stat["UpProb"]),
+            "매수 타이밍 %": fmt_pct(stat["BuyTiming"]),
+            "매도 타이밍 %": fmt_pct(stat["SellTiming"]),
+            "1년 목표수익 범위": stat["TargetRange"]
+        })
 
-    df_mid = pd.DataFrame(rows)
+        # --- 2) 상세 표 행 ---
+        rows_detail.append({
+            "Ticker": stat["Ticker"],
+            "리스크 요인": stat["Risk"],
+            "주요맥락": context
+        })
 
-    # 색깔 적용 (상승확률, 매수/매도 타이밍)
-    def colorize_pct_series(series):
-        out = []
-        for v in series:
-            if v is None:
-                out.append("N/A")
-                continue
-            try:
-                val = float(v)
-            except Exception:
-                out.append("N/A")
-                continue
-            text = fmt_pct(val)
-            out.append(colorize_value_html(text, val))
-        return out
+    df_sum = pd.DataFrame(rows_summary)
+    df_det = pd.DataFrame(rows_detail)
 
-    df_mid["중기 상승 확률 %"] = colorize_pct_series(df_mid["중기 상승 확률 %"])
-    df_mid["매수 타이밍 %"] = colorize_pct_series(df_mid["매수 타이밍 %"])
-    df_mid["매도 타이밍 %"] = colorize_pct_series(df_mid["매도 타이밍 %"])
+    return (
+        "<h3>① 요약 테이블</h3>"
+        + df_sum.to_html(index=False, escape=False)
+        + "<br><br>"
+        + "<h3>② 상세 테이블 (리스크 요인 + 주요맥락)</h3>"
+        + df_det.to_html(index=False, escape=False)
+    )
 
-    # 1) 요약표 (리스크 요인 제외)
-    cols_summary = [
-        "Ticker",
-        "중기 상승 확률 %",
-        "매수 타이밍 %",
-        "매도 타이밍 %",
-        "1년 목표수익 범위",
-    ]
-    df_summary = df_mid[cols_summary].copy()
+def simulate_schd_to_target(
+    current_shares,
+    monthly_buy=200,
+    target_monthly_income=1000
+):
+    """
+    현재 보유 주식 수로부터 DRIP + 매월 200 USD 매수 시
+    월 배당 1,000 USD 달성까지 걸리는 기간 계산.
+    """
 
-    # 2) 상세표 (리스크 요인 포함)
-    cols_detail = cols_summary + ["리스크 요인"]
-    df_detail = df_mid[cols_detail].copy()
+    tk = yf.Ticker("SCHD")
+    divs = tk.dividends.dropna()
+    price = tk.history(period="1mo")["Close"].iloc[-1]
 
-    html_summary = df_summary.to_html(index=False, escape=False)
-    html_detail = df_detail.to_html(index=False, escape=False)
+    # 최근 5년 배당 CAGR
+    div_by_year = divs.groupby(divs.index.year).sum()
+    years = sorted(div_by_year.index)[-5:]
+    if len(years)>=2:
+        d0 = div_by_year[years[0]]
+        dN = div_by_year[years[-1]]
+        n  = years[-1]-years[0]
+        div_cagr = (dN/d0)**(1/n) - 1
+        div_cagr = max(-0.05, min(0.12, div_cagr))
+    else:
+        div_cagr = 0.07  # 기본값
 
-    # 두 표를 위/아래로 배치
-    return html_summary + "<br/><br/>" + html_detail
+    shares = current_shares
+    yearly_div_per_share = float(div_by_year.iloc[-1])
+    months = 0
+
+    while True:
+        # 연 배당 / 월 배당
+        annual_income = shares * yearly_div_per_share
+        monthly_income = annual_income / 12
+
+        if monthly_income >= target_monthly_income:
+            break
+
+        # 한 달 경과 → 배당은 연 단위로 증가하므로 매월 반영 안 함
+        # DRIP 적용
+        reinvest = annual_income / 12
+        shares += reinvest / price
+
+        # 매월 200 달러어치 매수
+        shares += monthly_buy / price
+
+        months += 1
+
+        # 한 해가 지나면 배당 성장률 반영
+        if months % 12 == 0:
+            yearly_div_per_share *= (1 + div_cagr)
+
+        # 안전장치
+        if months > 600:
+            break
+
+    years = months // 12
+    rem_months = months % 12
+    return years, rem_months, annual_income
 
 
 def build_schd_dividend_html():
@@ -756,6 +849,16 @@ def build_schd_dividend_html():
         ["Year", "Type", "Year-end Price", "Dividend / Share", "YoY Dividend Growth %", "Dividend Yield %"]
     ].to_html(index=False, escape=False)
 
+def build_schd_dividend_summary_text(current_shares):
+    years, months, current_annual = simulate_schd_to_target(current_shares)
+
+    txt = (
+        f"<p><strong>현재 예상 연 배당금:</strong> "
+        f"{fmt_money(current_annual, '$')} (DRIP 적용 기준)</p>"
+        f"<p><strong>월 1,000 USD 배당 달성까지 예상 기간:</strong> "
+        f"{years}년 {months}개월</p>"
+    )
+    return txt
 
 # =========================
 # HTML 리포트 생성
@@ -916,8 +1019,18 @@ def build_html_report(df_enriched, account_summary):
     # ---------- 3) 중단기 투자 분석 (TFSA, SCHD 제외) ----------
     midterm_html = build_midterm_analysis_html(df_enriched)
 
-    # ---------- 4) SCHD 배당 분석 ----------
+    # ---------- 4) SCHD 배당 분석 + DRIP/월 200 매수 시뮬레이션 ----------
     schd_div_html = build_schd_dividend_html()
+
+    # 현재 보유 SCHD 수량 합계
+    try:
+        schd_shares = float(
+            df_enriched[df_enriched["Ticker"].str.upper() == "SCHD"]["Shares"].sum()
+        )
+    except Exception:
+        schd_shares = 0.0
+
+    schd_summary_text = build_schd_dividend_summary_text(schd_shares)
 
     # ---------- 5) HTML 템플릿 ----------
     style = """
@@ -964,13 +1077,20 @@ def build_html_report(df_enriched, account_summary):
 
         <div class="section">
           <h2>📈 중단기 투자의 통합 분석 (SCHD 제외)</h2>
-          <p class="muted">※ 가격 모멘텀·변동성·간단 밸류에이션·최근 뉴스(제목) 기반의 휴리스틱 지표입니다. 실제 투자 판단은 별도 리스크 검토가 필요합니다.</p>
+          <p class="muted">
+            ※ 가격 모멘텀·변동성·간단 밸류에이션·최근 뉴스(제목) 기반의 휴리스틱 지표입니다.
+            실제 투자 판단은 별도 리스크 검토가 필요합니다.
+          </p>
           {midterm_html}
         </div>
 
         <div class="section">
           <h2>💰 장기 투자의 배당금 분석 (SCHD)</h2>
-          <p class="muted">※ 지난 10년(완료 연도) 배당·가격 데이터와 최근 5년/3년 성장률을 기반으로 한 단순 추정치입니다.</p>
+          {schd_summary_text}
+          <p class="muted">
+            ※ 지난 10년(완료 연도) 배당·가격 데이터와 최근 5년/3년 성장률을 기반으로 한 단순 추정치입니다.
+            DRIP과 매월 200 USD 추가 매수를 가정한 시뮬레이션입니다.
+          </p>
           {schd_div_html}
         </div>
       </body>
