@@ -1,4 +1,4 @@
-name: Daily Portfolio Report
+name: Daily Portfolio Report ver 2.0
 
 on:
   # 매일 실행하고 싶으면 아래 주석 해제 후 cron 조정
