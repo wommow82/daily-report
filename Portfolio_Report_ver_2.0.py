@@ -578,7 +578,7 @@ def build_html_report(df_enriched, account_summary):
         </div>
 
         <div class="section">
-          <h2>🎓 RESP Holdings (in {base_ccy})</h2>
+          <h2>🎓 RESP Holdings (in CAD)</h2>
           {resp_table}
         </div>
       </body>
