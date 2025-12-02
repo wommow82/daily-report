@@ -484,14 +484,28 @@ def enrich_holdings_with_prices(
 
 def analyze_midterm_ticker(ticker):
     """
-    가격/변동성 기반으로 수치(상승확률·타이밍·목표수익)를 계산하고,
-    '핵심 투자 코멘트'는 딱 세 줄만 HTML로 반환한다.
+    중단기 투자 분석용 함수.
 
-    호재: (초록색)
-    악재: (빨간색)
-    평가: (흑색, 전략 코멘트)
+    1) 수치:
+       - 중기 상승 확률 %
+       - 매수 타이밍 %
+       - 매도 타이밍 %
+       - 1년 목표수익 범위
+       → 기존 로직 유지
+
+    2) '핵심 투자 코멘트' (HTML):
+       - 야후파이낸스 뉴스 중 상위 2개 기사만 사용 (조회수 대신 순서로 대체)
+       - 각 기사를 classify_news_sentiment()로 분류하여
+         호재/악재 reason_ko를 모으고, 3줄로 요약:
+           호재: (초록색)
+           악재: (빨간색)
+           평가: (검정)
     """
     tk = yf.Ticker(ticker)
+
+    # -----------------------------
+    # 1. 가격 데이터 확보
+    # -----------------------------
     try:
         hist = tk.history(period="2y")
         closes = hist["Close"].dropna()
@@ -502,8 +516,8 @@ def analyze_midterm_ticker(ticker):
             "<p>"
             "<span style='color:green;'><strong>호재:</strong> 데이터 부족</span><br>"
             "<span style='color:red;'><strong>악재:</strong> 데이터 부족</span><br>"
-            "<strong>평가:</strong> 시세·뉴스 데이터 부족으로 중단기 뷰 산출이 어렵습니다. "
-            "실적·섹터 동향을 개별적으로 점검하는 것이 좋습니다."
+            "<strong>평가:</strong> 뉴스·가격 데이터 부족. "
+            "섹터/정책/실적을 별도로 점검할 필요가 있습니다."
             "</p>"
         )
         return {
@@ -517,7 +531,9 @@ def analyze_midterm_ticker(ticker):
 
     last = float(closes.iloc[-1])
 
-    # --- 수익률·변동성 (수치 계산용) ---
+    # -----------------------------
+    # 2. 수익률·변동성 계산 (수치용)
+    # -----------------------------
     # 1년 수익률
     if len(closes) > 252:
         start_1y = float(closes.iloc[-252])
@@ -536,10 +552,12 @@ def analyze_midterm_ticker(ticker):
     rets = np.log(closes / closes.shift(1)).dropna()
     vol_annual = float(rets.std() * np.sqrt(252)) if len(rets) > 0 else 0.0
 
-    # --- 중기 상승 확률 / 매수·매도 타이밍 ---
+    # -----------------------------
+    # 3. 투자 신호 (상승확률, 매수/매도 타이밍, 목표수익 범위)
+    # -----------------------------
     score = 50.0
-    score += float(np.tanh(ret_1y / 40.0)) * 25.0    # -25~+25
-    score -= float(np.tanh(vol_annual * 2.0)) * 15.0 # -15~+15
+    score += float(np.tanh(ret_1y / 40.0)) * 25.0    # 모멘텀
+    score -= float(np.tanh(vol_annual * 2.0)) * 15.0 # 변동성 패널티
     up_prob = max(5.0, min(95.0, score))
 
     last_252 = closes[-252:] if len(closes) >= 252 else closes
@@ -550,45 +568,32 @@ def analyze_midterm_ticker(ticker):
     else:
         pos = 0.5
 
-    buy_score = (1.0 - pos) * 60.0 + max(0.0, -ret_3m) * 0.5
-    buy_score = max(5.0, min(95.0, buy_score))
-
-    sell_score = pos * 60.0 + max(0.0, ret_1y) * 0.5
-    sell_score = max(5.0, min(95.0, sell_score))
+    buy_score = max(5.0, min(95.0, (1.0 - pos) * 60.0 + max(0.0, -ret_3m) * 0.5))
+    sell_score = max(5.0, min(95.0, pos * 60.0 + max(0.0, ret_1y) * 0.5))
 
     band = vol_annual * 100.0
     low = max(-50.0, ret_1y - band)
     high = min(100.0, ret_1y + band)
     target_range = f"{low:,.1f}% ~ {high:,.1f}%"
 
-    # --- 뉴스: 최근 3일 이내만 사용해서 호재/악재 요약 ---
+    # -----------------------------
+    # 4. 야후 뉴스 상위 2개로 호재/악재 판단
+    #    (조회수 대신 '리스트 순서'를 중요도 proxy로 사용)
+    # -----------------------------
     try:
         news_list = tk.news or []
     except Exception:
         news_list = []
 
-    bull_reasons = []  # 호재 한국어 사유 리스트
-    bear_reasons = []  # 악재 한국어 사유 리스트
+    # 상위 2개 기사만 사용
+    top_news = news_list[:2]
 
-    now_ts = datetime.utcnow().timestamp()
-    three_days_sec = 3 * 24 * 3600
+    bull_reasons = []
+    bear_reasons = []
 
-    for n in news_list:
+    for n in top_news:
         raw_title = n.get("title", "")
         if not raw_title:
-            continue
-
-        ts = n.get("providerPublishTime")
-        if not ts:
-            continue
-
-        try:
-            ts_int = int(ts)
-        except Exception:
-            continue
-
-        # 최근 3일 이내만 사용
-        if now_ts - ts_int > three_days_sec:
             continue
 
         sentiment, reason_ko = classify_news_sentiment(raw_title)
@@ -601,42 +606,37 @@ def analyze_midterm_ticker(ticker):
     bull_reasons = list(dict.fromkeys(bull_reasons))
     bear_reasons = list(dict.fromkeys(bear_reasons))
 
-    # 호재/악재 문구 작성
-    if bull_reasons:
-        bull_text = " / ".join(bull_reasons)
-    else:
-        bull_text = "뚜렷한 호재 없음"
-
-    if bear_reasons:
-        bear_text = " / ".join(bear_reasons)
-    else:
-        bear_text = "뚜렷한 악재 없음"
+    # 호재/악재 텍스트
+    bull_text = " / ".join(bull_reasons) if bull_reasons else "뚜렷한 호재 없음"
+    bear_text = " / ".join(bear_reasons) if bear_reasons else "뚜렷한 악재 없음"
 
     # 평가 문구
     if bull_reasons and bear_reasons:
         eval_text = (
-            "단기 변동성이 커질 수 있는 구간 / "
-            "중단기 기준에서는 분할 접근과 리밸런싱 기준을 명확히 두는 전략이 필요"
+            "긍정·부정 이슈가 동시에 존재하는 구간 / "
+            "단기 변동성이 커질 수 있어 중단기 기준으로는 분할 접근과 리스크 관리가 중요"
         )
     elif bull_reasons and not bear_reasons:
         eval_text = (
-            "단기적으로 뉴스 모멘텀이 우호적인 구간 / "
-            "이미 호재가 일정 부분 가격에 반영되었을 수 있어 분할 매수와 비중 관리가 필요"
+            "뉴스 모멘텀이 우호적인 구간 / "
+            "이미 호재가 일정 부분 반영되었을 수 있어 분할 매수와 비중 관리가 필요"
         )
     elif bear_reasons and not bull_reasons:
         eval_text = (
-            "단기적으로 리스크 이벤트가 부각된 구간 / "
-            "손절 라인과 현금 비중을 함께 고려한 보수적 대응이 유리한 구간"
+            "악재 이슈가 부각된 구간 / "
+            "보수적 포지셔닝과 손절·현금 비중 관리가 유리한 구간"
         )
     else:
         eval_text = (
-            "최근 3일 내 뚜렷한 뉴스 모멘텀이 없는 구간 / "
-            "실적 일정과 거시환경(금리·정책)을 중심으로 중단기 방향성을 점검할 필요"
+            "대표 기사 기준으로 뚜렷한 방향성이 드러나지 않는 구간 / "
+            "실적·거시환경·정책 이벤트를 중심으로 방향성을 재점검할 필요"
         )
 
-    # HTML (호재=초록, 악재=빨강)
+    # -----------------------------
+    # 5. HTML (호재=초록, 악재=빨강, 평가=검정)
+    # -----------------------------
     comment_html = (
-        "<p>"
+        "<p style='text-align:left;'>"
         f"<span style='color:green;'><strong>호재:</strong> {bull_text}</span><br>"
         f"<span style='color:red;'><strong>악재:</strong> {bear_text}</span><br>"
         f"<strong>평가:</strong> {eval_text}"
