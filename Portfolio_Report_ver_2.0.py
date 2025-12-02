@@ -398,10 +398,10 @@ def enrich_holdings_with_prices(
 
 def analyze_midterm_ticker(ticker):
     """
-    가격/변동성/간단 밸류에이션 + 최근 뉴스 제목을 합쳐
-    휴리스틱 기반 중단기 분석을 생성.
+    가격/변동성/밸류에이션 + 최근 뉴스 방향성을 반영한
+    중단기(6~12개월) 휴리스틱 분석.
     - 수치는 5~95% 범위로 클리핑.
-    - 리스크 요인에 PER, Beta 등 숫자를 괄호 안에 포함.
+    - '핵심 투자 코멘트'에 투자전문가 관점의 한 줄 요약 생성.
     """
     tk = yf.Ticker(ticker)
     try:
@@ -416,7 +416,7 @@ def analyze_midterm_ticker(ticker):
             "BuyTiming": None,
             "SellTiming": None,
             "TargetRange": "데이터 부족",
-            "Risk": "시세 데이터 부족 / 기본적인 재무·뉴스·정책 이슈 별도 확인 필요",
+            "Comment": "시세 데이터 부족으로 중단기 뷰 산출 어려움(실적·뉴스·섹터 동향 별도 점검 권장)",
         }
 
     last = float(closes.iloc[-1])
@@ -424,117 +424,112 @@ def analyze_midterm_ticker(ticker):
     # 1년 수익률
     if len(closes) > 252:
         start_1y = float(closes.iloc[-252])
-        ret_1y = (last / start_1y - 1.0) * 100.0 if start_1y != 0 else 0.0
     else:
         start_1y = float(closes.iloc[0])
-        ret_1y = (last / start_1y - 1.0) * 100.0 if start_1y != 0 else 0.0
+    ret_1y = (last / start_1y - 1.0) * 100.0 if start_1y > 0 else 0.0
 
     # 3개월 수익률
     if len(closes) > 63:
         start_3m = float(closes.iloc[-63])
-        ret_3m = (last / start_3m - 1.0) * 100.0 if start_3m != 0 else 0.0
+        ret_3m = (last / start_3m - 1.0) * 100.0 if start_3m > 0 else 0.0
     else:
         ret_3m = ret_1y / 4.0
 
     # 연간 변동성
     rets = np.log(closes / closes.shift(1)).dropna()
     vol_annual = float(rets.std() * np.sqrt(252)) if len(rets) > 0 else 0.0
+    vol_pct = vol_annual * 100.0
 
-    # 중기 상승 확률 (완만한 스코어링)
-    #   - 1년 수익률이 높으면 +, 변동성이 크면 -
+    # 중기 상승 확률
     score = 50.0
-    score += float(np.tanh(ret_1y / 40.0)) * 25.0   # -25 ~ +25
-    score -= float(np.tanh(vol_annual * 2.0)) * 15.0  # -15 ~ +15
+    score += float(np.tanh(ret_1y / 40.0)) * 25.0   # -25~+25
+    score -= float(np.tanh(vol_annual * 2.0)) * 15.0  # -15~+15
     up_prob = max(5.0, min(95.0, score))
 
-    # 52주 범위 기반 포지션
+    # 52주 포지션
     last_252 = closes[-252:] if len(closes) >= 252 else closes
     low_52w = float(last_252.min())
     high_52w = float(last_252.max())
     if high_52w > low_52w:
-        pos = (last - low_52w) / (high_52w - low_52w)  # 0 ~ 1
+        pos = (last - low_52w) / (high_52w - low_52w)  # 0~1
     else:
         pos = 0.5
 
-    # 매수 타이밍: 구간의 하단에 있을수록, 최근 3개월 조정이 클수록 ↑
+    # 매수/매도 타이밍
     buy_score = (1.0 - pos) * 60.0 + max(0.0, -ret_3m) * 0.5
     buy_score = max(5.0, min(95.0, buy_score))
 
-    # 매도 타이밍: 구간 상단 + 최근 1년 랠리 크면 ↑
     sell_score = pos * 60.0 + max(0.0, ret_1y) * 0.5
     sell_score = max(5.0, min(95.0, sell_score))
 
-    # 1년 목표수익 범위: (최근 1년 수익률 ± 변동성*100)
+    # 1년 목표수익 범위
     band = vol_annual * 100.0
-    low = ret_1y - band
-    high = ret_1y + band
-    low = max(-50.0, low)
-    high = min(100.0, high)
+    low = max(-50.0, ret_1y - band)
+    high = min(100.0, ret_1y + band)
     target_range = f"{low:,.1f}% ~ {high:,.1f}%"
 
-    # --- 리스크 요인: 변동성 + 밸류에이션 + 베타 + 최근 뉴스 한 줄 요약 ---
-    info = {}
+    # 밸류에이션/베타
     try:
         info = tk.info or {}
     except Exception:
         info = {}
-
     pe = safe_float(info.get("trailingPE"), None)
     fpe = safe_float(info.get("forwardPE"), None)
     beta = safe_float(info.get("beta"), None) or safe_float(info.get("beta3Year"), None)
 
-    vol_pct = vol_annual * 100.0
-
-    # 변동성 레벨 설명 (숫자 포함)
+    # 변동성 코멘트
     if vol_annual > 0.6:
-        risk_vol = f"연간 변동성 매우 높음(약 {vol_pct:.1f}%)"
+        vol_comment = f"연 변동성 매우 높음(약 {vol_pct:.1f}%)"
     elif vol_annual > 0.4:
-        risk_vol = f"연간 변동성 높음(약 {vol_pct:.1f}%)"
+        vol_comment = f"연 변동성 높음(약 {vol_pct:.1f}%)"
     elif vol_annual > 0.25:
-        risk_vol = f"연간 변동성 중간 이상(약 {vol_pct:.1f}%)"
+        vol_comment = f"연 변동성 중간 이상(약 {vol_pct:.1f}%)"
     else:
-        risk_vol = f"연간 변동성 비교적 낮음(약 {vol_pct:.1f}%)"
+        vol_comment = f"연 변동성 비교적 안정(약 {vol_pct:.1f}%)"
 
-    # 밸류에이션 (PER 숫자 괄호 포함)
+    # PER 코멘트
     if pe and pe > 40:
-        risk_val = f"밸류에이션 부담(높은 PER, 약 {pe:.1f}배)"
+        val_comment = f"밸류에이션 부담(PER 약 {pe:.1f}배)"
     elif fpe and fpe > 30:
-        risk_val = f"성장 기대 반영된 높은 밸류에이션(Fwd PER 약 {fpe:.1f}배)"
+        val_comment = f"성장 기대 선반영(Fwd PER 약 {fpe:.1f}배)"
     elif pe and pe < 15:
-        risk_val = f"상대적으로 낮은 PER(약 {pe:.1f}배)"
+        val_comment = f"상대적으로 저평가 구간(PER 약 {pe:.1f}배)"
+    elif pe:
+        val_comment = f"밸류에이션 중립(PER 약 {pe:.1f}배)"
     else:
-        if pe:
-            risk_val = f"밸류에이션 중립(PER 약 {pe:.1f}배)"
-        else:
-            risk_val = "밸류에이션 중립(공개 PER 정보 제한)"
+        val_comment = "밸류에이션 정보 제한"
 
-    # 베타 (숫자 괄호 포함)
+    # 베타 코멘트
     if beta and beta > 1.5:
-        risk_beta = f"시장 대비 높은 베타(약 {beta:.2f}), 지수·정책 변화에 민감"
+        beta_comment = f"시장 대비 공격적 베타(약 {beta:.2f})"
     elif beta and beta < 0.8:
-        risk_beta = f"시장 대비 방어적 베타(약 {beta:.2f})"
+        beta_comment = f"시장 대비 방어적 베타(약 {beta:.2f})"
     elif beta:
-        risk_beta = f"시장과 유사한 베타(약 {beta:.2f})"
+        beta_comment = f"시장과 유사한 베타(약 {beta:.2f})"
     else:
-        risk_beta = "베타 정보 제한(시장 민감도 별도 확인 필요)"
+        beta_comment = "베타 정보 제한"
 
-    # 최근 뉴스 한 줄
-    recent_news = ""
+    # 최근 뉴스 방향성(긍/부정까지는 단순)
     try:
         news_list = tk.news or []
-        if news_list:
-            title = news_list[0].get("title", "")
-            if len(title) > 60:
-                title = title[:57] + "..."
-            recent_news = f"최근 뉴스: {title}"
     except Exception:
-        recent_news = ""
+        news_list = []
 
-    risk_parts = [risk_vol, risk_val, risk_beta]
-    if recent_news:
-        risk_parts.append(recent_news)
+    if news_list:
+        title0 = news_list[0].get("title", "").lower()
+        if any(k in title0 for k in ["beat", "strong", "record", "surge", "rally"]):
+            news_dir = "최근 뉴스 톤은 비교적 우호적"
+        elif any(k in title0 for k in ["miss", "warning", "probe", "slump", "cut"]):
+            news_dir = "최근 뉴스 톤은 경고·부정 이슈 포함"
+        else:
+            news_dir = "최근 뉴스 톤은 혼재"
+    else:
+        news_dir = "최근 뉴스 방향성 파악 제한"
 
-    risk_text = " / ".join(risk_parts)
+    comment = (
+        f"{vol_comment}, {val_comment}, {beta_comment} · {news_dir}. "
+        f"중단기(6~12개월) 기준으로 모멘텀·실적·정책 이슈를 함께 점검할 필요가 있음."
+    )
 
     return {
         "Ticker": ticker,
@@ -542,179 +537,184 @@ def analyze_midterm_ticker(ticker):
         "BuyTiming": buy_score,
         "SellTiming": sell_score,
         "TargetRange": target_range,
-        "Risk": risk_text,
+        "Comment": comment,
     }
 
 def build_midterm_context(ticker):
     """
-    뉴스·정책·펀더멘털·차트를 모두 고려한 1줄 요약 생성.
+    뉴스·정책·펀더멘털·차트를 한 줄로 요약하는 '주요맥락' 텍스트 생성.
     - yfinance 뉴스(최근 2건)
-    - 최근 수익률 / 변동성
-    - 밸류에이션(PER/Fwd PER)
-    - 정책·경쟁·AI·금리 민감도 등 간단 분석
+    - 최근 1년 수익률, 변동성
+    - PER / Fwd PER
     """
     tk = yf.Ticker(ticker)
 
-    # --- 1) 가격 정보 요약 ---
+    # 1) 가격/수익률/변동성
     try:
         hist = tk.history(period="1y")["Close"].dropna()
-        last = hist.iloc[-1]
-        start = hist.iloc[0]
-        ret_1y = (last/start - 1)*100 if start > 0 else 0
-        vol = np.log(hist/hist.shift(1)).dropna().std()*np.sqrt(252)*100
-    except:
+        last = float(hist.iloc[-1])
+        start = float(hist.iloc[0])
+        ret_1y = (last / start - 1.0) * 100.0 if start > 0 else 0.0
+        vol = float(np.log(hist / hist.shift(1)).dropna().std() * np.sqrt(252) * 100)
+    except Exception:
         ret_1y, vol = None, None
 
-    # --- 2) 밸류에이션 ---
-    info = {}
-    try: info = tk.info
-    except: info = {}
-
+    # 2) 밸류에이션
+    try:
+        info = tk.info or {}
+    except Exception:
+        info = {}
     pe = safe_float(info.get("trailingPE"), None)
     fpe = safe_float(info.get("forwardPE"), None)
 
-    # --- 3) 뉴스 (최근 2개) ---
+    # 3) 뉴스 (최근 2개) + 기사 날짜
     try:
-        news = tk.news[:2]
-    except:
-        news = []
+        news_list = tk.news or []
+    except Exception:
+        news_list = []
 
     news_parts = []
-    for n in news:
-        title = n.get("title","")
+    for n in news_list[:2]:
+        title = n.get("title", "").strip()
         if len(title) > 50:
-            title = title[:47]+"..."
+            title = title[:47] + "..."
         ts = n.get("providerPublishTime")
         if ts:
-            d = datetime.fromtimestamp(ts).strftime("%Y-%m-%d")
-            news_parts.append(f"{title}({d})")
+            try:
+                date_str = datetime.fromtimestamp(int(ts)).strftime("%Y-%m-%d")
+                news_parts.append(f"{title}({date_str})")
+            except Exception:
+                news_parts.append(title)
         else:
             news_parts.append(title)
 
-    news_text = " / ".join(news_parts) if news_parts else "최근 뉴스 부족"
+    news_text = " / ".join(news_parts) if news_parts else "최근 뉴스 정보 제한"
 
-    # --- 4) 최종 문장 구성 ---
-    parts = []
-
+    # 4) 숫자 요약 + 뉴스 텍스트 결합
+    num_parts = []
     if ret_1y is not None:
-        parts.append(f"최근 1년 {ret_1y:+.1f}%")
+        num_parts.append(f"1년 수익률 {ret_1y:+.1f}%")
     if vol is not None:
-        parts.append(f"변동성 {vol:.1f}%")
+        num_parts.append(f"연 변동성 {vol:.1f}%")
     if pe:
-        parts.append(f"PER {pe:.1f}")
+        num_parts.append(f"PER {pe:.1f}")
     if fpe:
-        parts.append(f"Fwd PER {fpe:.1f}")
+        num_parts.append(f"Fwd PER {fpe:.1f}")
 
-    summary = " · ".join(parts) if parts else "기초 데이터 부족"
+    num_text = " · ".join(num_parts) if num_parts else "기초 지표 정보 제한"
 
-    final = f"{summary} · {news_text}"
-    return final
-
+    return f"{num_text} · {news_text}"
+    
 
 def build_midterm_analysis_html(df_enriched):
     """
-    1) 요약표 : 확률·타이밍·목표수익 범위
-    2) 상세표 : 리스크요인 + 주요맥락(뉴스·정책·펀더멘털·차트)
+    1) 요약표 : Ticker + 확률/타이밍/목표수익
+    2) 상세표 : '핵심 투자 코멘트' + '주요맥락'
     """
     tfsa_tickers = (
-        df_enriched[df_enriched["Type"].str.upper()=="TFSA"]["Ticker"]
-        .dropna().unique().tolist()
+        df_enriched[df_enriched["Type"].str.upper() == "TFSA"]["Ticker"]
+        .dropna()
+        .unique()
+        .tolist()
     )
-    tickers = [t for t in tfsa_tickers if t.upper()!="SCHD"]
+    tickers = [t for t in tfsa_tickers if t.upper() != "SCHD"]
+
+    if not tickers:
+        return "<p>TFSA 중단기 대상 종목이 없습니다.</p>"
 
     rows_summary = []
     rows_detail = []
 
     for t in sorted(tickers):
         stat = analyze_midterm_ticker(t)
-        context = build_midterm_context(t)
+        ctx = build_midterm_context(t)
 
-        # --- 1) 요약 표 행 ---
-        rows_summary.append({
-            "Ticker": stat["Ticker"],
-            "중기 상승 확률 %": fmt_pct(stat["UpProb"]),
-            "매수 타이밍 %": fmt_pct(stat["BuyTiming"]),
-            "매도 타이밍 %": fmt_pct(stat["SellTiming"]),
-            "1년 목표수익 범위": stat["TargetRange"]
-        })
+        # ① 요약 테이블 행
+        if stat["UpProb"] is not None:
+            up_str = colorize_value_html(fmt_pct(stat["UpProb"]), stat["UpProb"])
+            buy_str = colorize_value_html(fmt_pct(stat["BuyTiming"]), stat["BuyTiming"])
+            sell_str = colorize_value_html(fmt_pct(stat["SellTiming"]), stat["SellTiming"])
+        else:
+            up_str = buy_str = sell_str = "N/A"
 
-        # --- 2) 상세 표 행 ---
-        rows_detail.append({
-            "Ticker": stat["Ticker"],
-            "리스크 요인": stat["Risk"],
-            "주요맥락": context
-        })
+        rows_summary.append(
+            {
+                "Ticker": stat["Ticker"],
+                "중기 상승 확률 %": up_str,
+                "매수 타이밍 %": buy_str,
+                "매도 타이밍 %": sell_str,
+                "1년 목표수익 범위": stat["TargetRange"],
+            }
+        )
+
+        # ② 상세 테이블 행
+        rows_detail.append(
+            {
+                "Ticker": stat["Ticker"],
+                "핵심 투자 코멘트": stat["Comment"],
+                "주요맥락": ctx,
+            }
+        )
 
     df_sum = pd.DataFrame(rows_summary)
     df_det = pd.DataFrame(rows_detail)
 
+    html_summary = df_sum.to_html(index=False, escape=False)
+    html_detail = df_det.to_html(index=False, escape=False)
+
     return (
         "<h3>① 요약 테이블</h3>"
-        + df_sum.to_html(index=False, escape=False)
-        + "<br><br>"
-        + "<h3>② 상세 테이블 (리스크 요인 + 주요맥락)</h3>"
-        + df_det.to_html(index=False, escape=False)
+        + html_summary
+        + "<br/><br/>"
+        + "<h3>② 상세 테이블 (핵심 투자 코멘트 + 주요맥락)</h3>"
+        + html_detail
     )
 
 def simulate_schd_to_target(
     current_shares,
-    monthly_buy=200,
-    target_monthly_income=1000
+    start_price,
+    start_yearly_div_ps,
+    div_cagr,
+    monthly_buy=200.0,
+    target_monthly_income=1000.0,
+    max_months=600,
 ):
     """
-    현재 보유 주식 수로부터 DRIP + 매월 200 USD 매수 시
-    월 배당 1,000 USD 달성까지 걸리는 기간 계산.
+    DRIP + 매월 200 USD 추가 매수로
+    월 배당 1,000 USD 도달까지 걸리는 기간(년/월)을 시뮬레이션.
+    - price는 일정하다고 가정(보수적)
+    - div_cagr: 연간 배당 성장률
     """
+    shares = float(current_shares)
+    yearly_div_ps = float(start_yearly_div_ps)
+    price = float(start_price)
 
-    tk = yf.Ticker("SCHD")
-    divs = tk.dividends.dropna()
-    price = tk.history(period="1mo")["Close"].iloc[-1]
-
-    # 최근 5년 배당 CAGR
-    div_by_year = divs.groupby(divs.index.year).sum()
-    years = sorted(div_by_year.index)[-5:]
-    if len(years)>=2:
-        d0 = div_by_year[years[0]]
-        dN = div_by_year[years[-1]]
-        n  = years[-1]-years[0]
-        div_cagr = (dN/d0)**(1/n) - 1
-        div_cagr = max(-0.05, min(0.12, div_cagr))
-    else:
-        div_cagr = 0.07  # 기본값
-
-    shares = current_shares
-    yearly_div_per_share = float(div_by_year.iloc[-1])
     months = 0
-
-    while True:
-        # 연 배당 / 월 배당
-        annual_income = shares * yearly_div_per_share
-        monthly_income = annual_income / 12
+    while months < max_months:
+        annual_income = shares * yearly_div_ps
+        monthly_income = annual_income / 12.0
 
         if monthly_income >= target_monthly_income:
             break
 
-        # 한 달 경과 → 배당은 연 단위로 증가하므로 매월 반영 안 함
-        # DRIP 적용
-        reinvest = annual_income / 12
-        shares += reinvest / price
+        # DRIP: 한 달치 배당 재투자
+        reinvest = annual_income / 12.0
+        if price > 0:
+            shares += reinvest / price
 
-        # 매월 200 달러어치 매수
-        shares += monthly_buy / price
+        # 매월 200 USD 매수
+        if price > 0:
+            shares += monthly_buy / price
 
         months += 1
 
-        # 한 해가 지나면 배당 성장률 반영
+        # 1년 경과 시 배당 성장률 반영
         if months % 12 == 0:
-            yearly_div_per_share *= (1 + div_cagr)
-
-        # 안전장치
-        if months > 600:
-            break
+            yearly_div_ps *= (1.0 + div_cagr)
 
     years = months // 12
     rem_months = months % 12
-    return years, rem_months, annual_income
+    return years, rem_months
 
 
 def build_schd_dividend_html():
@@ -850,15 +850,90 @@ def build_schd_dividend_html():
     ].to_html(index=False, escape=False)
 
 def build_schd_dividend_summary_text(current_shares):
-    years, months, current_annual = simulate_schd_to_target(current_shares)
+    """
+    - 현재 보유 SCHD 기준 예상 연 배당금
+    - DRIP + 매월 200 USD 매수 시 월 1,000 USD 도달까지 예상 기간
+    을 계산해서 HTML 문장으로 반환.
+    """
+    current_shares = safe_float(current_shares, 0.0)
+    if current_shares <= 0:
+        return (
+            "<p><strong>현재 예상 연 배당금:</strong> N/A (보유 SCHD 없음)</p>"
+            "<p><strong>월 1,000 USD 배당 달성까지 예상 기간:</strong> 계산 불가</p>"
+        )
+
+    tk = yf.Ticker("SCHD")
+
+    # 1) 배당 히스토리
+    try:
+        divs = tk.dividends.dropna()
+    except Exception:
+        divs = pd.Series(dtype=float)
+
+    if divs.empty:
+        return (
+            "<p><strong>현재 예상 연 배당금:</strong> N/A (배당 데이터 부족)</p>"
+            "<p><strong>월 1,000 USD 배당 달성까지 예상 기간:</strong> 계산 불가</p>"
+        )
+
+    div_by_year = divs.groupby(divs.index.year).sum()
+    years = sorted(div_by_year.index)
+    last_year = years[-1]
+    last_div_ps = float(div_by_year[last_year])  # 직전 완전 연도의 배당/주
+
+    # 2) 현재 예상 연 배당금 (보유 주식 반영)
+    current_annual_income = current_shares * last_div_ps
+
+    # 3) 최근 5년 배당 CAGR
+    if len(years) >= 5:
+        use_years = years[-5:]
+    elif len(years) >= 2:
+        use_years = years
+    else:
+        use_years = years[-1:]
+
+    if len(use_years) >= 2:
+        d0 = float(div_by_year[use_years[0]])
+        dN = float(div_by_year[use_years[-1]])
+        n = use_years[-1] - use_years[0]
+        if d0 > 0 and n > 0:
+            div_cagr = (dN / d0) ** (1.0 / n) - 1.0
+        else:
+            div_cagr = 0.07
+    else:
+        div_cagr = 0.07  # 기본 7% 가정
+
+    # 과도한 성장률 클리핑
+    div_cagr = max(-0.05, min(0.12, div_cagr))
+
+    # 4) 현재 가격
+    try:
+        hist = tk.history(period="1mo")["Close"].dropna()
+        price = float(hist.iloc[-1]) if not hist.empty else 75.0
+    except Exception:
+        price = 75.0
+
+    # 5) 시뮬레이션으로 목표까지 기간 계산
+    years_needed, months_needed = simulate_schd_to_target(
+        current_shares=current_shares,
+        start_price=price,
+        start_yearly_div_ps=last_div_ps,
+        div_cagr=div_cagr,
+        monthly_buy=200.0,
+        target_monthly_income=1000.0,
+        max_months=600,
+    )
 
     txt = (
         f"<p><strong>현재 예상 연 배당금:</strong> "
-        f"{fmt_money(current_annual, '$')} (DRIP 적용 기준)</p>"
+        f"{fmt_money(current_annual_income, '$')} "
+        f"(보유 SCHD {current_shares:,.0f}주 기준, 직전 연도 배당 적용)</p>"
         f"<p><strong>월 1,000 USD 배당 달성까지 예상 기간:</strong> "
-        f"{years}년 {months}개월</p>"
+        f"약 {years_needed}년 {months_needed}개월 "
+        f"(DRIP + 매월 200 USD 매수 가정)</p>"
     )
     return txt
+    
 
 # =========================
 # HTML 리포트 생성
