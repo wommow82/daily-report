@@ -371,14 +371,12 @@ def build_midterm_news_comment_from_apis_combined(ticker, max_items=10, days=30)
             "</p>"
         )
 
-    # 1-1) 추가적으로 '실제 날짜 기준'으로 최근 30일만 필터링 (RSS 대비 방어용)
+    # 1-1) 실제 날짜 기준으로 최근 30일만 필터링
     cutoff = datetime.utcnow() - timedelta(days=30)
     filtered_recent = []
     for a in articles:
-        # _fetch_news_for_ticker_midterm에서 "published" 필드를 넣었다고 가정
         p = (a.get("published") or "").strip()
         dt = None
-        # 간단한 파싱: ISO 또는 YYYY-MM-DD 형태 위주
         for fmt in ("%Y-%m-%dT%H:%M:%SZ", "%Y-%m-%d %H:%M", "%Y-%m-%d"):
             try:
                 dt = datetime.strptime(p[:len(fmt)], fmt)
@@ -386,7 +384,6 @@ def build_midterm_news_comment_from_apis_combined(ticker, max_items=10, days=30)
             except Exception:
                 continue
         if dt is None:
-            # 날짜 파싱 실패 시 일단 포함 (너무 보수적으로 버리지 않기 위해)
             filtered_recent.append(a)
         else:
             if dt >= cutoff:
@@ -422,7 +419,6 @@ def build_midterm_news_comment_from_apis_combined(ticker, max_items=10, days=30)
         if any(k in text_all for k in keywords):
             filtered.append(a)
 
-    # 필터링 결과가 너무 적으면, 원본 리스트도 일부 사용
     if len(filtered) >= 3:
         use_articles = filtered[:max_items]
     else:
