@@ -426,10 +426,19 @@ def enrich_holdings_with_prices(
 
 def analyze_midterm_ticker(ticker):
     """
-    중단기 투자 분석용 함수.
+    중단기 투자 분석용 함수 (조심스러운 뉴스 처리 버전).
 
-    * 투자 신호(수치) 계산은 기존 동일
-    * 헤드라인 상위 2개를 가져와 한국어 자연 번역 후 리스트업
+    1) 수치:
+       - 중기 상승 확률 %
+       - 매수 타이밍 %
+       - 매도 타이밍 %
+       - 1년 목표수익 범위
+
+    2) '핵심 투자 코멘트' (Comment, HTML):
+       - yfinance의 tk.news에서 신뢰도 있는 헤드라인이 있을 때만
+         최대 2개를 골라 한국어로 자연스럽게 번역해서 보여준다.
+       - 헤드라인이 없거나 구조가 이상하면
+         깔끔하게 "뉴스 없음" 문구를 출력한다.
     """
     tk = yf.Ticker(ticker)
 
@@ -460,28 +469,33 @@ def analyze_midterm_ticker(ticker):
     last = float(closes.iloc[-1])
 
     # -----------------------------
-    # 2. 수익률·변동성 계산
+    # 2. 수익률·변동성 계산 (수치용)
     # -----------------------------
+    # 1년 수익률
     if len(closes) > 252:
         start_1y = float(closes.iloc[-252])
     else:
         start_1y = float(closes.iloc[0])
-    ret_1y = (last / start_1y - 1.0) * 100.0
+    ret_1y = (last / start_1y - 1.0) * 100.0 if start_1y > 0 else 0.0
 
+    # 3개월 수익률
     if len(closes) > 63:
         start_3m = float(closes.iloc[-63])
-        ret_3m = (last / start_3m - 1.0) * 100.0
+        ret_3m = (last / start_3m - 1.0) * 100.0 if start_3m > 0 else 0.0
     else:
         ret_3m = ret_1y / 4.0
 
+    # 연간 변동성
     rets = np.log(closes / closes.shift(1)).dropna()
     vol_annual = float(rets.std() * np.sqrt(252)) if len(rets) > 0 else 0.0
 
     # -----------------------------
-    # 3. 투자 신호 계산
+    # 3. 투자 신호 (상승확률, 매수/매도 타이밍, 목표수익 범위)
     # -----------------------------
     score = 50.0
+    # 모멘텀(1년 수익률) 반영
     score += float(np.tanh(ret_1y / 40.0)) * 25.0
+    # 변동성 패널티
     score -= float(np.tanh(vol_annual * 2.0)) * 15.0
     up_prob = max(5.0, min(95.0, score))
 
@@ -489,7 +503,7 @@ def analyze_midterm_ticker(ticker):
     low_52w = float(last_252.min())
     high_52w = float(last_252.max())
     if high_52w > low_52w:
-        pos = (last - low_52w) / (high_52w - low_52w)
+        pos = (last - low_52w) / (high_52w - low_52w)  # 0~1
     else:
         pos = 0.5
 
@@ -502,50 +516,75 @@ def analyze_midterm_ticker(ticker):
     target_range = f"{low:,.1f}% ~ {high:,.1f}%"
 
     # -----------------------------
-    # 4. Yahoo 뉴스 상위 2개 가져오기
+    # 4. yfinance 뉴스에서 "신뢰도 있는" 헤드라인 최대 2개 추출
     # -----------------------------
     try:
-        news_list = tk.news or []
+        raw_news = tk.news
     except Exception:
-        news_list = []
+        raw_news = None
 
-    top_news = news_list[:2]
-    translated_news = []
+    news_list = raw_news or []
+    reliable_headlines = []
 
-    if not top_news:
-        translated_news.append("- 표시할 수 있는 주요 뉴스가 없습니다.")
-    else:
-        for n in top_news:
-            title = n.get("title", "")
-            ts = n.get("providerPublishTime")
+    for n in news_list:
+        try:
+            title = (n.get("title") or "").strip()
+        except Exception:
+            title = ""
 
-            if ts:
-                try:
-                    date_str = datetime.fromtimestamp(int(ts)).strftime("%Y-%m-%d")
-                except:
-                    date_str = ""
-            else:
+        # 너무 짧거나 비어 있으면 버림
+        if len(title) < 8:
+            continue
+
+        ts = n.get("providerPublishTime")
+        if ts:
+            try:
+                ts_int = int(ts)
+                date_str = datetime.fromtimestamp(ts_int).strftime("%Y-%m-%d")
+            except Exception:
                 date_str = ""
+        else:
+            date_str = ""
 
-            # 한국어 번역
-            kr = translate_to_korean(title)
-
-            if date_str:
-                translated_news.append(f"- {date_str}: {kr}")
-            else:
-                translated_news.append(f"- {kr}")
-
-    news_html = "<br>".join(translated_news)
-
-    comment_html = (
-        "<p style='text-align:left;'>"
-        "<strong>뉴스 요약:</strong><br>"
-        f"{news_html}"
-        "</p>"
-    )
+        reliable_headlines.append((date_str, title))
+        if len(reliable_headlines) >= 2:
+            break
 
     # -----------------------------
-    # 5. 결과 반환
+    # 5. 헤드라인이 없으면 "뉴스 없음"을 명시적으로 표시
+    # -----------------------------
+    if not reliable_headlines:
+        comment_html = (
+            "<p style='text-align:left;'>"
+            "<strong>뉴스 요약:</strong><br>"
+            "- 현재 이 종목에 대해 yfinance를 통해 가져올 수 있는 신뢰할 만한 헤드라인이 없습니다. "
+            "실적 발표, 섹터 뉴스, 정책·금리 이벤트를 별도로 확인하는 것이 좋습니다."
+            "</p>"
+        )
+    else:
+        # -----------------------------
+        # 6. 헤드라인을 한국어로 번역하여 최대 2개만 표기
+        # -----------------------------
+        lines = []
+        for date_str, title in reliable_headlines:
+            # OpenAI로 한국어 번역 (실패 시 원문 사용)
+            kr = translate_to_korean(title)
+            if date_str:
+                lines.append(f"- {date_str}: {kr}")
+            else:
+                lines.append(f"- {kr}")
+
+        news_html = "<br>".join(lines)
+
+        comment_html = (
+            "<p style='text-align:left;'>"
+            "<strong>뉴스 요약:</strong><br>"
+            f"{news_html}"
+            "</p>"
+        )
+
+    # -----------------------------
+    # 7. 결과 반환
     # -----------------------------
     return {
         "Ticker": ticker,
