@@ -980,12 +980,12 @@ def build_schd_dividend_html():
 
 def build_schd_dividend_summary_text(current_shares):
     """
-    SCHD 장기 배당 분석 (모든 값을 CAD 기준으로 환산).
+    SCHD 장기 배당 분석 (모든 값을 CAD 기준으로 계산 및 표시).
 
     가정:
-    - DRIP 적용
-    - 매월 200 USD → CAD 변환 후 매수
-    - 연평균 배당 성장률 = 11% 고정
+    - DRIP 적용 (배당금 재투자)
+    - 매월 200 USD를 환전(CAD)해서 매수
+    - 연평균 배당 성장률 g = 11% 고정
     - 목표 배당: 월 CAD 1,000 (연 CAD 12,000)
     """
     current_shares = safe_float(current_shares, 0.0)
@@ -997,7 +997,7 @@ def build_schd_dividend_summary_text(current_shares):
 
     tk = yf.Ticker("SCHD")
 
-    # ===== 1) 배당 데이터 =====
+    # 1) 배당 데이터 (USD 기준)
     try:
         divs = tk.dividends.dropna()
     except Exception:
@@ -1006,53 +1006,60 @@ def build_schd_dividend_summary_text(current_shares):
     if divs.empty:
         return (
             "<p><strong>현재 예상 연 배당금(CAD):</strong> 데이터 부족</p>"
-            "<p><strong>월 CAD 1,000 달성:</strong> 계산 불가</p>"
+            "<p><strong>월 CAD 1,000 배당 달성 예상:</strong> 계산 불가</p>"
         )
 
-    # 연간 총 배당(USD)
+    # 연간 총 배당(USD/주)
     div_by_year = divs.groupby(divs.index.year).sum()
     years = sorted(div_by_year.index)
     last_year = years[-1]
-    last_div_ps_usd = float(div_by_year[last_year])
+    last_div_ps_usd = float(div_by_year[last_year])  # 마지막 완료 연도 배당(USD/주)
 
-    # ===== 2) 현재 SCHD 가격 =====
+    # 2) 현재 SCHD 가격(USD)
     try:
         px = tk.history(period="1mo")["Close"].dropna()
         price_usd = float(px.iloc[-1]) if not px.empty else 75.0
     except Exception:
-        price_usd = 75.0
+        price_usd = 75.0  # fallback
 
-    # ===== 3) USD→CAD 환율 fetch =====
+    # 3) USD→CAD 환율
     try:
         fx = yf.Ticker("CAD=X").history(period="1d")["Close"].dropna()
         usd_to_cad = float(fx.iloc[-1]) if not fx.empty else 1.35
     except Exception:
         usd_to_cad = 1.35
 
-    # ===== 4) 현재 연 배당금(CAD) =====
+    # 4) 현재 연 배당금(CAD 기준)
+    #    (보유주수 × 연간 배당(USD/주) × 환율)
     current_annual_income_cad = current_shares * last_div_ps_usd * usd_to_cad
 
-    # ===== 5) 성장률 고정 =====
+    # 5) 배당 성장률 (고정 가정)
     g = 0.11   # 11%
 
-    # ===== 6) 배당 수익률 계산 (USD 기준) =====
+    # 6) 현재 배당 수익률 (USD 기준)
+    #    y = 연간 배당 / 현재가
     y = last_div_ps_usd / price_usd if price_usd > 0 else 0.035
     if y <= 0:
-        y = 0.035  # fallback
+        y = 0.035  # 최소 3.5%로 보수적 가정
 
-    # ===== 7) 매월 200 USD → CAD 변환 후 투자 =====
+    # 7) 매월 200 USD를 CAD로 환전 후 투자
     monthly_usd = 200.0
     monthly_cad = monthly_usd * usd_to_cad
     annual_contrib_cad = monthly_cad * 12.0
 
-    # USD 기준 배당 수익률이므로 CAD로 변환하기 위해 같은 배수 적용
-    # (DRIP는 주식 수 증가 → 배당 USD → CAD 변환)
-    # 성장률 공식 그대로 적용하며 마지막에 CAD로 해석하면 consistency 유지됨.
-
+    # 8) 단순화된 해석:
+    #    - 연간 배당 수익률 y, 배당 성장률 g
+    #    - 연간 기여금(투자액)으로 인한 "추가 배당 성장 효과"를 A로 흡수
+    #
+    #    A = 연간 기여금 × (수익률 / 성장률)
+    #    목표: I(t) ≥ Target,  I(t)는 배당 성장/기여 효과가 합쳐진 값
+    #    n_years = ln((Target + A) / (I0 + A)) / ln(1 + g)
+    #
+    #    여기서 모든 단위는 CAD 기준으로 처리.
     A = annual_contrib_cad * (y / g)
 
-    target = 12000.0  # CAD 기준
-    numerator = target + A
+    target_annual_cad = 12_000.0  # 연 CAD 12,000 = 월 CAD 1,000
+    numerator = target_annual_cad + A
     denominator = current_annual_income_cad + A
 
     if numerator <= denominator:
@@ -1064,14 +1071,14 @@ def build_schd_dividend_summary_text(current_shares):
     years_int = int(n_years)
     months_int = int(round((n_years - years_int) * 12.0))
 
-    # ===== 8) 결과 출력 =====
+    # 9) 출력 (통화 기호는 CAD임을 명시하기 위해 "C$" 사용)
     txt = (
         f"<p><strong>현재 예상 연 배당금(CAD):</strong> "
-        f"{fmt_money(current_annual_income_cad, '$')} "
+        f"{fmt_money(current_annual_income_cad, 'C$')} "
         f"(보유 {current_shares:,.0f}주 기준)</p>"
-        f"<p><strong>월 CAD 1,000 달성 예상:</strong> "
+        f"<p><strong>월 CAD 1,000 배당 달성 예상:</strong> "
         f"약 {years_int}년 {months_int}개월 "
-        f"(DRIP + 매월 200 USD 투자 / 배당 성장률 11%)</p>"
+        f"(DRIP + 매월 200 USD(환전 후 투자) / 배당 성장률 11% 가정)</p>"
     )
     return txt
     
