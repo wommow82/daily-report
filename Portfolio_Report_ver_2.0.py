@@ -61,73 +61,84 @@ import os
 # 뉴스 여러 개를 묶어 분석하는 요약 함수
 # =========================
 
-def _summarize_news_bundle_ko(ticker, articles):
+def build_midterm_news_comment_from_apis_combined(ticker, max_items=10, days=14):
     """
-    여러 개의 영어 뉴스(articles)를 받아서
-    6~12개월 투자 관점의 종합 분석을 한국어로 20줄 이내로 요약.
+    중기 분석 섹션에서 사용할 '통합 뉴스 분석' HTML 생성.
 
-    - OPENAI_API_KEY 필요
-    - articles: _fetch_news_for_ticker_midterm(...) 결과 리스트
+    - 소스: NewsAPI → 실패 시 Google News RSS
+    - 최대 max_items개 기사 사용
+    - 티커/회사명 포함 여부로 1차 필터링
+    - 여러 기사를 한 번에 한국어로 종합 요약 (주가 영향 이슈 중심, 최대 30줄)
+
+    반환:
+        HTML 문자열 (<p> ... </p>)
     """
-    api_key = os.environ.get("OPENAI_API_KEY")
+    api_key = os.environ.get("NEWS_API_KEY")
     if not api_key:
-        return "뉴스 요약을 위해 OPENAI_API_KEY 환경변수가 필요합니다."
+        return (
+            "<p style='text-align:left;'>"
+            "<strong>뉴스 종합 분석:</strong><br>"
+            "- NEWS_API_KEY가 설정되어 있지 않아 뉴스를 불러올 수 없습니다."
+            "</p>"
+        )
+
+    # 1) NewsAPI + Google News로 기사 목록 가져오기
+    articles = _fetch_news_for_ticker_midterm(
+        ticker=ticker,
+        api_key=api_key,
+        page_size=max_items,
+        days=days,
+    )
 
     if not articles:
-        return "관련 뉴스를 찾지 못했습니다."
-
-    try:
-        from openai import OpenAI
-    except ImportError:
-        return "openai 패키지가 설치되어 있지 않아 뉴스 요약을 수행할 수 없습니다."
-
-    client = OpenAI(api_key=api_key)
-
-    # 뉴스 내용을 한 번에 묶어서 프롬프트용 텍스트 생성
-    lines = []
-    for i, a in enumerate(articles, start=1):
-        title = (a.get("title") or "").strip()
-        desc = (a.get("description") or "").strip()
-        src = (a.get("source") or "").strip()
-        date = _extract_article_date_midterm(a)
-
-        item = f"[{i}] {date} {src} - {title}"
-        if desc:
-            item += f"\n{desc}"
-        lines.append(item)
-
-    bundle_text = "\n\n".join(lines)
-
-    prompt = f"""
-너는 미국 주식 애널리스트이다.
-아래는 {ticker} 관련 영어 뉴스 헤드라인과 기사 요약이다.
-
-이 뉴스를 모두 종합해서, 향후 6~12개월 투자 관점에서
-다음 내용을 한국어로 20줄 이내로 정리해줘.
-
-- 형식: 각 줄은 "· "로 시작 (bullet 형식)
-- 8~20줄 사이
-- 포함할 내용:
-  - 주가/펀더멘털에 영향을 줄 수 있는 핵심 이슈
-  - 긍정/부정 요인 (모멘텀, 실적, 수요, 경쟁, 규제 등)
-  - 단기 변동성 요인 vs 중기(6~12개월) 방향성
-  - 투자 시 유의해야 할 리스크 요인
-
-뉴스 목록:
-{bundle_text}
-"""
-
-    try:
-        resp = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[{"role": "user", "content": prompt}],
-            max_tokens=800,
+        return (
+            "<p style='text-align:left;'>"
+            "<strong>뉴스 종합 분석:</strong><br>"
+            f"- 최근 {days}일 내 {ticker} 관련 주요 뉴스를 찾지 못했습니다."
+            "</p>"
         )
-        text = resp.choices[0].message.content.strip()
-        return text
-    except Exception as e:
-        print(f"[WARN] _summarize_news_bundle_ko 오류: {e}")
-        return "뉴스 종합 요약을 생성하는 데 실패했습니다."
+
+    # 2) 티커/회사명 기준으로 관련 기사 필터링
+    ticker_upper = ticker.upper()
+    keywords = [ticker_upper]
+
+    company_map = {
+        "NVDA": "NVIDIA",
+        "TSLA": "TESLA",
+        "SCHD": "SCHD",
+    }
+    if ticker_upper in company_map:
+        keywords.append(company_map[ticker_upper].upper())
+
+    filtered = []
+    for a in articles:
+        text_all = (
+            (a.get("title") or "") + " " + (a.get("description") or "")
+        ).upper()
+        if any(k in text_all for k in keywords):
+            filtered.append(a)
+
+    # 필터링 결과가 너무 적으면, 원본 리스트도 일부 사용
+    if len(filtered) >= 3:
+        use_articles = filtered[:max_items]
+    else:
+        use_articles = articles[:max_items]
+
+    # 3) 여러 기사 → 한 번에 한국어 종합 요약 (주가 영향 이슈 중심, 최대 30줄)
+    summary_ko = _summarize_news_bundle_ko_price_focus(ticker, use_articles)
+
+    # 4) 줄바꿈을 HTML <br>로 변환 (여기서도 30줄 넘으면 재차 제한)
+    raw_lines = [ln.strip() for ln in summary_ko.splitlines() if ln.strip()]
+    limited_lines = raw_lines[:30]
+    html_body = "<br>".join(limited_lines) if limited_lines else "관련 뉴스를 요약할 수 없습니다."
+
+    html = (
+        "<p style='text-align:left;'>"
+        "<strong>뉴스 종합 분석 (주가 영향 이슈, 6~12개월):</strong><br>"
+        f"{html_body}"
+        "</p>"
+    )
+    return html
 
 
 # =========================
