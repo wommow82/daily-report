@@ -58,7 +58,87 @@ def colorize_value_html(text, raw_value):
 import os
 
 # =========================
-# 뉴스 여러 개를 묶어 분석하는 요약 함수
+# 뉴스 여러개 종합요약 함수
+# =========================
+
+def _summarize_news_bundle_ko_price_focus(ticker, articles):
+    """
+    여러 개의 영어 뉴스(articles)를 받아서
+    '주가에 영향을 줄 수 있는 이슈'만 선별해
+    6~12개월 투자 관점에서 한국어 bullet 요약을 생성.
+
+    - OPENAI_API_KEY 필요
+    - articles: _fetch_news_for_ticker_midterm(...) 결과 리스트
+    - 결과: 최대 30줄의 bullet 텍스트 (행마다 '· '로 시작)
+    """
+    api_key = os.environ.get("OPENAI_API_KEY")
+    if not api_key:
+        return "뉴스 요약을 위해 OPENAI_API_KEY 환경변수가 필요합니다."
+
+    if not articles:
+        return "관련 뉴스를 찾지 못했습니다."
+
+    try:
+        from openai import OpenAI
+    except ImportError:
+        return "openai 패키지가 설치되어 있지 않아 뉴스 요약을 수행할 수 없습니다."
+
+    client = OpenAI(api_key=api_key)
+
+    # 뉴스 내용을 한 번에 묶어서 프롬프트용 텍스트 생성
+    lines = []
+    for i, a in enumerate(articles, start=1):
+        title = (a.get("title") or "").strip()
+        desc = (a.get("description") or "").strip()
+        src = (a.get("source") or "").strip()
+        date = _extract_article_date_midterm(a)
+
+        item = f"[{i}] {date} {src} - {title}"
+        if desc:
+            item += f"\n{desc}"
+        lines.append(item)
+
+    bundle_text = "\n\n".join(lines)
+
+    prompt = f"""
+너는 미국 주식 애널리스트이다.
+아래는 {ticker} 관련 영어 뉴스 헤드라인과 기사 요약이다.
+
+이 중에서 '주가에 실질적인 영향을 줄 수 있는 이슈'만 선별해라.
+(예: 실적/가이던스, 수요/판매, 마진·비용, 생산·공급망, 규제·소송, M&A·대규모 계약, 리콜, 목표가·투자의견 변경 등)
+
+다음 기준으로 한국어 bullet 요약을 만들어라.
+
+- 각 줄은 "· "로 시작
+- 최대 30줄 이내 (가능하면 10~25줄 수준)
+- 비슷한 내용은 묶어서 한 줄로 요약
+- 구체적인 이벤트와 방향(긍정/부정/중립)이 드러나게 쓸 것
+- 너무 일반적인 문장(예: "신중한 투자 필요")만 반복하지 말 것
+- 6~12개월 투자 관점에서 중요한 이슈 위주로 정리
+
+뉴스 목록:
+{bundle_text}
+"""
+
+    try:
+        resp = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=900,
+        )
+        text = resp.choices[0].message.content.strip()
+
+        # 최대 30줄로 강제 제한
+        raw_lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+        limited = raw_lines[:30]
+        return "\n".join(limited) if limited else "관련 뉴스를 요약할 수 없습니다."
+    except Exception as e:
+        print(f"[WARN] _summarize_news_bundle_ko_price_focus 오류: {e}")
+        return "뉴스 종합 요약을 생성하는 데 실패했습니다."
+
+
+# =========================
+# NewsAPI/RSS 기반 종목 뉴스 → 주가 영향 중심 요약(30줄) → HTML 생성 함수
 # =========================
 
 def build_midterm_news_comment_from_apis_combined(ticker, max_items=10, days=14):
@@ -319,7 +399,7 @@ def build_midterm_news_comment_from_apis_combined(ticker, max_items=10, days=14)
         use_articles = articles[:max_items]
 
     # 3) 여러 기사 → 한 번에 한국어 종합 요약
-    summary_ko = _summarize_news_bundle_ko(ticker, use_articles)
+    summary_ko = _summarize_news_bundle_ko_price_focus(ticker, use_articles)
 
     # 4) 줄바꿈을 HTML <br>로 변환
     lines = [ln.strip() for ln in summary_ko.splitlines() if ln.strip()]
