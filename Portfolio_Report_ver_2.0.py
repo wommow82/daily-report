@@ -93,6 +93,63 @@ def open_gsheet(gs_id, retries=3, delay=5):
                 continue
             raise
 
+# =========================
+# 야후 파이낸스 디버그
+# =========================
+
+def debug_yfinance_connectivity(tickers=None):
+    """
+    yfinance가 Yahoo Finance에서 데이터를 제대로 가져오는지 간단 점검하는 함수.
+    - 가격(history)
+    - info 일부 필드
+    - news 개수 / 제목
+    을 콘솔 로그로 출력한다.
+    """
+    if tickers is None:
+        tickers = ["NVDA", "TSLA", "SCHD"]
+
+    print("========== [DEBUG] yfinance connectivity test ==========")
+    for t in tickers:
+        print(f"\n[DEBUG] Ticker: {t}")
+        try:
+            tk = yf.Ticker(t)
+        except Exception as e:
+            print(f"  - Ticker 생성 실패: {e}")
+            continue
+
+        # 1) 가격 확인
+        try:
+            hist = tk.history(period="5d")["Close"].dropna()
+            if hist.empty:
+                print("  - 최근 5일 가격 데이터: 없음 (empty)")
+            else:
+                last_price = float(hist.iloc[-1])
+                print(f"  - 최근 종가: {last_price:.2f}")
+        except Exception as e:
+            print(f"  - 가격 데이터 조회 실패: {e}")
+
+        # 2) info 일부 확인
+        try:
+            info = tk.info or {}
+            name = info.get("shortName") or info.get("longName") or "N/A"
+            fpe = info.get("forwardPE", "N/A")
+            print(f"  - 종목명(shortName): {name}")
+            print(f"  - Fwd PER(info['forwardPE']): {fpe}")
+        except Exception as e:
+            print(f"  - info 조회 실패: {e}")
+
+        # 3) 뉴스 확인
+        try:
+            news_list = tk.news or []
+            print(f"  - news 개수: {len(news_list)}")
+            for i, n in enumerate(news_list[:3]):
+                title = n.get("title")
+                provider = n.get("provider")
+                print(f"    [{i}] provider={provider}, title={title}")
+        except Exception as e:
+            print(f"  - news 조회 실패: {e}")
+    print("========================================================")
+    
 
 # =========================
 # 시세 / 환율 유틸
@@ -1324,4 +1381,8 @@ def main():
 
 
 if __name__ == "__main__":
+    # 1) 야후 파이낸스 디버그
+    debug_yfinance_connectivity(["NVDA", "TSLA", "SCHD"])
+
+    # 2) 기존 리포트 생성 로직
     main()
