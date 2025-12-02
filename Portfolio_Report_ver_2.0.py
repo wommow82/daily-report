@@ -207,6 +207,92 @@ def load_portfolio_from_gsheet():
     )
 
 
+# -----------------------------
+# 기사 판단
+# -----------------------------
+
+def classify_news_sentiment(title: str) -> tuple:
+    """
+    뉴스 제목을 분석해 (sentiment, reason_ko)을 반환한다.
+    sentiment = 'positive' / 'negative' / 'neutral'
+    reason_ko = 한국어 요약 문구
+    """
+
+    t = title.lower()
+
+    # 확장된 호재 키워드
+
+    positive_kw = [
+        "beat", "beats", "tops", "better-than-expected", "above expectations",
+        "stronger-than-expected", "profit rises", "revenue rises",
+        "earnings jump", "earnings surge", "eps grows", "record revenue",
+        "record earnings", "strong demand", "robust demand", "sales rise",
+        "order backlog", "new contract", "secures deal", "partnership",
+        "collaboration", "expansion", "expands", "new orders",
+        "delivery growth", "supply improvement", "upgrade", "upgraded",
+        "raised price target", "price target raised", "overweight",
+        "buy rating", "bullish", "launches", "unveils", "breakthrough",
+        "ai boost", "chip demand surge", "datacenter growth",
+        "strong adoption", "new model delivers", "approval", "approved",
+        "regulatory relief", "antitrust cleared", "investigation closed",
+        "settlement reached", "margin improvement", "cost cuts",
+        "profitability improves", "turnaround progress"
+    ]
+
+    # 확장된 악재 키워드
+
+    negative_kw = [
+        "miss", "misses", "below expectations", "worse-than-expected",
+        "disappointing earnings", "weak results", "profit falls",
+        "revenue drops", "eps plunges", "guidance cut", "lowers outlook",
+        "forecast cut", "weak demand", "slowing demand", "sales slump",
+        "inventory buildup", "declining deliveries", "poor sales",
+        "oversupply", "margin compression", "rising costs", "cost pressures",
+        "profitability deteriorates", "investigation", "probe",
+        "regulatory concerns", "lawsuit", "recall", "antitrust", "shutdown",
+        "supply disruptions", "strike", "union issue", "layoff", "layoffs",
+        "production halt", "downgrade", "downgrades", "cut rating",
+        "price target cut", "liquidity issues", "debt concerns",
+        "bankruptcy", "credit downgrade", "higher rates hit",
+        "inflation pressures", "geopolitical tensions", "commodity surge",
+        "fx headwinds"
+    ]
+
+    # 이슈 카테고리 기반 한국어 요약(reason_ko)
+
+    if any(k in t for k in ["earnings", "results", "revenue", "eps", "profit"]):
+        pos_reason = "실적·매출 호조"
+        neg_reason = "실적 부진"
+    elif any(k in t for k in ["guidance", "outlook", "forecast"]):
+        pos_reason = "전망 상향"
+        neg_reason = "전망 하향"
+    elif any(k in t for k in ["contract", "deal", "order", "partnership"]):
+        pos_reason = "수주·계약·제휴 호재"
+        neg_reason = "수주·계약 관련 악재"
+    elif any(k in t for k in ["delivery", "demand", "sales"]):
+        pos_reason = "수요·판매 강세"
+        neg_reason = "수요 둔화"
+    elif any(k in t for k in ["regulatory", "investigation", "probe", "lawsuit"]):
+        pos_reason = "규제·조사 이슈 완화"
+        neg_reason = "규제·조사 리스크"
+    else:
+        pos_reason = "긍정적 이슈"
+        neg_reason = "부정적 이슈"
+
+    # 감정 판별
+
+    if any(k in t for k in positive_kw):
+        return "positive", pos_reason
+
+    if any(k in t for k in negative_kw):
+        return "negative", neg_reason
+
+
+    # 아무것도 없으면 중립
+
+    return "neutral", "중립적 뉴스"
+
+
 # =========================
 # 계좌별 평가/손익 계산
 # =========================
