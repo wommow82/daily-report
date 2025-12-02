@@ -58,6 +58,193 @@ def colorize_value_html(text, raw_value):
 import os
 
 # =========================
+# 헬퍼 함수 (요약)
+# =========================
+
+import json
+from datetime import datetime, timedelta
+
+def _short_ko_summary_15(text):
+    """
+    주어진 영어 뉴스 텍스트를 한국어 15자 내외로 아주 짧게 요약.
+
+    - OPENAI_API_KEY 필요
+    - 에러나 키 없으면 기본 문구 반환
+    """
+    text = (text or "").strip()
+    if not text:
+        return "요약불가"
+
+    api_key = os.environ.get("OPENAI_API_KEY")
+    if not api_key:
+        return "요약불가"
+
+    try:
+        from openai import OpenAI
+        client = OpenAI(api_key=api_key)
+
+        prompt = (
+            "다음 뉴스 내용을 바탕으로, 주가에 중요한 핵심만 "
+            "한국어 15자 이내로 아주 짧게 요약해줘.\n"
+            "문장 1개, 불필요한 수식어 최소화:\n\n"
+            f"{text}"
+        )
+
+        resp = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=50,
+        )
+        summary = (resp.choices[0].message.content or "").strip()
+        summary = summary.replace("\n", " ").strip()
+        return summary[:15] if summary else "요약실패"
+    except Exception as e:
+        print(f"[WARN] _short_ko_summary_15 오류: {e}")
+        return "요약실패"
+
+
+def _classify_news_sentiment_and_pick_reps(ticker, articles):
+    """
+    기사 리스트에 대해 긍정/부정 감성을 분류하고,
+    각 그룹에서 '가장 최근 기사' 1개를 대표로 뽑은 뒤
+    15자 한글 요약까지 생성.
+
+    입력:
+        ticker   : 종목 티커 (예: "TSLA")
+        articles : _fetch_news_for_ticker_midterm 결과 리스트
+                   각 원소는 {title, description, source, published} 형태 가정
+
+    반환:
+        {
+          "pos_count": int,
+          "neg_count": int,
+          "pos_repr": str or None,  # 대표 긍정 뉴스 15자 요약
+          "neg_repr": str or None,  # 대표 부정 뉴스 15자 요약
+        }
+    """
+    api_key = os.environ.get("OPENAI_API_KEY")
+    if not api_key:
+        return {
+            "pos_count": 0,
+            "neg_count": 0,
+            "pos_repr": None,
+            "neg_repr": None,
+        }
+
+    if not articles:
+        return {
+            "pos_count": 0,
+            "neg_count": 0,
+            "pos_repr": None,
+            "neg_repr": None,
+        }
+
+    try:
+        from openai import OpenAI
+        client = OpenAI(api_key=api_key)
+    except Exception as e:
+        print(f"[WARN] _classify_news_sentiment_and_pick_reps import 오류: {e}")
+        return {
+            "pos_count": 0,
+            "neg_count": 0,
+            "pos_repr": None,
+            "neg_repr": None,
+        }
+
+    # 1) 기사들을 하나의 텍스트로 묶어 번호를 붙여 전달
+    items = []
+    for i, a in enumerate(articles, start=1):
+        title = (a.get("title") or "").strip()
+        desc = (a.get("description") or "").strip()
+        src = (a.get("source") or "").strip()
+        date = a.get("published") or ""
+        item = f"[{i}] {date} {src} - {title}"
+        if desc:
+            item += f"\n{desc}"
+        items.append(item)
+
+    bundle_text = "\n\n".join(items)
+
+    prompt = f"""
+너는 미국 주식 애널리스트이다.
+아래는 {ticker} 관련 뉴스 목록이다.
+
+각 뉴스가 주가에 미치는 방향성을
+'긍정', '부정', '중립' 중 하나로만 분류해라.
+
+JSON 형식으로만 답하라. 예시는 다음과 같다.
+{{
+  "items": [
+    {{"index": 1, "sentiment": "긍정"}},
+    {{"index": 2, "sentiment": "부정"}},
+    {{"index": 3, "sentiment": "중립"}}
+  ]
+}}
+
+뉴스 목록:
+{bundle_text}
+"""
+
+    try:
+        resp = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=400,
+            response_format={"type": "json_object"},
+        )
+        raw = resp.choices[0].message.content
+        data = json.loads(raw)
+        items_sent = data.get("items", [])
+    except Exception as e:
+        print(f"[WARN] 감성 분류 실패, 모두 중립 처리: {e}")
+        items_sent = []
+
+    # 2) 분류 결과를 바탕으로 긍정/부정 인덱스 집계
+    pos_idx = set()
+    neg_idx = set()
+
+    for x in items_sent:
+        try:
+            idx = int(x.get("index"))
+            sent = (x.get("sentiment") or "").strip()
+        except Exception:
+            continue
+        if sent == "긍정":
+            pos_idx.add(idx)
+        elif sent == "부정":
+            neg_idx.add(idx)
+        # "중립"은 카운트하지 않음
+
+    pos_count = len(pos_idx)
+    neg_count = len(neg_idx)
+
+    # 3) 대표 기사 선택 (기사 리스트는 이미 최신순 정렬되어 있다고 가정)
+    pos_repr = None
+    neg_repr = None
+
+    # 기사 번호는 1부터 시작했으므로, index-1 로 접근
+    if pos_idx:
+        # 가장 최근(번호가 작은 것) 긍정 기사 하나
+        rep_i = sorted(pos_idx)[0]
+        art = articles[rep_i - 1]
+        text = (art.get("title") or "") + "\n" + (art.get("description") or "")
+        pos_repr = _short_ko_summary_15(text)
+
+    if neg_idx:
+        rep_i = sorted(neg_idx)[0]
+        art = articles[rep_i - 1]
+        text = (art.get("title") or "") + "\n" + (art.get("description") or "")
+        neg_repr = _short_ko_summary_15(text)
+
+    return {
+        "pos_count": pos_count,
+        "neg_count": neg_count,
+        "pos_repr": pos_repr,
+        "neg_repr": neg_repr,
+    }
+
+
+# =========================
 # 뉴스 여러개 종합요약 함수
 # =========================
 
@@ -141,14 +328,20 @@ def _summarize_news_bundle_ko_price_focus(ticker, articles):
 # NewsAPI/RSS 기반 종목 뉴스 → 주가 영향 중심 요약(30줄) → HTML 생성 함수
 # =========================
 
-def build_midterm_news_comment_from_apis_combined(ticker, max_items=10, days=14):
+def build_midterm_news_comment_from_apis_combined(ticker, max_items=10, days=30):
     """
-    중기 분석 섹션에서 사용할 '통합 뉴스 분석' HTML 생성.
+    중기 분석 섹션에서 사용할 '최근 1개월 뉴스 요약' HTML 생성.
 
+    - 조회 기간: 기본 최근 30일 (1개월)
     - 소스: NewsAPI → 실패 시 Google News RSS
     - 최대 max_items개 기사 사용
     - 티커/회사명 포함 여부로 1차 필터링
-    - 여러 기사를 한 번에 한국어로 종합 요약 (주가 영향 이슈 중심, 최대 30줄)
+    - 기사들을 최신순으로 정렬
+    - OpenAI로 긍정/부정 감성 분류
+    - 긍정/부정 뉴스 갯수 표시
+    - 긍정/부정 각각 대표 뉴스 1개를 뽑아 15자 내외 한글 요약
+      · 긍정: 초록색
+      · 부정: 빨간색
 
     반환:
         HTML 문자열 (<p> ... </p>)
@@ -157,12 +350,12 @@ def build_midterm_news_comment_from_apis_combined(ticker, max_items=10, days=14)
     if not api_key:
         return (
             "<p style='text-align:left;'>"
-            "<strong>뉴스 종합 분석:</strong><br>"
+            "<strong>뉴스 요약 (최근 1개월):</strong><br>"
             "- NEWS_API_KEY가 설정되어 있지 않아 뉴스를 불러올 수 없습니다."
             "</p>"
         )
 
-    # 1) NewsAPI + Google News로 기사 목록 가져오기
+    # 1) NewsAPI + Google News로 기사 목록 가져오기 (최근 days일 기준)
     articles = _fetch_news_for_ticker_midterm(
         ticker=ticker,
         api_key=api_key,
@@ -173,10 +366,41 @@ def build_midterm_news_comment_from_apis_combined(ticker, max_items=10, days=14)
     if not articles:
         return (
             "<p style='text-align:left;'>"
-            "<strong>뉴스 종합 분석:</strong><br>"
+            "<strong>뉴스 요약 (최근 1개월):</strong><br>"
             f"- 최근 {days}일 내 {ticker} 관련 주요 뉴스를 찾지 못했습니다."
             "</p>"
         )
+
+    # 1-1) 추가적으로 '실제 날짜 기준'으로 최근 30일만 필터링 (RSS 대비 방어용)
+    cutoff = datetime.utcnow() - timedelta(days=30)
+    filtered_recent = []
+    for a in articles:
+        # _fetch_news_for_ticker_midterm에서 "published" 필드를 넣었다고 가정
+        p = (a.get("published") or "").strip()
+        dt = None
+        # 간단한 파싱: ISO 또는 YYYY-MM-DD 형태 위주
+        for fmt in ("%Y-%m-%dT%H:%M:%SZ", "%Y-%m-%d %H:%M", "%Y-%m-%d"):
+            try:
+                dt = datetime.strptime(p[:len(fmt)], fmt)
+                break
+            except Exception:
+                continue
+        if dt is None:
+            # 날짜 파싱 실패 시 일단 포함 (너무 보수적으로 버리지 않기 위해)
+            filtered_recent.append(a)
+        else:
+            if dt >= cutoff:
+                filtered_recent.append(a)
+
+    if not filtered_recent:
+        return (
+            "<p style='text-align:left;'>"
+            "<strong>뉴스 요약 (최근 1개월):</strong><br>"
+            f"- 최근 30일 내 {ticker} 관련 유효한 날짜의 뉴스를 찾지 못했습니다."
+            "</p>"
+        )
+
+    articles = filtered_recent
 
     # 2) 티커/회사명 기준으로 관련 기사 필터링
     ticker_upper = ticker.upper()
@@ -204,17 +428,46 @@ def build_midterm_news_comment_from_apis_combined(ticker, max_items=10, days=14)
     else:
         use_articles = articles[:max_items]
 
-    # 3) 여러 기사 → 한 번에 한국어 종합 요약 (주가 영향 이슈 중심, 최대 30줄)
-    summary_ko = _summarize_news_bundle_ko_price_focus(ticker, use_articles)
+    # 2-1) 최신 뉴스 우선 정렬 (published 기준 내림차순)
+    def _parse_dt(a):
+        p = (a.get("published") or "").strip()
+        for fmt in ("%Y-%m-%dT%H:%M:%SZ", "%Y-%m-%d %H:%M", "%Y-%m-%d"):
+            try:
+                return datetime.strptime(p[:len(fmt)], fmt)
+            except Exception:
+                continue
+        return datetime.min
 
-    # 4) 줄바꿈을 HTML <br>로 변환 (여기서도 30줄 넘으면 재차 제한)
-    raw_lines = [ln.strip() for ln in summary_ko.splitlines() if ln.strip()]
-    limited_lines = raw_lines[:30]
-    html_body = "<br>".join(limited_lines) if limited_lines else "관련 뉴스를 요약할 수 없습니다."
+    use_articles = sorted(use_articles, key=_parse_dt, reverse=True)
+
+    # 3) 긍정/부정 분류 및 대표 뉴스 선별 + 15자 요약
+    sent_info = _classify_news_sentiment_and_pick_reps(ticker, use_articles)
+    pos_count = sent_info["pos_count"]
+    neg_count = sent_info["neg_count"]
+    pos_repr = sent_info["pos_repr"]
+    neg_repr = sent_info["neg_repr"]
+
+    # 4) HTML 구성 (색상 강조)
+    lines = []
+    lines.append(
+        f"<span style='color:green;'>긍정 뉴스 {pos_count}건</span>, "
+        f"<span style='color:red;'>부정 뉴스 {neg_count}건</span>"
+    )
+
+    if pos_repr:
+        lines.append(
+            f"<span style='color:green;'>· 대표 긍정: {pos_repr}</span>"
+        )
+    if neg_repr:
+        lines.append(
+            f"<span style='color:red;'>· 대표 부정: {neg_repr}</span>"
+        )
+
+    html_body = "<br>".join(lines)
 
     html = (
         "<p style='text-align:left;'>"
-        "<strong>뉴스 종합 분석 (주가 영향 이슈, 6~12개월):</strong><br>"
+        "<strong>뉴스 요약 (최근 1개월, 주가 영향 이슈):</strong><br>"
         f"{html_body}"
         "</p>"
     )
