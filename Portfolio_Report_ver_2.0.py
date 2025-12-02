@@ -55,6 +55,203 @@ def colorize_value_html(text, raw_value):
 
     return f'<span style="color:{color}">{text}</span>'
 
+import os
+
+# =========================
+# NEWS API / Google 뉴스 가져오는 함수
+# =========================
+
+def _summarize_news_ko_15(text):
+    """
+    뉴스 제목/본문을 받아 한국어 15자 이내로 요약.
+
+    - OPENAI_API_KEY 없으면: '뉴스요약불가' 반환
+    - 예외 발생 시: '뉴스요약실패' 반환
+    """
+    text = (text or "").strip()
+    if not text:
+        return "뉴스요약불가"
+
+    api_key = os.environ.get("OPENAI_API_KEY")
+    if not api_key:
+        return "뉴스요약불가"
+
+    try:
+        # 지연 import (상단에 이미 있다면 제거해도 됨)
+        from openai import OpenAI
+
+        client = OpenAI(api_key=api_key)
+        prompt = (
+            "다음 영어 뉴스의 핵심 투자 포인트를 "
+            "한국어로 15자 이내로 아주 짧게 요약해줘.\n"
+            "문장 1개만, 부호 최소화:\n\n"
+            f"{text}"
+        )
+        resp = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=50,
+        )
+        summary = resp.choices[0].message.content.strip()
+        # 혹시 길게 나와도 15자로 강제 자르기
+        summary = summary.replace("\n", " ").strip()
+        return summary[:15] if summary else "뉴스요약실패"
+    except Exception:
+        return "뉴스요약실패"
+
+
+def _fetch_news_for_ticker_midterm(ticker, api_key, page_size=3, days=7):
+    """
+    종목 뉴스 가져오기 (중기 분석용):
+    - 1순위: NewsAPI
+    - 2순위: Google News RSS fallback
+
+    Returns:
+        list of dict: [{title, url, source, published}, ...]
+    """
+    from datetime import datetime, timedelta
+    import requests
+    import feedparser
+
+    articles = []
+
+    # 1️⃣ NewsAPI 시도
+    try:
+        url = "https://newsapi.org/v2/everything"
+        params = {
+            "q": ticker,
+            "apiKey": api_key,
+            "language": "en",
+            "sortBy": "publishedAt",
+            "pageSize": page_size,
+            "from": (datetime.today() - timedelta(days=days)).strftime("%Y-%m-%d"),
+        }
+        r = requests.get(url, params=params, timeout=20)
+        if r.status_code == 200:
+            data = r.json()
+            for a in data.get("articles", []):
+                articles.append({
+                    "title": a.get("title"),
+                    "url": a.get("url"),
+                    "source": a.get("source", {}).get("name", ""),
+                    "published": a.get("publishedAt", "")[:10],
+                })
+    except Exception as e:
+        print(f"⚠️ NewsAPI 오류(midterm): {e}")
+
+    # 2️⃣ fallback → Google News RSS
+    if not articles:
+        try:
+            rss_url = (
+                f"https://news.google.com/rss/search?"
+                f"q={ticker}+stock&hl=en&gl=US&ceid=US:en"
+            )
+            feed = feedparser.parse(rss_url)
+            for entry in feed.entries[:page_size]:
+                src = "Google News"
+                if hasattr(entry, "source") and getattr(entry, "source"):
+                    try:
+                        src = getattr(entry, "source").get("title", "Google News")
+                    except Exception:
+                        src = "Google News"
+
+                published = ""
+                if hasattr(entry, "published"):
+                    published = entry.published[:16]
+
+                articles.append({
+                    "title": entry.title,
+                    "url": entry.link,
+                    "source": src,
+                    "published": published,
+                })
+        except Exception as e:
+            print(f"⚠️ Google News RSS 오류(midterm): {e}")
+
+    return articles
+
+
+def _extract_article_date_midterm(article):
+    """
+    뉴스 dict에서 날짜를 안전하게 추출 (NewsAPI / RSS 공용)
+    """
+    from datetime import datetime
+
+    date_raw = (
+        article.get("publishedAt")
+        or article.get("pubDate")
+        or article.get("date")
+        or article.get("published")
+        or ""
+    )
+    if not date_raw:
+        return "N/A"
+
+    # ISO8601 시도 (NewsAPI)
+    try:
+        dt = datetime.fromisoformat(date_raw.replace("Z", "+00:00"))
+        return dt.strftime("%Y-%m-%d")
+    except Exception:
+        # RSS 등 기타 포맷: 앞 10자리만
+        return date_raw[:10]
+
+
+def build_midterm_news_comment_from_apis(ticker, max_items=2, days=7):
+    """
+    NVDA/TSLA 중기 분석 섹션에서 사용할 뉴스 요약 HTML 생성.
+
+    - 소스: NewsAPI → 실패 시 Google News RSS
+    - 최대 max_items개
+    - 각 뉴스는 한국어 15자 이내 요약
+    - 반환: HTML <p> 블록
+    """
+    api_key = os.environ.get("NEWS_API_KEY")
+    if not api_key:
+        return (
+            "<p style='text-align:left;'>"
+            "<strong>뉴스 요약:</strong><br>"
+            "- NEWS_API_KEY가 설정되어 있지 않아 뉴스를 불러올 수 없습니다."
+            "</p>"
+        )
+
+    articles = _fetch_news_for_ticker_midterm(
+        ticker=ticker,
+        api_key=api_key,
+        page_size=max_items,
+        days=days,
+    )
+
+    if not articles:
+        return (
+            "<p style='text-align:left;'>"
+            "<strong>뉴스 요약:</strong><br>"
+            f"- 최근 {days}일 내 주요 뉴스를 찾지 못했습니다."
+            "</p>"
+        )
+
+    lines = []
+    for a in articles[:max_items]:
+        title = (a.get("title") or "").strip()
+        desc = (a.get("description") or "").strip()
+        base_text = (title + "\n" + desc).strip()
+
+        summary_ko = _summarize_news_ko_15(base_text)
+        date_str = _extract_article_date_midterm(a)
+        src = (a.get("source") or "").strip()
+
+        if src:
+            line = f"- {date_str} {src}: {summary_ko}"
+        else:
+            line = f"- {date_str}: {summary_ko}"
+
+        lines.append(line)
+
+    html = "<p style='text-align:left;'><strong>뉴스 요약:</strong><br>"
+    html += "<br>".join(lines)
+    html += "</p>"
+    return html
+
+
 
 # =========================
 # Google Sheets 클라이언트
@@ -93,63 +290,7 @@ def open_gsheet(gs_id, retries=3, delay=5):
                 continue
             raise
 
-# =========================
-# 야후 파이낸스 디버그
-# =========================
 
-def debug_yfinance_connectivity(tickers=None):
-    """
-    yfinance가 Yahoo Finance에서 데이터를 제대로 가져오는지 간단 점검하는 함수.
-    - 가격(history)
-    - info 일부 필드
-    - news 개수 / 제목
-    을 콘솔 로그로 출력한다.
-    """
-    if tickers is None:
-        tickers = ["NVDA", "TSLA", "SCHD"]
-
-    print("========== [DEBUG] yfinance connectivity test ==========")
-    for t in tickers:
-        print(f"\n[DEBUG] Ticker: {t}")
-        try:
-            tk = yf.Ticker(t)
-        except Exception as e:
-            print(f"  - Ticker 생성 실패: {e}")
-            continue
-
-        # 1) 가격 확인
-        try:
-            hist = tk.history(period="5d")["Close"].dropna()
-            if hist.empty:
-                print("  - 최근 5일 가격 데이터: 없음 (empty)")
-            else:
-                last_price = float(hist.iloc[-1])
-                print(f"  - 최근 종가: {last_price:.2f}")
-        except Exception as e:
-            print(f"  - 가격 데이터 조회 실패: {e}")
-
-        # 2) info 일부 확인
-        try:
-            info = tk.info or {}
-            name = info.get("shortName") or info.get("longName") or "N/A"
-            fpe = info.get("forwardPE", "N/A")
-            print(f"  - 종목명(shortName): {name}")
-            print(f"  - Fwd PER(info['forwardPE']): {fpe}")
-        except Exception as e:
-            print(f"  - info 조회 실패: {e}")
-
-        # 3) 뉴스 확인
-        try:
-            news_list = tk.news or []
-            print(f"  - news 개수: {len(news_list)}")
-            for i, n in enumerate(news_list[:3]):
-                title = n.get("title")
-                provider = n.get("provider")
-                print(f"    [{i}] provider={provider}, title={title}")
-        except Exception as e:
-            print(f"  - news 조회 실패: {e}")
-    print("========================================================")
-    
 
 # =========================
 # 시세 / 환율 유틸
@@ -483,37 +624,35 @@ def enrich_holdings_with_prices(
 
 def analyze_midterm_ticker(ticker):
     """
-    중단기 투자 분석용 함수 (조심스러운 뉴스 처리 버전).
+    중단기(6~12개월) 투자 분석용 함수.
 
     1) 수치:
-       - 중기 상승 확률 %
-       - 매수 타이밍 %
-       - 매도 타이밍 %
-       - 1년 목표수익 범위
+       - 중기 상승 확률 % (UpProb)
+       - 매수 타이밍 % (BuyTiming)  : 1년 고가/저가 대비 현재 위치
+       - 매도 타이밍 % (SellTiming) : 1년 고가/저가 대비 현재 위치
+       - 1년 목표수익 범위 (문자열, 예: "12~25%")
 
-    2) '핵심 투자 코멘트' (Comment, HTML):
-       - yfinance의 tk.news에서 신뢰도 있는 헤드라인이 있을 때만
-         최대 2개를 골라 한국어로 자연스럽게 번역해서 보여준다.
-       - 헤드라인이 없거나 구조가 이상하면
-         깔끔하게 "뉴스 없음" 문구를 출력한다.
+    2) 뉴스 코멘트 (Comment, HTML):
+       - NewsAPI + Google News RSS 기반
+       - 각 기사별로 한국어 15자 이내 요약 (build_midterm_news_comment_from_apis 사용)
     """
-    tk = yf.Ticker(ticker)
-
     # -----------------------------
-    # 1. 가격 데이터 확보
+    # 1. 가격 데이터 (1년) 가져오기
     # -----------------------------
     try:
-        hist = tk.history(period="2y")
-        closes = hist["Close"].dropna()
-        if len(closes) < 60:
-            raise ValueError("가격 데이터 부족")
-    except Exception:
-        comment_html = (
-            "<p style='text-align:left;'>"
-            "<strong>뉴스 요약:</strong><br>"
-            "- 가격·뉴스 데이터 부족으로 헤드라인을 가져올 수 없습니다."
-            "</p>"
-        )
+        tk = yf.Ticker(ticker)
+        hist = tk.history(period="1y")["Close"].dropna()
+
+        # 데이터가 너무 적으면 의미 있는 수치 계산이 어려우므로 예외 처리
+        if hist.empty or len(hist) < 40:
+            raise ValueError("데이터 부족")
+
+        closes = hist.copy()
+        last = float(closes.iloc[-1])
+    except Exception as e:
+        # 가격 데이터 자체가 부족한 경우 → 수치는 None, 뉴스만 출력
+        print(f"[WARN] analyze_midterm_ticker({ticker}) 가격 데이터 오류: {e}")
+        comment_html = build_midterm_news_comment_from_apis(ticker)
         return {
             "Ticker": ticker,
             "UpProb": None,
@@ -523,10 +662,8 @@ def analyze_midterm_ticker(ticker):
             "Comment": comment_html,
         }
 
-    last = float(closes.iloc[-1])
-
     # -----------------------------
-    # 2. 수익률·변동성 계산 (수치용)
+    # 2. 수익률·변동성 계산
     # -----------------------------
     # 1년 수익률
     if len(closes) > 252:
@@ -535,119 +672,76 @@ def analyze_midterm_ticker(ticker):
         start_1y = float(closes.iloc[0])
     ret_1y = (last / start_1y - 1.0) * 100.0 if start_1y > 0 else 0.0
 
-    # 3개월 수익률
+    # 3개월 수익률 (63 거래일 기준), 부족하면 1년 수익률을 근사 사용
     if len(closes) > 63:
         start_3m = float(closes.iloc[-63])
         ret_3m = (last / start_3m - 1.0) * 100.0 if start_3m > 0 else 0.0
     else:
         ret_3m = ret_1y / 4.0
 
-    # 연간 변동성
+    # 연간 변동성 (로그수익률 기준)
     rets = np.log(closes / closes.shift(1)).dropna()
     vol_annual = float(rets.std() * np.sqrt(252)) if len(rets) > 0 else 0.0
+    vol_pct = vol_annual * 100.0  # % 단위로도 보관
 
     # -----------------------------
-    # 3. 투자 신호 (상승확률, 매수/매도 타이밍, 목표수익 범위)
+    # 3. 휴리스틱 기반 투자 신호
     # -----------------------------
+    # (1) 중기 상승 확률 점수 (0~100 사이로 압축)
     score = 50.0
-    # 모멘텀(1년 수익률) 반영
-    score += float(np.tanh(ret_1y / 40.0)) * 25.0
-    # 변동성 패널티
-    score -= float(np.tanh(vol_annual * 2.0)) * 15.0
-    up_prob = max(5.0, min(95.0, score))
 
-    last_252 = closes[-252:] if len(closes) >= 252 else closes
-    low_52w = float(last_252.min())
-    high_52w = float(last_252.max())
-    if high_52w > low_52w:
-        pos = (last - low_52w) / (high_52w - low_52w)  # 0~1
+    #   - 1년 모멘텀: 강할수록 가산
+    score += float(np.tanh(ret_1y / 40.0)) * 25.0
+    #   - 3개월 모멘텀: 최근 추세 반영
+    score += float(np.tanh(ret_3m / 20.0)) * 20.0
+    #   - 변동성 패널티: 변동성이 높을수록 감점
+    score -= float(np.tanh(vol_annual * 2.0)) * 15.0
+
+    up_prob = max(5.0, min(95.0, score))  # 5%~95% 사이로 클램프
+
+    # (2) 매수/매도 타이밍 %  (1년 고가/저가 대비 위치로 결정)
+    hi_1y = float(closes.max())
+    lo_1y = float(closes.min())
+    if hi_1y > lo_1y:
+        pos = (last - lo_1y) / (hi_1y - lo_1y)  # 0=저점 근처, 1=고점 근처
     else:
         pos = 0.5
 
-    buy_score = max(5.0, min(95.0, (1.0 - pos) * 60.0 + max(0.0, -ret_3m) * 0.5))
-    sell_score = max(5.0, min(95.0, pos * 60.0 + max(0.0, ret_1y) * 0.5))
+    buy_timing = (1.0 - pos) * 100.0  # 저점에 가까울수록 매수 타이밍↑
+    sell_timing = pos * 100.0         # 고점에 가까울수록 매도 타이밍↑
 
-    band = vol_annual * 100.0
-    low = max(-50.0, ret_1y - band)
-    high = min(100.0, ret_1y + band)
-    target_range = f"{low:,.1f}% ~ {high:,.1f}%"
+    buy_timing = max(5.0, min(95.0, buy_timing))
+    sell_timing = max(5.0, min(95.0, sell_timing))
 
-    # -----------------------------
-    # 4. yfinance 뉴스에서 "신뢰도 있는" 헤드라인 최대 2개 추출
-    # -----------------------------
-    try:
-        raw_news = tk.news
-    except Exception:
-        raw_news = None
+    # (3) 1년 목표수익 범위 (단순 휴리스틱)
+    #     - up_prob가 높을수록 기대 수익 구간을 상향
+    #     - 너무 과격한 수치는 피하고, 대략적인 감각만 제공
+    base = (up_prob - 50.0) / 50.0  # -1.0 ~ +1.0 정도 범위
+    low_pct = 10.0 + base * 15.0    # 대략 0~25% 근처
+    high_pct = 10.0 + base * 35.0   # 대략 0~60% 근처
 
-    news_list = raw_news or []
-    reliable_headlines = []
+    # 변동성도 약간 반영 (변동성이 높으면 상단 폭을 조금 넓힘)
+    high_pct += min(10.0, vol_pct * 0.1)
 
-    for n in news_list:
-        try:
-            title = (n.get("title") or "").strip()
-        except Exception:
-            title = ""
+    # 안전한 클램프
+    low_pct = max(-20.0, min(25.0, low_pct))
+    high_pct = max(low_pct + 5.0, min(60.0, high_pct))
 
-        # 너무 짧거나 비어 있으면 버림
-        if len(title) < 8:
-            continue
-
-        ts = n.get("providerPublishTime")
-        if ts:
-            try:
-                ts_int = int(ts)
-                date_str = datetime.fromtimestamp(ts_int).strftime("%Y-%m-%d")
-            except Exception:
-                date_str = ""
-        else:
-            date_str = ""
-
-        reliable_headlines.append((date_str, title))
-        if len(reliable_headlines) >= 2:
-            break
+    target_range = f"{low_pct:.0f}~{high_pct:.0f}%"
 
     # -----------------------------
-    # 5. 헤드라인이 없으면 "뉴스 없음"을 명시적으로 표시
+    # 4. 뉴스 코멘트 (NewsAPI + Google News, 15자 요약)
     # -----------------------------
-    if not reliable_headlines:
-        comment_html = (
-            "<p style='text-align:left;'>"
-            "<strong>뉴스 요약:</strong><br>"
-            "- 현재 이 종목에 대해 yfinance를 통해 가져올 수 있는 신뢰할 만한 헤드라인이 없습니다. "
-            "실적 발표, 섹터 뉴스, 정책·금리 이벤트를 별도로 확인하는 것이 좋습니다."
-            "</p>"
-        )
-    else:
-        # -----------------------------
-        # 6. 헤드라인을 한국어로 번역하여 최대 2개만 표기
-        # -----------------------------
-        lines = []
-        for date_str, title in reliable_headlines:
-            # OpenAI로 한국어 번역 (실패 시 원문 사용)
-            kr = translate_to_korean(title)
-            if date_str:
-                lines.append(f"- {date_str}: {kr}")
-            else:
-                lines.append(f"- {kr}")
-
-        news_html = "<br>".join(lines)
-
-        comment_html = (
-            "<p style='text-align:left;'>"
-            "<strong>뉴스 요약:</strong><br>"
-            f"{news_html}"
-            "</p>"
-        )
+    comment_html = build_midterm_news_comment_from_apis(ticker)
 
     # -----------------------------
-    # 7. 결과 반환
+    # 5. 최종 리턴 (build_midterm_analysis_html 에서 사용)
     # -----------------------------
     return {
         "Ticker": ticker,
-        "UpProb": up_prob,
-        "BuyTiming": buy_score,
-        "SellTiming": sell_score,
+        "UpProb": round(up_prob, 1),
+        "BuyTiming": round(buy_timing, 1),
+        "SellTiming": round(sell_timing, 1),
         "TargetRange": target_range,
         "Comment": comment_html,
     }
@@ -1388,8 +1482,6 @@ def main():
 
 
 if __name__ == "__main__":
-    # 1) 야후 파이낸스 디버그
-    debug_yfinance_connectivity(["NVDA", "TSLA", "SCHD"])
 
     # 2) 기존 리포트 생성 로직
     main()
