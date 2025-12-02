@@ -208,89 +208,31 @@ def load_portfolio_from_gsheet():
 
 
 # -----------------------------
-# 기사 판단
+# 기사 번역
 # -----------------------------
 
-def classify_news_sentiment(title: str) -> tuple:
+def translate_to_korean(text: str) -> str:
     """
-    뉴스 제목을 분석해 (sentiment, reason_ko)을 반환한다.
-    sentiment = 'positive' / 'negative' / 'neutral'
-    reason_ko = 한국어 요약 문구
+    OpenAI API를 사용해 영어 문장을 한국어 자연스러운 문장으로 번역.
+    핵심 요점 요약도 함께 자동 처리됨.
     """
-
-    t = title.lower()
-
-    # 확장된 호재 키워드
-
-    positive_kw = [
-        "beat", "beats", "tops", "better-than-expected", "above expectations",
-        "stronger-than-expected", "profit rises", "revenue rises",
-        "earnings jump", "earnings surge", "eps grows", "record revenue",
-        "record earnings", "strong demand", "robust demand", "sales rise",
-        "order backlog", "new contract", "secures deal", "partnership",
-        "collaboration", "expansion", "expands", "new orders",
-        "delivery growth", "supply improvement", "upgrade", "upgraded",
-        "raised price target", "price target raised", "overweight",
-        "buy rating", "bullish", "launches", "unveils", "breakthrough",
-        "ai boost", "chip demand surge", "datacenter growth",
-        "strong adoption", "new model delivers", "approval", "approved",
-        "regulatory relief", "antitrust cleared", "investigation closed",
-        "settlement reached", "margin improvement", "cost cuts",
-        "profitability improves", "turnaround progress"
-    ]
-
-    # 확장된 악재 키워드
-
-    negative_kw = [
-        "miss", "misses", "below expectations", "worse-than-expected",
-        "disappointing earnings", "weak results", "profit falls",
-        "revenue drops", "eps plunges", "guidance cut", "lowers outlook",
-        "forecast cut", "weak demand", "slowing demand", "sales slump",
-        "inventory buildup", "declining deliveries", "poor sales",
-        "oversupply", "margin compression", "rising costs", "cost pressures",
-        "profitability deteriorates", "investigation", "probe",
-        "regulatory concerns", "lawsuit", "recall", "antitrust", "shutdown",
-        "supply disruptions", "strike", "union issue", "layoff", "layoffs",
-        "production halt", "downgrade", "downgrades", "cut rating",
-        "price target cut", "liquidity issues", "debt concerns",
-        "bankruptcy", "credit downgrade", "higher rates hit",
-        "inflation pressures", "geopolitical tensions", "commodity surge",
-        "fx headwinds"
-    ]
-
-    # 이슈 카테고리 기반 한국어 요약(reason_ko)
-
-    if any(k in t for k in ["earnings", "results", "revenue", "eps", "profit"]):
-        pos_reason = "실적·매출 호조"
-        neg_reason = "실적 부진"
-    elif any(k in t for k in ["guidance", "outlook", "forecast"]):
-        pos_reason = "전망 상향"
-        neg_reason = "전망 하향"
-    elif any(k in t for k in ["contract", "deal", "order", "partnership"]):
-        pos_reason = "수주·계약·제휴 호재"
-        neg_reason = "수주·계약 관련 악재"
-    elif any(k in t for k in ["delivery", "demand", "sales"]):
-        pos_reason = "수요·판매 강세"
-        neg_reason = "수요 둔화"
-    elif any(k in t for k in ["regulatory", "investigation", "probe", "lawsuit"]):
-        pos_reason = "규제·조사 이슈 완화"
-        neg_reason = "규제·조사 리스크"
-    else:
-        pos_reason = "긍정적 이슈"
-        neg_reason = "부정적 이슈"
-
-    # 감정 판별
-
-    if any(k in t for k in positive_kw):
-        return "positive", pos_reason
-
-    if any(k in t for k in negative_kw):
-        return "negative", neg_reason
-
-
-    # 아무것도 없으면 중립
-
-    return "neutral", "중립적 뉴스"
+    try:
+        resp = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {
+                    "role": "system",
+                    "content": "영어 뉴스 제목을 한국어 자연스러운 한 줄 문장으로 요약·번역하세요. 과도한 의역 금지. 핵심만 담기."
+                },
+                {"role": "user", "content": text}
+            ],
+            max_tokens=80,
+            temperature=0.2
+        )
+        return resp.choices[0].message.content.strip()
+    except Exception:
+        # 실패하면 원문을 그대로 반환
+        return text
 
 
 # =========================
@@ -486,20 +428,8 @@ def analyze_midterm_ticker(ticker):
     """
     중단기 투자 분석용 함수.
 
-    1) 수치:
-       - 중기 상승 확률 %
-       - 매수 타이밍 %
-       - 매도 타이밍 %
-       - 1년 목표수익 범위
-       → 기존 로직 유지
-
-    2) '핵심 투자 코멘트' (HTML):
-       - 야후파이낸스 뉴스 중 상위 2개 기사만 사용 (조회수 대신 순서로 대체)
-       - 각 기사를 classify_news_sentiment()로 분류하여
-         호재/악재 reason_ko를 모으고, 3줄로 요약:
-           호재: (초록색)
-           악재: (빨간색)
-           평가: (검정)
+    * 투자 신호(수치) 계산은 기존 동일
+    * 헤드라인 상위 2개를 가져와 한국어 자연 번역 후 리스트업
     """
     tk = yf.Ticker(ticker)
 
@@ -513,11 +443,9 @@ def analyze_midterm_ticker(ticker):
             raise ValueError("가격 데이터 부족")
     except Exception:
         comment_html = (
-            "<p>"
-            "<span style='color:green;'><strong>호재:</strong> 데이터 부족</span><br>"
-            "<span style='color:red;'><strong>악재:</strong> 데이터 부족</span><br>"
-            "<strong>평가:</strong> 뉴스·가격 데이터 부족. "
-            "섹터/정책/실적을 별도로 점검할 필요가 있습니다."
+            "<p style='text-align:left;'>"
+            "<strong>뉴스 요약:</strong><br>"
+            "- 가격·뉴스 데이터 부족으로 헤드라인을 가져올 수 없습니다."
             "</p>"
         )
         return {
@@ -532,39 +460,36 @@ def analyze_midterm_ticker(ticker):
     last = float(closes.iloc[-1])
 
     # -----------------------------
-    # 2. 수익률·변동성 계산 (수치용)
+    # 2. 수익률·변동성 계산
     # -----------------------------
-    # 1년 수익률
     if len(closes) > 252:
         start_1y = float(closes.iloc[-252])
     else:
         start_1y = float(closes.iloc[0])
-    ret_1y = (last / start_1y - 1.0) * 100.0 if start_1y > 0 else 0.0
+    ret_1y = (last / start_1y - 1.0) * 100.0
 
-    # 3개월 수익률
     if len(closes) > 63:
         start_3m = float(closes.iloc[-63])
-        ret_3m = (last / start_3m - 1.0) * 100.0 if start_3m > 0 else 0.0
+        ret_3m = (last / start_3m - 1.0) * 100.0
     else:
         ret_3m = ret_1y / 4.0
 
-    # 연간 변동성
     rets = np.log(closes / closes.shift(1)).dropna()
     vol_annual = float(rets.std() * np.sqrt(252)) if len(rets) > 0 else 0.0
 
     # -----------------------------
-    # 3. 투자 신호 (상승확률, 매수/매도 타이밍, 목표수익 범위)
+    # 3. 투자 신호 계산
     # -----------------------------
     score = 50.0
-    score += float(np.tanh(ret_1y / 40.0)) * 25.0    # 모멘텀
-    score -= float(np.tanh(vol_annual * 2.0)) * 15.0 # 변동성 패널티
+    score += float(np.tanh(ret_1y / 40.0)) * 25.0
+    score -= float(np.tanh(vol_annual * 2.0)) * 15.0
     up_prob = max(5.0, min(95.0, score))
 
     last_252 = closes[-252:] if len(closes) >= 252 else closes
     low_52w = float(last_252.min())
     high_52w = float(last_252.max())
     if high_52w > low_52w:
-        pos = (last - low_52w) / (high_52w - low_52w)  # 0~1
+        pos = (last - low_52w) / (high_52w - low_52w)
     else:
         pos = 0.5
 
@@ -577,72 +502,51 @@ def analyze_midterm_ticker(ticker):
     target_range = f"{low:,.1f}% ~ {high:,.1f}%"
 
     # -----------------------------
-    # 4. 야후 뉴스 상위 2개로 호재/악재 판단
-    #    (조회수 대신 '리스트 순서'를 중요도 proxy로 사용)
+    # 4. Yahoo 뉴스 상위 2개 가져오기
     # -----------------------------
     try:
         news_list = tk.news or []
     except Exception:
         news_list = []
 
-    # 상위 2개 기사만 사용
     top_news = news_list[:2]
+    translated_news = []
 
-    bull_reasons = []
-    bear_reasons = []
-
-    for n in top_news:
-        raw_title = n.get("title", "")
-        if not raw_title:
-            continue
-
-        sentiment, reason_ko = classify_news_sentiment(raw_title)
-        if sentiment == "positive":
-            bull_reasons.append(reason_ko)
-        elif sentiment == "negative":
-            bear_reasons.append(reason_ko)
-
-    # 중복 제거
-    bull_reasons = list(dict.fromkeys(bull_reasons))
-    bear_reasons = list(dict.fromkeys(bear_reasons))
-
-    # 호재/악재 텍스트
-    bull_text = " / ".join(bull_reasons) if bull_reasons else "뚜렷한 호재 없음"
-    bear_text = " / ".join(bear_reasons) if bear_reasons else "뚜렷한 악재 없음"
-
-    # 평가 문구
-    if bull_reasons and bear_reasons:
-        eval_text = (
-            "긍정·부정 이슈가 동시에 존재하는 구간 / "
-            "단기 변동성이 커질 수 있어 중단기 기준으로는 분할 접근과 리스크 관리가 중요"
-        )
-    elif bull_reasons and not bear_reasons:
-        eval_text = (
-            "뉴스 모멘텀이 우호적인 구간 / "
-            "이미 호재가 일정 부분 반영되었을 수 있어 분할 매수와 비중 관리가 필요"
-        )
-    elif bear_reasons and not bull_reasons:
-        eval_text = (
-            "악재 이슈가 부각된 구간 / "
-            "보수적 포지셔닝과 손절·현금 비중 관리가 유리한 구간"
-        )
+    if not top_news:
+        translated_news.append("- 표시할 수 있는 주요 뉴스가 없습니다.")
     else:
-        eval_text = (
-            "대표 기사 기준으로 뚜렷한 방향성이 드러나지 않는 구간 / "
-            "실적·거시환경·정책 이벤트를 중심으로 방향성을 재점검할 필요"
-        )
+        for n in top_news:
+            title = n.get("title", "")
+            ts = n.get("providerPublishTime")
 
-    # -----------------------------
-    # 5. HTML (호재=초록, 악재=빨강, 평가=검정)
-    # -----------------------------
+            if ts:
+                try:
+                    date_str = datetime.fromtimestamp(int(ts)).strftime("%Y-%m-%d")
+                except:
+                    date_str = ""
+            else:
+                date_str = ""
+
+            # 한국어 번역
+            kr = translate_to_korean(title)
+
+            if date_str:
+                translated_news.append(f"- {date_str}: {kr}")
+            else:
+                translated_news.append(f"- {kr}")
+
+    news_html = "<br>".join(translated_news)
+
     comment_html = (
         "<p style='text-align:left;'>"
-        f"<span style='color:green;'><strong>호재:</strong> {bull_text}</span><br>"
-        f"<span style='color:red;'><strong>악재:</strong> {bear_text}</span><br>"
-        f"<strong>평가:</strong> {eval_text}"
+        "<strong>뉴스 요약:</strong><br>"
+        f"{news_html}"
         "</p>"
     )
 
+    # -----------------------------
+    # 5. 결과 반환
+    # -----------------------------
     return {
         "Ticker": ticker,
         "UpProb": up_prob,
