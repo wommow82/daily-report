@@ -401,7 +401,8 @@ def analyze_midterm_ticker(ticker):
     가격/변동성/밸류에이션 + 최근 뉴스 방향성을 반영한
     중단기(6~12개월) 휴리스틱 분석.
     - 수치는 5~95% 범위로 클리핑.
-    - '핵심 투자 코멘트'에 투자전문가 관점의 한 줄 요약 생성.
+    - '핵심 투자 코멘트'에 투자전문가 관점의 한 줄 요약 생성
+      (호재/악재 뉴스까지 포함).
     """
     tk = yf.Ticker(ticker)
     try:
@@ -509,26 +510,44 @@ def analyze_midterm_ticker(ticker):
     else:
         beta_comment = "베타 정보 제한"
 
-    # 최근 뉴스 방향성(긍/부정까지는 단순)
+    # 최근 뉴스에서 호재/악재 한 줄 추출
     try:
         news_list = tk.news or []
     except Exception:
         news_list = []
 
+    news_line = "최근 뉴스 방향성 파악 제한"
     if news_list:
-        title0 = news_list[0].get("title", "").lower()
-        if any(k in title0 for k in ["beat", "strong", "record", "surge", "rally"]):
-            news_dir = "최근 뉴스 톤은 비교적 우호적"
-        elif any(k in title0 for k in ["miss", "warning", "probe", "slump", "cut"]):
-            news_dir = "최근 뉴스 톤은 경고·부정 이슈 포함"
+        n0 = news_list[0]
+        title_raw = n0.get("title", "").strip()
+        title = title_raw
+        if len(title) > 50:
+            title = title[:47] + "..."
+        ts = n0.get("providerPublishTime")
+        if ts:
+            try:
+                date_str = datetime.fromtimestamp(int(ts)).strftime("%Y-%m-%d")
+                title_with_date = f"{title}({date_str})"
+            except Exception:
+                title_with_date = title
         else:
-            news_dir = "최근 뉴스 톤은 혼재"
-    else:
-        news_dir = "최근 뉴스 방향성 파악 제한"
+            title_with_date = title
+
+        lower = title_raw.lower()
+        bullish_keywords = ["beat", "record", "surge", "rally", "upgrade", "strong", "growth"]
+        bearish_keywords = ["miss", "warning", "probe", "slump", "cut", "downgrade", "weak", "slowdown", "recall"]
+
+        sentiment = "혼재된 이슈"
+        if any(k in lower for k in bullish_keywords):
+            sentiment = "호재성 이슈"
+        elif any(k in lower for k in bearish_keywords):
+            sentiment = "악재성 이슈"
+
+        news_line = f"최근 '{title_with_date}' 등 {sentiment}로 단기 변동성에 영향."
 
     comment = (
-        f"{vol_comment}, {val_comment}, {beta_comment} · {news_dir}. "
-        f"중단기(6~12개월) 기준으로 모멘텀·실적·정책 이슈를 함께 점검할 필요가 있음."
+        f"{vol_comment}, {val_comment}, {beta_comment}. "
+        f"{news_line} 중단기(6~12개월) 기준으로 실적·정책·섹터 수요를 함께 점검할 필요가 있음."
     )
 
     return {
@@ -539,6 +558,7 @@ def analyze_midterm_ticker(ticker):
         "TargetRange": target_range,
         "Comment": comment,
     }
+
 
 def build_midterm_context(ticker):
     """
@@ -629,7 +649,7 @@ def build_midterm_analysis_html(df_enriched):
         stat = analyze_midterm_ticker(t)
         ctx = build_midterm_context(t)
 
-        # ① 요약 테이블 행
+        # ① 요약 테이블 행 (색상 포함)
         if stat["UpProb"] is not None:
             up_str = colorize_value_html(fmt_pct(stat["UpProb"]), stat["UpProb"])
             buy_str = colorize_value_html(fmt_pct(stat["BuyTiming"]), stat["BuyTiming"])
@@ -677,44 +697,48 @@ def simulate_schd_to_target(
     div_cagr,
     monthly_buy=200.0,
     target_monthly_income=1000.0,
-    max_months=600,
+    max_years=60,
 ):
     """
     DRIP + 매월 200 USD 추가 매수로
-    월 배당 1,000 USD 도달까지 걸리는 기간(년/월)을 시뮬레이션.
-    - price는 일정하다고 가정(보수적)
-    - div_cagr: 연간 배당 성장률
+    월 배당 1,000 USD 도달까지 걸리는 기간(년/월)을 '연 단위'로 시뮬레이션.
+    - price는 연간 동안 일정하다고 가정(보수적)
+    - div_cagr: 연간 배당 성장률 (하한 설정 필요)
     """
+    target_annual = target_monthly_income * 12.0
+
     shares = float(current_shares)
     yearly_div_ps = float(start_yearly_div_ps)
     price = float(start_price)
 
-    months = 0
-    while months < max_months:
+    years = 0
+    prev_income = shares * yearly_div_ps
+
+    while years < max_years:
         annual_income = shares * yearly_div_ps
-        monthly_income = annual_income / 12.0
+        if annual_income >= target_annual:
+            # 직전 연도 대비 선형 보간으로 개략적인 개월 수 추정
+            if annual_income <= prev_income:
+                frac = 0.0
+            else:
+                frac = (target_annual - prev_income) / (annual_income - prev_income)
+                frac = max(0.0, min(1.0, frac))
+            months = int(round(frac * 12))
+            return years, months
 
-        if monthly_income >= target_monthly_income:
-            break
-
-        # DRIP: 한 달치 배당 재투자
-        reinvest = annual_income / 12.0
+        # DRIP + 연간 추가 매수(12 * monthly_buy)
+        extra_yearly = monthly_buy * 12.0
         if price > 0:
-            shares += reinvest / price
+            shares += (annual_income + extra_yearly) / price
 
-        # 매월 200 USD 매수
-        if price > 0:
-            shares += monthly_buy / price
+        # 다음 해 배당 성장 반영
+        yearly_div_ps *= (1.0 + div_cagr)
 
-        months += 1
+        prev_income = annual_income
+        years += 1
 
-        # 1년 경과 시 배당 성장률 반영
-        if months % 12 == 0:
-            yearly_div_ps *= (1.0 + div_cagr)
-
-    years = months // 12
-    rem_months = months % 12
-    return years, rem_months
+    # max_years 안에 도달 못하면 보수적으로 반환
+    return years, 0
 
 
 def build_schd_dividend_html():
@@ -884,7 +908,7 @@ def build_schd_dividend_summary_text(current_shares):
     # 2) 현재 예상 연 배당금 (보유 주식 반영)
     current_annual_income = current_shares * last_div_ps
 
-    # 3) 최근 5년 배당 CAGR
+    # 3) 최근 5년 배당 CAGR (하한 3~5% 정도로 바닥 설정)
     if len(years) >= 5:
         use_years = years[-5:]
     elif len(years) >= 2:
@@ -903,8 +927,9 @@ def build_schd_dividend_summary_text(current_shares):
     else:
         div_cagr = 0.07  # 기본 7% 가정
 
-    # 과도한 성장률 클리핑
-    div_cagr = max(-0.05, min(0.12, div_cagr))
+    # 과도한 성장률/침체 클리핑 (너무 비현실적인 0% 이하 제거)
+    #   → 장기 평균을 반영해 최소 3% 이상, 최대 12% 정도로 제한
+    div_cagr = max(0.03, min(0.12, div_cagr))
 
     # 4) 현재 가격
     try:
@@ -921,7 +946,7 @@ def build_schd_dividend_summary_text(current_shares):
         div_cagr=div_cagr,
         monthly_buy=200.0,
         target_monthly_income=1000.0,
-        max_months=600,
+        max_years=60,
     )
 
     txt = (
@@ -930,7 +955,7 @@ def build_schd_dividend_summary_text(current_shares):
         f"(보유 SCHD {current_shares:,.0f}주 기준, 직전 연도 배당 적용)</p>"
         f"<p><strong>월 1,000 USD 배당 달성까지 예상 기간:</strong> "
         f"약 {years_needed}년 {months_needed}개월 "
-        f"(DRIP + 매월 200 USD 매수 가정)</p>"
+        f"(DRIP + 매월 200 USD 매수, 배당 성장률 연 {div_cagr*100:.1f}% 가정)</p>"
     )
     return txt
     
