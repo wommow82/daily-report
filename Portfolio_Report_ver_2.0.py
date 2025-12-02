@@ -58,6 +58,79 @@ def colorize_value_html(text, raw_value):
 import os
 
 # =========================
+# 뉴스 여러 개를 묶어 분석하는 요약 함수
+# =========================
+
+def _summarize_news_bundle_ko(ticker, articles):
+    """
+    여러 개의 영어 뉴스(articles)를 받아서
+    6~12개월 투자 관점의 종합 분석을 한국어로 20줄 이내로 요약.
+
+    - OPENAI_API_KEY 필요
+    - articles: _fetch_news_for_ticker_midterm(...) 결과 리스트
+    """
+    api_key = os.environ.get("OPENAI_API_KEY")
+    if not api_key:
+        return "뉴스 요약을 위해 OPENAI_API_KEY 환경변수가 필요합니다."
+
+    if not articles:
+        return "관련 뉴스를 찾지 못했습니다."
+
+    try:
+        from openai import OpenAI
+    except ImportError:
+        return "openai 패키지가 설치되어 있지 않아 뉴스 요약을 수행할 수 없습니다."
+
+    client = OpenAI(api_key=api_key)
+
+    # 뉴스 내용을 한 번에 묶어서 프롬프트용 텍스트 생성
+    lines = []
+    for i, a in enumerate(articles, start=1):
+        title = (a.get("title") or "").strip()
+        desc = (a.get("description") or "").strip()
+        src = (a.get("source") or "").strip()
+        date = _extract_article_date_midterm(a)
+
+        item = f"[{i}] {date} {src} - {title}"
+        if desc:
+            item += f"\n{desc}"
+        lines.append(item)
+
+    bundle_text = "\n\n".join(lines)
+
+    prompt = f"""
+너는 미국 주식 애널리스트이다.
+아래는 {ticker} 관련 영어 뉴스 헤드라인과 기사 요약이다.
+
+이 뉴스를 모두 종합해서, 향후 6~12개월 투자 관점에서
+다음 내용을 한국어로 20줄 이내로 정리해줘.
+
+- 형식: 각 줄은 "· "로 시작 (bullet 형식)
+- 8~20줄 사이
+- 포함할 내용:
+  - 주가/펀더멘털에 영향을 줄 수 있는 핵심 이슈
+  - 긍정/부정 요인 (모멘텀, 실적, 수요, 경쟁, 규제 등)
+  - 단기 변동성 요인 vs 중기(6~12개월) 방향성
+  - 투자 시 유의해야 할 리스크 요인
+
+뉴스 목록:
+{bundle_text}
+"""
+
+    try:
+        resp = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=800,
+        )
+        text = resp.choices[0].message.content.strip()
+        return text
+    except Exception as e:
+        print(f"[WARN] _summarize_news_bundle_ko 오류: {e}")
+        return "뉴스 종합 요약을 생성하는 데 실패했습니다."
+
+
+# =========================
 # NEWS API / Google 뉴스 가져오는 함수
 # =========================
 
@@ -169,6 +242,85 @@ def _fetch_news_for_ticker_midterm(ticker, api_key, page_size=3, days=7):
             print(f"⚠️ Google News RSS 오류(midterm): {e}")
 
     return articles
+
+def build_midterm_news_comment_from_apis_combined(ticker, max_items=10, days=14):
+    """
+    중기 분석 섹션에서 사용할 '통합 뉴스 분석' HTML 생성.
+
+    - 소스: NewsAPI → 실패 시 Google News RSS
+    - 최대 max_items개 기사 사용
+    - 티커/회사명 포함 여부로 1차 필터링
+    - 여러 기사를 한 번에 한국어로 종합 분석 (20줄 이내)
+
+    반환:
+        HTML 문자열 (<p> ... </p>)
+    """
+    api_key = os.environ.get("NEWS_API_KEY")
+    if not api_key:
+        return (
+            "<p style='text-align:left;'>"
+            "<strong>뉴스 종합 분석:</strong><br>"
+            "- NEWS_API_KEY가 설정되어 있지 않아 뉴스를 불러올 수 없습니다."
+            "</p>"
+        )
+
+    # 1) NewsAPI + Google News로 기사 목록 가져오기 (기존 함수 재사용)
+    articles = _fetch_news_for_ticker_midterm(
+        ticker=ticker,
+        api_key=api_key,
+        page_size=max_items,
+        days=days,
+    )
+
+    if not articles:
+        return (
+            "<p style='text-align:left;'>"
+            "<strong>뉴스 종합 분석:</strong><br>"
+            f"- 최근 {days}일 내 {ticker} 관련 주요 뉴스를 찾지 못했습니다."
+            "</p>"
+        )
+
+    # 2) 티커/회사명 기준으로 관련 기사 필터링
+    ticker_upper = ticker.upper()
+    keywords = [ticker_upper]
+
+    # 필요에 따라 회사명 매핑 추가 (확장 가능)
+    company_map = {
+        "NVDA": "NVIDIA",
+        "TSLA": "TESLA",
+        "SCHD": "SCHD",
+    }
+    if ticker_upper in company_map:
+        keywords.append(company_map[ticker_upper].upper())
+
+    filtered = []
+    for a in articles:
+        text_all = (
+            (a.get("title") or "") + " " + (a.get("description") or "")
+        ).upper()
+        if any(k in text_all for k in keywords):
+            filtered.append(a)
+
+    # 필터링 결과가 너무 적으면, 원본 리스트도 일부 사용 (너무 빡센 필터 방지)
+    if len(filtered) >= 3:
+        use_articles = filtered[:max_items]
+    else:
+        use_articles = articles[:max_items]
+
+    # 3) 여러 기사 → 한 번에 한국어 종합 요약
+    summary_ko = _summarize_news_bundle_ko(ticker, use_articles)
+
+    # 4) 줄바꿈을 HTML <br>로 변환
+    lines = [ln.strip() for ln in summary_ko.splitlines() if ln.strip()]
+    html_body = "<br>".join(lines) if lines else "관련 뉴스를 요약할 수 없습니다."
+
+    html = (
+        "<p style='text-align:left;'>"
+        "<strong>뉴스 종합 분석 (6~12개월):</strong><br>"
+        f"{html_body}"
+        "</p>"
+    )
+    return html
 
 
 def _extract_article_date_midterm(article):
@@ -626,33 +778,45 @@ def analyze_midterm_ticker(ticker):
     """
     중단기(6~12개월) 투자 분석용 함수.
 
-    1) 수치:
-       - 중기 상승 확률 % (UpProb)
-       - 매수 타이밍 % (BuyTiming)  : 1년 고가/저가 대비 현재 위치
-       - 매도 타이밍 % (SellTiming) : 1년 고가/저가 대비 현재 위치
-       - 1년 목표수익 범위 (문자열, 예: "12~25%")
+    구성 요소:
+    1) 가격 기반 수치:
+       - UpProb       : 중기 상승 확률 %
+       - BuyTiming    : 매수 타이밍 %
+       - SellTiming   : 매도 타이밍 %
+       - TargetRange  : 1년 목표수익 범위 (ex: "12~25%")
 
-    2) 뉴스 코멘트 (Comment, HTML):
-       - NewsAPI + Google News RSS 기반
-       - 각 기사별로 한국어 15자 이내 요약 (build_midterm_news_comment_from_apis 사용)
+    2) 뉴스 기반 분석:
+       - NewsAPI + Google News RSS로 최근 기사 최대 10개 가져옴
+       - 관련 기사만 필터링
+       - 여러 기사를 통합해 한국어 20줄 내외 bullet 종합 분석 생성
+       - build_midterm_news_comment_from_apis_combined() 사용
+
+    반환 형식:
+    {
+        "Ticker": str,
+        "UpProb": float,
+        "BuyTiming": float,
+        "SellTiming": float,
+        "TargetRange": str,
+        "Comment": HTML 문자열
+    }
     """
+
     # -----------------------------
-    # 1. 가격 데이터 (1년) 가져오기
+    # 1. 가격 데이터 (1년)
     # -----------------------------
     try:
         tk = yf.Ticker(ticker)
         hist = tk.history(period="1y")["Close"].dropna()
 
-        # 데이터가 너무 적으면 의미 있는 수치 계산이 어려우므로 예외 처리
         if hist.empty or len(hist) < 40:
             raise ValueError("데이터 부족")
 
         closes = hist.copy()
         last = float(closes.iloc[-1])
     except Exception as e:
-        # 가격 데이터 자체가 부족한 경우 → 수치는 None, 뉴스만 출력
         print(f"[WARN] analyze_midterm_ticker({ticker}) 가격 데이터 오류: {e}")
-        comment_html = build_midterm_news_comment_from_apis(ticker)
+        comment_html = build_midterm_news_comment_from_apis_combined(ticker)
         return {
             "Ticker": ticker,
             "UpProb": None,
@@ -663,79 +827,65 @@ def analyze_midterm_ticker(ticker):
         }
 
     # -----------------------------
-    # 2. 수익률·변동성 계산
+    # 2. 수익률/변동성
     # -----------------------------
     # 1년 수익률
-    if len(closes) > 252:
-        start_1y = float(closes.iloc[-252])
-    else:
-        start_1y = float(closes.iloc[0])
+    start_1y = float(closes.iloc[-252]) if len(closes) > 252 else float(closes.iloc[0])
     ret_1y = (last / start_1y - 1.0) * 100.0 if start_1y > 0 else 0.0
 
-    # 3개월 수익률 (63 거래일 기준), 부족하면 1년 수익률을 근사 사용
+    # 3개월 수익률
     if len(closes) > 63:
         start_3m = float(closes.iloc[-63])
         ret_3m = (last / start_3m - 1.0) * 100.0 if start_3m > 0 else 0.0
     else:
         ret_3m = ret_1y / 4.0
 
-    # 연간 변동성 (로그수익률 기준)
+    # 연간 변동성
     rets = np.log(closes / closes.shift(1)).dropna()
     vol_annual = float(rets.std() * np.sqrt(252)) if len(rets) > 0 else 0.0
-    vol_pct = vol_annual * 100.0  # % 단위로도 보관
+    vol_pct = vol_annual * 100.0
 
     # -----------------------------
-    # 3. 휴리스틱 기반 투자 신호
+    # 3. 투자 신호 계산 (휴리스틱)
     # -----------------------------
-    # (1) 중기 상승 확률 점수 (0~100 사이로 압축)
+    # 상승 확률 점수
     score = 50.0
-
-    #   - 1년 모멘텀: 강할수록 가산
     score += float(np.tanh(ret_1y / 40.0)) * 25.0
-    #   - 3개월 모멘텀: 최근 추세 반영
     score += float(np.tanh(ret_3m / 20.0)) * 20.0
-    #   - 변동성 패널티: 변동성이 높을수록 감점
     score -= float(np.tanh(vol_annual * 2.0)) * 15.0
 
-    up_prob = max(5.0, min(95.0, score))  # 5%~95% 사이로 클램프
+    up_prob = max(5.0, min(95.0, score))
 
-    # (2) 매수/매도 타이밍 %  (1년 고가/저가 대비 위치로 결정)
+    # 1년 고가/저가 기준 포지션
     hi_1y = float(closes.max())
     lo_1y = float(closes.min())
     if hi_1y > lo_1y:
-        pos = (last - lo_1y) / (hi_1y - lo_1y)  # 0=저점 근처, 1=고점 근처
+        pos = (last - lo_1y) / (hi_1y - lo_1y)
     else:
         pos = 0.5
 
-    buy_timing = (1.0 - pos) * 100.0  # 저점에 가까울수록 매수 타이밍↑
-    sell_timing = pos * 100.0         # 고점에 가까울수록 매도 타이밍↑
+    # 매수/매도 타이밍
+    buy_timing = max(5.0, min(95.0, (1.0 - pos) * 100.0))
+    sell_timing = max(5.0, min(95.0, pos * 100.0))
 
-    buy_timing = max(5.0, min(95.0, buy_timing))
-    sell_timing = max(5.0, min(95.0, sell_timing))
+    # 1년 목표수익 범위
+    base = (up_prob - 50.0) / 50.0  # -1 ~ +1 정도
+    low_pct = 10.0 + base * 15.0
+    high_pct = 10.0 + base * 35.0
+    high_pct += min(10.0, vol_pct * 0.1)  # 변동성 반영
 
-    # (3) 1년 목표수익 범위 (단순 휴리스틱)
-    #     - up_prob가 높을수록 기대 수익 구간을 상향
-    #     - 너무 과격한 수치는 피하고, 대략적인 감각만 제공
-    base = (up_prob - 50.0) / 50.0  # -1.0 ~ +1.0 정도 범위
-    low_pct = 10.0 + base * 15.0    # 대략 0~25% 근처
-    high_pct = 10.0 + base * 35.0   # 대략 0~60% 근처
-
-    # 변동성도 약간 반영 (변동성이 높으면 상단 폭을 조금 넓힘)
-    high_pct += min(10.0, vol_pct * 0.1)
-
-    # 안전한 클램프
     low_pct = max(-20.0, min(25.0, low_pct))
     high_pct = max(low_pct + 5.0, min(60.0, high_pct))
 
     target_range = f"{low_pct:.0f}~{high_pct:.0f}%"
 
     # -----------------------------
-    # 4. 뉴스 코멘트 (NewsAPI + Google News, 15자 요약)
+    # 4. 뉴스 종합 분석 (한국어 20줄 내외)
     # -----------------------------
-    comment_html = build_midterm_news_comment_from_apis(ticker)
+    comment_html = build_midterm_news_comment_from_apis_combined(ticker)
 
     # -----------------------------
-    # 5. 최종 리턴 (build_midterm_analysis_html 에서 사용)
+    # 5. 반환
     # -----------------------------
     return {
         "Ticker": ticker,
