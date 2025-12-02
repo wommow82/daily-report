@@ -583,14 +583,20 @@ def _fetch_news_for_ticker_midterm(ticker, api_key, page_size=3, days=7):
 
     return articles
 
-def build_midterm_news_comment_from_apis_combined(ticker, max_items=10, days=14):
+def build_midterm_news_comment_from_apis_combined(ticker, max_items=10, days=30):
     """
-    중기 분석 섹션에서 사용할 '통합 뉴스 분석' HTML 생성.
+    중기 분석 섹션에서 사용할 '최근 1개월 뉴스 요약' HTML 생성.
 
+    - 조회 기간: 기본 최근 30일 (1개월)
     - 소스: NewsAPI → 실패 시 Google News RSS
     - 최대 max_items개 기사 사용
     - 티커/회사명 포함 여부로 1차 필터링
-    - 여러 기사를 한 번에 한국어로 종합 분석 (20줄 이내)
+    - 기사들을 최신순으로 정렬
+    - OpenAI로 긍정/부정 감성 분류
+    - 긍정/부정 뉴스 갯수 표시
+    - 긍정/부정 각각 대표 뉴스 1개를 뽑아 15자 내외 한글 요약
+      · 긍정: 초록색
+      · 부정: 빨간색
 
     반환:
         HTML 문자열 (<p> ... </p>)
@@ -599,12 +605,12 @@ def build_midterm_news_comment_from_apis_combined(ticker, max_items=10, days=14)
     if not api_key:
         return (
             "<p style='text-align:left;'>"
-            "<strong>뉴스 종합 분석:</strong><br>"
+            "<strong>뉴스 요약 (최근 1개월):</strong><br>"
             "- NEWS_API_KEY가 설정되어 있지 않아 뉴스를 불러올 수 없습니다."
             "</p>"
         )
 
-    # 1) NewsAPI + Google News로 기사 목록 가져오기 (기존 함수 재사용)
+    # 1) NewsAPI + Google News로 기사 목록 가져오기 (최근 days일 기준)
     articles = _fetch_news_for_ticker_midterm(
         ticker=ticker,
         api_key=api_key,
@@ -615,16 +621,46 @@ def build_midterm_news_comment_from_apis_combined(ticker, max_items=10, days=14)
     if not articles:
         return (
             "<p style='text-align:left;'>"
-            "<strong>뉴스 종합 분석:</strong><br>"
+            "<strong>뉴스 요약 (최근 1개월):</strong><br>"
             f"- 최근 {days}일 내 {ticker} 관련 주요 뉴스를 찾지 못했습니다."
             "</p>"
         )
+
+    # 1-1) 추가적으로 '실제 날짜 기준'으로 최근 30일만 필터링 (RSS 대비 방어용)
+    cutoff = datetime.utcnow() - timedelta(days=30)
+    filtered_recent = []
+    for a in articles:
+        # _fetch_news_for_ticker_midterm에서 "published" 필드를 넣었다고 가정
+        p = (a.get("published") or "").strip()
+        dt = None
+        # 간단한 파싱: ISO 또는 YYYY-MM-DD 형태 위주
+        for fmt in ("%Y-%m-%dT%H:%M:%SZ", "%Y-%m-%d %H:%M", "%Y-%m-%d"):
+            try:
+                dt = datetime.strptime(p[:len(fmt)], fmt)
+                break
+            except Exception:
+                continue
+        if dt is None:
+            # 날짜 파싱 실패 시 일단 포함 (너무 보수적으로 버리지 않기 위해)
+            filtered_recent.append(a)
+        else:
+            if dt >= cutoff:
+                filtered_recent.append(a)
+
+    if not filtered_recent:
+        return (
+            "<p style='text-align:left;'>"
+            "<strong>뉴스 요약 (최근 1개월):</strong><br>"
+            f"- 최근 30일 내 {ticker} 관련 유효한 날짜의 뉴스를 찾지 못했습니다."
+            "</p>"
+        )
+
+    articles = filtered_recent
 
     # 2) 티커/회사명 기준으로 관련 기사 필터링
     ticker_upper = ticker.upper()
     keywords = [ticker_upper]
 
-    # 필요에 따라 회사명 매핑 추가 (확장 가능)
     company_map = {
         "NVDA": "NVIDIA",
         "TSLA": "TESLA",
@@ -641,26 +677,57 @@ def build_midterm_news_comment_from_apis_combined(ticker, max_items=10, days=14)
         if any(k in text_all for k in keywords):
             filtered.append(a)
 
-    # 필터링 결과가 너무 적으면, 원본 리스트도 일부 사용 (너무 빡센 필터 방지)
+    # 필터링 결과가 너무 적으면, 원본 리스트도 일부 사용
     if len(filtered) >= 3:
         use_articles = filtered[:max_items]
     else:
         use_articles = articles[:max_items]
 
-    # 3) 여러 기사 → 한 번에 한국어 종합 요약
-    summary_ko = _summarize_news_bundle_ko_price_focus(ticker, use_articles)
+    # 2-1) 최신 뉴스 우선 정렬 (published 기준 내림차순)
+    def _parse_dt(a):
+        p = (a.get("published") or "").strip()
+        for fmt in ("%Y-%m-%dT%H:%M:%SZ", "%Y-%m-%d %H:%M", "%Y-%m-%d"):
+            try:
+                return datetime.strptime(p[:len(fmt)], fmt)
+            except Exception:
+                continue
+        return datetime.min
 
-    # 4) 줄바꿈을 HTML <br>로 변환
-    lines = [ln.strip() for ln in summary_ko.splitlines() if ln.strip()]
-    html_body = "<br>".join(lines) if lines else "관련 뉴스를 요약할 수 없습니다."
+    use_articles = sorted(use_articles, key=_parse_dt, reverse=True)
+
+    # 3) 긍정/부정 분류 및 대표 뉴스 선별 + 15자 요약
+    sent_info = _classify_news_sentiment_and_pick_reps(ticker, use_articles)
+    pos_count = sent_info["pos_count"]
+    neg_count = sent_info["neg_count"]
+    pos_repr = sent_info["pos_repr"]
+    neg_repr = sent_info["neg_repr"]
+
+    # 4) HTML 구성 (색상 강조)
+    lines = []
+    lines.append(
+        f"<span style='color:green;'>긍정 뉴스 {pos_count}건</span>, "
+        f"<span style='color:red;'>부정 뉴스 {neg_count}건</span>"
+    )
+
+    if pos_repr:
+        lines.append(
+            f"<span style='color:green;'>· 대표 긍정: {pos_repr}</span>"
+        )
+    if neg_repr:
+        lines.append(
+            f"<span style='color:red;'>· 대표 부정: {neg_repr}</span>"
+        )
+
+    html_body = "<br>".join(lines)
 
     html = (
         "<p style='text-align:left;'>"
-        "<strong>뉴스 종합 분석 (6~12개월):</strong><br>"
+        "<strong>뉴스 요약 (최근 1개월, 주가 영향 이슈):</strong><br>"
         f"{html_body}"
         "</p>"
     )
     return html
+
 
 
 def _extract_article_date_midterm(article):
