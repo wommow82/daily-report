@@ -97,6 +97,70 @@ def open_gsheet(gs_id, retries=3, delay=5):
 # 야후 파이낸스 디버그
 # =========================
 
+
+def build_yfinance_debug_section_html(tickers=None) -> str:
+    """
+    yfinance 연결 상태를 HTML 텍스트로 요약.
+    리포트 하단에 붙여서 확인할 수 있다.
+    """
+    if tickers is None:
+        tickers = ["NVDA", "TSLA", "SCHD"]
+
+    rows = []
+    for t in tickers:
+        status = {"price": "N/A", "info": "N/A", "news": "N/A"}
+
+        try:
+            tk = yf.Ticker(t)
+        except Exception as e:
+            rows.append(f"<tr><td>{t}</td><td colspan='3'>Ticker 객체 생성 실패: {e}</td></tr>")
+            continue
+
+        # 가격
+        try:
+            hist = tk.history(period="5d")["Close"].dropna()
+            if hist.empty:
+                status["price"] = "가격 데이터 없음"
+            else:
+                status["price"] = f"{float(hist.iloc[-1]):.2f}"
+        except Exception as e:
+            status["price"] = f"에러: {e}"
+
+        # info
+        try:
+            info = tk.info or {}
+            name = info.get("shortName") or info.get("longName") or "N/A"
+            fpe = info.get("forwardPE", "N/A")
+            status["info"] = f"{name} / Fwd PER: {fpe}"
+        except Exception as e:
+            status["info"] = f"info 에러: {e}"
+
+        # news
+        try:
+            news_list = tk.news or []
+            status["news"] = f"{len(news_list)}개"
+        except Exception as e:
+            status["news"] = f"news 에러: {e}"
+
+        rows.append(
+            f"<tr>"
+            f"<td>{t}</td>"
+            f"<td>{status['price']}</td>"
+            f"<td>{status['info']}</td>"
+            f"<td>{status['news']}</td>"
+            f"</tr>"
+        )
+
+    table_html = (
+        "<h3>🔍 yfinance 연결 상태 (디버그)</h3>"
+        "<table border='1' cellpadding='4' cellspacing='0' style='border-collapse:collapse;font-size:12px;'>"
+        "<tr><th>Ticker</th><th>최근 종가</th><th>info 요약</th><th>news 개수</th></tr>"
+        + "".join(rows) +
+        "</table>"
+    )
+    return table_html
+
+
 def debug_yfinance_connectivity(tickers=None):
     """
     yfinance가 Yahoo Finance에서 데이터를 제대로 가져오는지 간단 점검하는 함수.
@@ -1081,96 +1145,171 @@ def build_schd_dividend_summary_text(current_shares):
 # =========================
 
 def build_html_report(df_enriched, account_summary):
+    """
+    포트폴리오 HTML 리포트 생성:
+      - 🏦 Account Summary (TFSA / RESP / Total)
+      - 📂 TFSA Holdings
+      - 🎓 RESP Holdings
+      - 🔍 yfinance 연결 상태 (디버그)
+    """
     base_ccy = account_summary["meta"]["base_currency"]
-    ccy_symbol = "$"
+    ccy_symbol = "$"  # CAD / USD 모두 $ 로 표시
 
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-    # ---------- 전체 자산 CAD 기준 한 줄 요약 ----------
-    usd_cad = get_usd_cad_rate()
-
-    tfsa_today_usd = account_summary.get("TFSA", {}).get(
-        "total_today_native", 0.0
-    )  # USD
-    tfsa_yest_usd = account_summary.get("TFSA", {}).get(
-        "total_yesterday_native", 0.0
-    )
-    resp_today_cad = account_summary.get("RESP", {}).get(
-        "total_today_native", 0.0
-    )  # CAD
-    resp_yest_cad = account_summary.get("RESP", {}).get(
-        "total_yesterday_native", 0.0
-    )
-
-    total_today_cad = tfsa_today_usd * usd_cad + resp_today_cad
-    total_yest_cad = tfsa_yest_usd * usd_cad + resp_yest_cad
-    total_diff_cad = total_today_cad - total_yest_cad
-    total_diff_pct = (
-        total_diff_cad / total_yest_cad * 100.0 if total_yest_cad != 0 else 0.0
-    )
-
-    total_today_str = fmt_money(total_today_cad, "$")
-    total_diff_str = fmt_money(total_diff_cad, "$")
-    total_diff_pct_str = fmt_pct(total_diff_pct)
-
-    total_diff_str_colored = colorize_value_html(total_diff_str, total_diff_cad)
-    total_diff_pct_str_colored = colorize_value_html(
-        total_diff_pct_str, total_diff_pct
-    )
-
-    total_assets_line = (
-        f"<p><strong>Total Assets (총 자산, CAD):</strong> "
-        f"{total_today_str}&nbsp;&nbsp;&nbsp;"
-        f"<strong>Δ vs. Yesterday (전일 대비 변화):</strong> "
-        f"{total_diff_str_colored} ({total_diff_pct_str_colored})</p>"
-    )
-
-    # ---------- 1) 계좌 요약 테이블 (TFSA/RESP) ----------
+    # ========================
+    # 1) 계좌별 요약 테이블
+    # ========================
     summary_rows = []
-    for acc in ["TFSA", "RESP"]:
+    for acc in ["TFSA", "RESP", "TOTAL"]:
         if acc not in account_summary:
             continue
         s = account_summary[acc]
-
-        acc_label = "TFSA (USD)" if acc == "TFSA" else "RESP (CAD)"
-
-        total_today = s["total_today_native"]
-        total_diff = s["total_diff_native"]
-        total_diff_pct = s["total_diff_pct_native"]
-        net_dep_native = s.get("net_deposit_native", 0.0)
-        pl_vs_dep_native = s.get("pl_vs_deposit_native", 0.0)
-        pl_vs_dep_pct_native = s.get("pl_vs_deposit_pct_native", 0.0)
-        cash_native = s.get("cash_native", 0.0)
-
-        total_today_str_acc = fmt_money(total_today, ccy_symbol)
-        diff_str = fmt_money(total_diff, ccy_symbol)
-        diff_pct_str = fmt_pct(total_diff_pct)
-        net_dep_str = fmt_money(net_dep_native, ccy_symbol)
-        pl_vs_dep_str = fmt_money(pl_vs_dep_native, ccy_symbol)
-        pl_vs_dep_pct_str = fmt_pct(pl_vs_dep_pct_native)
-        cash_str = fmt_money(cash_native, ccy_symbol)
-
-        diff_str_colored = colorize_value_html(diff_str, total_diff)
-        diff_pct_str_colored = colorize_value_html(diff_pct_str, total_diff_pct)
-        pl_vs_dep_str_colored = colorize_value_html(pl_vs_dep_str, pl_vs_dep_native)
-        pl_vs_dep_pct_str_colored = colorize_value_html(
-            pl_vs_dep_pct_str, pl_vs_dep_pct_native
-        )
-
         summary_rows.append(
             {
-                "Account": acc_label,
-                "Net Deposit (Base)": net_dep_str,
-                "Total (Today, Base)": total_today_str_acc,
-                "Δ vs Yesterday (Base)": diff_str_colored,
-                "Δ %": diff_pct_str_colored,
-                "P/L vs Deposit (Base)": pl_vs_dep_str_colored,
-                "P/L vs Deposit %": pl_vs_dep_pct_str_colored,
-                "Cash (Base)": cash_str,
+                "Account": acc,
+                f"Total (Today, {base_ccy})": fmt_money(s["total_today"], ccy_symbol),
+                f"Δ vs Yesterday ({base_ccy})": fmt_money(
+                    s["total_diff"], ccy_symbol
+                ),
+                "Δ %": fmt_pct(s["total_diff_pct"]),
+                "Cash (base)": fmt_money(s.get("cash_base", 0.0), ccy_symbol),
             }
         )
 
     df_summary = pd.DataFrame(summary_rows)
+
+    # 상단 한 줄 요약 (TOTAL 기준)
+    total_line_html = ""
+    total_info = account_summary.get("TOTAL")
+    if total_info:
+        total_assets = fmt_money(total_info["total_today"], ccy_symbol)
+        total_diff = fmt_money(total_info["total_diff"], ccy_symbol)
+        total_diff_pct = fmt_pct(total_info["total_diff_pct"])
+        total_line_html = (
+            f"<p><strong>Total Assets (총 자산):</strong> {total_assets}  "
+            f"<strong>Δ vs. Yesterday:</strong> {total_diff} ({total_diff_pct})</p>"
+        )
+
+    # ========================
+    # 2) Holdings 뷰 가공
+    # ========================
+    df_view = df_enriched.copy()
+
+    # 숫자 포맷 적용 (있을 때만)
+    if "Shares" in df_view.columns:
+        df_view["Shares"] = df_view["Shares"].map(
+            lambda x: f"{x:,.0f}" if pd.notnull(x) else ""
+        )
+    if "AvgPrice" in df_view.columns:
+        df_view["AvgPrice"] = df_view["AvgPrice"].map(
+            lambda x: fmt_money(x, ccy_symbol) if pd.notnull(x) else ""
+        )
+    if "LastPriceBase" in df_view.columns:
+        df_view["LastPriceBase"] = df_view["LastPriceBase"].map(
+            lambda x: fmt_money(x, ccy_symbol) if pd.notnull(x) else ""
+        )
+    if "PositionValueBase" in df_view.columns:
+        df_view["PositionValueBase"] = df_view["PositionValueBase"].map(
+            lambda x: fmt_money(x, ccy_symbol) if pd.notnull(x) else ""
+        )
+    if "ProfitLossBase" in df_view.columns:
+        df_view["ProfitLossBase"] = df_view["ProfitLossBase"].map(
+            lambda x: fmt_money(x, ccy_symbol) if pd.notnull(x) else ""
+        )
+    if "ProfitLossPct" in df_view.columns:
+        df_view["ProfitLossPct"] = df_view["ProfitLossPct"].map(
+            lambda x: fmt_pct(x) if pd.notnull(x) else ""
+        )
+
+    cols_order = [
+        "Ticker",
+        "Type",
+        "Shares",
+        "AvgPrice",
+        "LastPriceBase",
+        "PositionValueBase",
+        "ProfitLossBase",
+        "ProfitLossPct",
+    ]
+    # 없는 열은 빼고 테이블 구성
+    cols_order = [c for c in cols_order if c in df_view.columns]
+
+    def _table_for_account(acc_type: str) -> str:
+        # Type 열이 TFSA / RESP 로 들어있다고 가정
+        if "Type" not in df_view.columns:
+            return "<p>Type 열이 없어 Holdings를 표시할 수 없습니다.</p>"
+        sub = df_view[df_view["Type"].str.upper() == acc_type].copy()
+        if sub.empty:
+            return f"<p>No holdings for {acc_type}.</p>"
+        return sub[cols_order].to_html(index=False, escape=False)
+
+    tfsa_table = _table_for_account("TFSA")
+    resp_table = _table_for_account("RESP")
+
+    # ========================
+    # 3) 스타일 & 전체 HTML 템플릿
+    # ========================
+    style = """
+    <style>
+      body { font-family: Arial, sans-serif; margin: 20px; background:#fafafa; }
+      h1 { text-align:center; }
+      h2 { margin-top:30px; color:#2c3e50; border-bottom:2px solid #ddd; padding-bottom:5px; }
+      table { border-collapse: collapse; width:100%; margin:10px 0; }
+      th, td { border:1px solid #ddd; padding:6px 8px; font-size:12px; }
+      th { background:#f0f0f0; text-align:center; }
+      td { text-align:right; }
+      td:first-child, th:first-child { text-align:left; }
+      .section { margin-bottom: 30px; }
+      .muted { color:#777; font-size:12px; }
+    </style>
+    """
+
+    html = f"""
+    <html>
+      <head>
+        <meta charset="utf-8">
+        {style}
+      </head>
+      <body>
+        <h1>📊 Daily Portfolio Report</h1>
+        <p class="muted" style="text-align:center">
+          Generated at {now_str} (BaseCurrency: {base_ccy})
+        </p>
+
+        <div class="section">
+          <h2>🏦 Account Summary (TFSA / RESP / Total)</h2>
+          {total_line_html}
+          {df_summary.to_html(index=False, escape=False)}
+        </div>
+
+        <div class="section">
+          <h2>📂 TFSA Holdings</h2>
+          {tfsa_table}
+        </div>
+
+        <div class="section">
+          <h2>🎓 RESP Holdings</h2>
+          {resp_table}
+        </div>
+    """
+
+    # ========================
+    # 4) yfinance 디버그 섹션 추가 (있으면)
+    # ========================
+    try:
+        debug_html = build_yfinance_debug_section_html(["NVDA", "TSLA", "SCHD"])
+        html += "<hr>" + debug_html
+    except NameError:
+        # 디버그 함수가 정의 안 되어 있으면 그냥 건너뜀
+        pass
+
+    html += """
+      </body>
+    </html>
+    """
+
+    return html
 
     # ---------- 2) 상세 보유 종목 테이블 (TFSA: USD, RESP: CAD) ----------
     def make_holdings_table(acc_type):
