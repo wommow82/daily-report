@@ -398,11 +398,12 @@ def enrich_holdings_with_prices(
 
 def analyze_midterm_ticker(ticker):
     """
-    가격/변동성/밸류에이션 + 호재·악재 뉴스 방향성을 반영한
-    중단기(6~12개월) 휴리스틱 분석.
-    - 수치는 5~95% 범위로 클리핑.
-    - '핵심 투자 코멘트'에
-      변동성·밸류에이션·베타 + '주요 호재/악재 뉴스 한줄'을 포함.
+    가격/변동성 기반으로 수치(상승확률·타이밍·목표수익)를 계산하고,
+    '핵심 투자 코멘트'는 딱 세 줄만 HTML로 반환한다.
+
+    호재: (초록색)
+    악재: (빨간색)
+    평가: (흑색, 전략 코멘트)
     """
     tk = yf.Ticker(ticker)
     try:
@@ -411,18 +412,26 @@ def analyze_midterm_ticker(ticker):
         if len(closes) < 60:
             raise ValueError("가격 데이터 부족")
     except Exception:
+        comment_html = (
+            "<p>"
+            "<span style='color:green;'><strong>호재:</strong> 데이터 부족</span><br>"
+            "<span style='color:red;'><strong>악재:</strong> 데이터 부족</span><br>"
+            "<strong>평가:</strong> 시세·뉴스 데이터 부족으로 중단기 뷰 산출이 어렵습니다. "
+            "실적·섹터 동향을 개별적으로 점검하는 것이 좋습니다."
+            "</p>"
+        )
         return {
             "Ticker": ticker,
             "UpProb": None,
             "BuyTiming": None,
             "SellTiming": None,
             "TargetRange": "데이터 부족",
-            "Comment": "시세 데이터 부족으로 중단기 뷰 산출 어려움(실적·뉴스·섹터 동향 별도 점검 권장)",
+            "Comment": comment_html,
         }
 
     last = float(closes.iloc[-1])
 
-    # --- 수익률·변동성 ---
+    # --- 수익률·변동성 (수치 계산용) ---
     # 1년 수익률
     if len(closes) > 252:
         start_1y = float(closes.iloc[-252])
@@ -440,12 +449,11 @@ def analyze_midterm_ticker(ticker):
     # 연간 변동성
     rets = np.log(closes / closes.shift(1)).dropna()
     vol_annual = float(rets.std() * np.sqrt(252)) if len(rets) > 0 else 0.0
-    vol_pct = vol_annual * 100.0
 
     # --- 중기 상승 확률 / 매수·매도 타이밍 ---
     score = 50.0
-    score += float(np.tanh(ret_1y / 40.0)) * 25.0   # -25~+25
-    score -= float(np.tanh(vol_annual * 2.0)) * 15.0  # -15~+15
+    score += float(np.tanh(ret_1y / 40.0)) * 25.0    # -25~+25
+    score -= float(np.tanh(vol_annual * 2.0)) * 15.0 # -15~+15
     up_prob = max(5.0, min(95.0, score))
 
     last_252 = closes[-252:] if len(closes) >= 252 else closes
@@ -467,89 +475,86 @@ def analyze_midterm_ticker(ticker):
     high = min(100.0, ret_1y + band)
     target_range = f"{low:,.1f}% ~ {high:,.1f}%"
 
-    # --- 밸류에이션·베타 ---
-    try:
-        info = tk.info or {}
-    except Exception:
-        info = {}
-    pe = safe_float(info.get("trailingPE"), None)
-    fpe = safe_float(info.get("forwardPE"), None)
-    beta = safe_float(info.get("beta"), None) or safe_float(info.get("beta3Year"), None)
-
-    if vol_annual > 0.6:
-        vol_comment = f"연 변동성 매우 높음(약 {vol_pct:.1f}%)"
-    elif vol_annual > 0.4:
-        vol_comment = f"연 변동성 높음(약 {vol_pct:.1f}%)"
-    elif vol_annual > 0.25:
-        vol_comment = f"연 변동성 중간 이상(약 {vol_pct:.1f}%)"
-    else:
-        vol_comment = f"연 변동성 비교적 안정(약 {vol_pct:.1f}%)"
-
-    if pe and pe > 40:
-        val_comment = f"밸류에이션 부담(PER 약 {pe:.1f}배)"
-    elif fpe and fpe > 30:
-        val_comment = f"성장 기대 선반영(Fwd PER 약 {fpe:.1f}배)"
-    elif pe and pe < 15:
-        val_comment = f"상대적으로 저평가 구간(PER 약 {pe:.1f}배)"
-    elif pe:
-        val_comment = f"밸류에이션 중립(PER 약 {pe:.1f}배)"
-    else:
-        val_comment = "밸류에이션 정보 제한"
-
-    if beta and beta > 1.5:
-        beta_comment = f"시장 대비 공격적 베타(약 {beta:.2f})"
-    elif beta and beta < 0.8:
-        beta_comment = f"시장 대비 방어적 베타(약 {beta:.2f})"
-    elif beta:
-        beta_comment = f"시장과 유사한 베타(약 {beta:.2f})"
-    else:
-        beta_comment = "베타 정보 제한"
-
-    # --- 뉴스에서 '호재/악재' 한 줄 추출 ---
+    # --- 뉴스: 최근 3일 이내만 사용해서 호재/악재 요약 ---
     try:
         news_list = tk.news or []
     except Exception:
         news_list = []
 
-    pos_keywords = ["beat", "strong", "record", "surge", "rally", "raise", "upgrade"]
-    neg_keywords = ["miss", "warning", "probe", "slump", "cut", "downgrade", "recall", "investigation"]
+    bull_reasons = []  # 호재 한국어 사유 리스트
+    bear_reasons = []  # 악재 한국어 사유 리스트
 
-    bullish = None
-    bearish = None
+    now_ts = datetime.utcnow().timestamp()
+    three_days_sec = 3 * 24 * 3600
 
-    for n in news_list[:5]:
-        title = n.get("title", "")
+    for n in news_list:
+        raw_title = n.get("title", "")
+        if not raw_title:
+            continue
+
         ts = n.get("providerPublishTime")
-        if ts:
-            try:
-                d = datetime.fromtimestamp(int(ts)).strftime("%Y-%m-%d")
-            except Exception:
-                d = ""
-        else:
-            d = ""
+        if not ts:
+            continue
 
-        lowered = title.lower()
-        if any(k in lowered for k in pos_keywords) and bullish is None:
-            t = title if len(title) <= 50 else title[:47] + "..."
-            bullish = f"{t}({d})"
-        if any(k in lowered for k in neg_keywords) and bearish is None:
-            t = title if len(title) <= 50 else title[:47] + "..."
-            bearish = f"{t}({d})"
+        try:
+            ts_int = int(ts)
+        except Exception:
+            continue
 
-    if bullish is None:
-        bullish = "뚜렷한 단기 호재 뉴스 제한"
-    if bearish is None:
-        bearish = "뚜렷한 단기 악재 뉴스 제한"
+        # 최근 3일 이내만 사용
+        if now_ts - ts_int > three_days_sec:
+            continue
 
-    news_dir = "최근 뉴스 톤은 혼재"
-    if bullish and "제한" in bullish and "제한" not in bearish:
-        news_dir = "최근 뉴스는 악재 쪽 이슈가 상대적으로 부각"
-    elif bearish and "제한" in bearish and "제한" not in bullish:
-        news_dir = "최근 뉴스는 호재 쪽 이슈가 상대적으로 부각"
+        sentiment, reason_ko = classify_news_sentiment(raw_title)
+        if sentiment == "positive":
+            bull_reasons.append(reason_ko)
+        elif sentiment == "negative":
+            bear_reasons.append(reason_ko)
 
-    comment = (
-        f"{vol_comment}, {val_comment}, {beta_comment}. {news_dir}. "
-        f"주요 호재: {bullish} / 주요 악재: {bearish}"
+    # 중복 제거
+    bull_reasons = list(dict.fromkeys(bull_reasons))
+    bear_reasons = list(dict.fromkeys(bear_reasons))
+
+    # 호재/악재 문구 작성
+    if bull_reasons:
+        bull_text = " / ".join(bull_reasons)
+    else:
+        bull_text = "뚜렷한 호재 없음"
+
+    if bear_reasons:
+        bear_text = " / ".join(bear_reasons)
+    else:
+        bear_text = "뚜렷한 악재 없음"
+
+    # 평가 문구
+    if bull_reasons and bear_reasons:
+        eval_text = (
+            "단기 변동성이 커질 수 있는 구간 / "
+            "중단기 기준에서는 분할 접근과 리밸런싱 기준을 명확히 두는 전략이 필요"
+        )
+    elif bull_reasons and not bear_reasons:
+        eval_text = (
+            "단기적으로 뉴스 모멘텀이 우호적인 구간 / "
+            "이미 호재가 일정 부분 가격에 반영되었을 수 있어 분할 매수와 비중 관리가 필요"
+        )
+    elif bear_reasons and not bull_reasons:
+        eval_text = (
+            "단기적으로 리스크 이벤트가 부각된 구간 / "
+            "손절 라인과 현금 비중을 함께 고려한 보수적 대응이 유리한 구간"
+        )
+    else:
+        eval_text = (
+            "최근 3일 내 뚜렷한 뉴스 모멘텀이 없는 구간 / "
+            "실적 일정과 거시환경(금리·정책)을 중심으로 중단기 방향성을 점검할 필요"
+        )
+
+    # HTML (호재=초록, 악재=빨강)
+    comment_html = (
+        "<p>"
+        f"<span style='color:green;'><strong>호재:</strong> {bull_text}</span><br>"
+        f"<span style='color:red;'><strong>악재:</strong> {bear_text}</span><br>"
+        f"<strong>평가:</strong> {eval_text}"
+        "</p>"
     )
 
     return {
@@ -558,7 +563,7 @@ def analyze_midterm_ticker(ticker):
         "BuyTiming": buy_score,
         "SellTiming": sell_score,
         "TargetRange": target_range,
-        "Comment": comment,
+        "Comment": comment_html,
     }
 
 
