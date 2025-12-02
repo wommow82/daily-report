@@ -598,66 +598,78 @@ def analyze_midterm_ticker(ticker):
 
 def build_midterm_context(ticker: str) -> str:
     """
-    '주요 맥락' 열에 들어갈 지표 요약 텍스트 생성.
+    '주요 맥락' 열: 수치 + 15자 이내 짧은 분석만 제공.
     - 1년 수익률
-    - 연 변동성(연 환산)
+    - 연 변동성
     - Fwd PER
-    각 수치에 대해 한 줄씩 간단한 설명을 붙인다.
     """
     tk = yf.Ticker(ticker)
 
-    # 1) 가격/수익률/변동성
+    # ===== 가격 기반 수치 =====
     try:
         hist = tk.history(period="1y")["Close"].dropna()
         if len(hist) < 2:
-            raise ValueError("not enough price data")
+            raise ValueError("데이터 부족")
+
         last = float(hist.iloc[-1])
         start = float(hist.iloc[0])
-        ret_1y = (last / start - 1.0) * 100.0 if start > 0 else None
+        ret_1y = (last / start - 1.0) * 100.0
 
         rets = np.log(hist / hist.shift(1)).dropna()
-        vol_annual = float(rets.std() * np.sqrt(252)) if len(rets) > 0 else None
-        vol_pct = vol_annual * 100.0 if vol_annual is not None else None
+        vol_annual = float(rets.std() * np.sqrt(252))
+        vol_pct = vol_annual * 100.0
     except Exception:
         ret_1y, vol_pct = None, None
 
-    # 2) 밸류에이션 (Fwd PER)
+    # ===== Fwd PER =====
     try:
         info = tk.info or {}
+        fpe = safe_float(info.get("forwardPE"), None)
     except Exception:
-        info = {}
-    fpe = safe_float(info.get("forwardPE"), None)
+        fpe = None
 
+    # ===== 라벨링 규칙 =====
+    def label_return(x):
+        if x is None:
+            return "N/A"
+        if x > 10: return "강한 상승"
+        if x < -10: return "약세 흐름"
+        return "보합권"
+
+    def label_vol(x):
+        if x is None:
+            return "N/A"
+        if x > 60: return "고변동성"
+        if x > 30: return "중간 변동성"
+        return "저변동성"
+
+    def label_fpe(x):
+        if x is None:
+            return "N/A"
+        if x > 40: return "밸류 부담"
+        if x >= 15: return "중립 밸류"
+        return "저평가 구간"
+
+    # ===== 출력 구성 =====
     lines = []
 
     # 1년 수익률
     if ret_1y is not None:
-        lines.append(
-            f"· 1년 수익률: {ret_1y:+.1f}% "
-            f"(최근 1년간 종가 기준 주가 수익률)"
-        )
+        lines.append(f"· 1년 수익률: {ret_1y:+.1f}% ({label_return(ret_1y)})")
     else:
-        lines.append("· 1년 수익률: N/A (데이터 부족)")
+        lines.append("· 1년 수익률: N/A")
 
     # 연 변동성
     if vol_pct is not None:
-        lines.append(
-            f"· 연 변동성: {vol_pct:.1f}% "
-            f"(연 환산 가격 등락 폭 – 수치가 높을수록 변동성이 큼)"
-        )
+        lines.append(f"· 연 변동성: {vol_pct:.1f}% ({label_vol(vol_pct)})")
     else:
-        lines.append("· 연 변동성: N/A (데이터 부족)")
+        lines.append("· 연 변동성: N/A")
 
     # Fwd PER
     if fpe is not None:
-        lines.append(
-            f"· Fwd PER: {fpe:.1f}배 "
-            f"(향후 1년 예상 이익 대비 현재 주가 배수 – 높을수록 밸류에이션 부담 구간일 가능성)"
-        )
+        lines.append(f"· Fwd PER: {fpe:.1f}배 ({label_fpe(fpe)})")
     else:
-        lines.append(
-            "· Fwd PER: N/A (향후 1년 예상 이익 데이터 부족)"
-        )
+        lines.append("· Fwd PER: N/A")
 
     return "<br>".join(lines)
     
@@ -911,21 +923,24 @@ def build_schd_dividend_html():
 
 def build_schd_dividend_summary_text(current_shares):
     """
-    - 현재 보유 SCHD 기준 '현재 예상 연 배당금'
-    - DRIP + 매월 200 USD 매수 가정,
-      연평균 배당 성장률을 11%로 고정해
-      월 1,000 USD(연 12,000 USD) 도달 예상 기간을 계산.
+    SCHD 장기 배당 분석 (모든 값을 CAD 기준으로 환산).
+
+    가정:
+    - DRIP 적용
+    - 매월 200 USD → CAD 변환 후 매수
+    - 연평균 배당 성장률 = 11% 고정
+    - 목표 배당: 월 CAD 1,000 (연 CAD 12,000)
     """
     current_shares = safe_float(current_shares, 0.0)
     if current_shares <= 0:
         return (
-            "<p><strong>현재 예상 연 배당금:</strong> N/A (보유 SCHD 없음)</p>"
-            "<p><strong>월 1,000 USD 배당 달성까지 예상 기간:</strong> 계산 불가</p>"
+            "<p><strong>현재 예상 연 배당금(CAD):</strong> N/A (보유 SCHD 없음)</p>"
+            "<p><strong>월 CAD 1,000 배당 달성 예상:</strong> 계산 불가</p>"
         )
 
     tk = yf.Ticker("SCHD")
 
-    # 1) 배당 히스토리 → 직전 완전 연도 배당/주
+    # ===== 1) 배당 데이터 =====
     try:
         divs = tk.dividends.dropna()
     except Exception:
@@ -933,67 +948,73 @@ def build_schd_dividend_summary_text(current_shares):
 
     if divs.empty:
         return (
-            "<p><strong>현재 예상 연 배당금:</strong> N/A (배당 데이터 부족)</p>"
-            "<p><strong>월 1,000 USD 배당 달성까지 예상 기간:</strong> 계산 불가</p>"
+            "<p><strong>현재 예상 연 배당금(CAD):</strong> 데이터 부족</p>"
+            "<p><strong>월 CAD 1,000 달성:</strong> 계산 불가</p>"
         )
 
+    # 연간 총 배당(USD)
     div_by_year = divs.groupby(divs.index.year).sum()
     years = sorted(div_by_year.index)
     last_year = years[-1]
-    last_div_ps = float(div_by_year[last_year])  # 직전 완전 연도 배당/주
+    last_div_ps_usd = float(div_by_year[last_year])
 
-    # 2) 현재 예상 연 배당금
-    current_annual_income = current_shares * last_div_ps
-
-    # 3) 배당 성장률 g 를 11%로 고정
-    div_cagr = 0.11  # 11%
-
-    # 4) 현재 가격 → 배당 수익률 계산
+    # ===== 2) 현재 SCHD 가격 =====
     try:
-        hist = tk.history(period="1mo")["Close"].dropna()
-        price = float(hist.iloc[-1]) if not hist.empty else 75.0
+        px = tk.history(period="1mo")["Close"].dropna()
+        price_usd = float(px.iloc[-1]) if not px.empty else 75.0
     except Exception:
-        price = 75.0
+        price_usd = 75.0
 
-    y = last_div_ps / price if price > 0 else 0.035  # 현재 배당수익률
+    # ===== 3) USD→CAD 환율 fetch =====
+    try:
+        fx = yf.Ticker("CAD=X").history(period="1d")["Close"].dropna()
+        usd_to_cad = float(fx.iloc[-1]) if not fx.empty else 1.35
+    except Exception:
+        usd_to_cad = 1.35
+
+    # ===== 4) 현재 연 배당금(CAD) =====
+    current_annual_income_cad = current_shares * last_div_ps_usd * usd_to_cad
+
+    # ===== 5) 성장률 고정 =====
+    g = 0.11   # 11%
+
+    # ===== 6) 배당 수익률 계산 (USD 기준) =====
+    y = last_div_ps_usd / price_usd if price_usd > 0 else 0.035
     if y <= 0:
-        y = 0.035  # 안전 장치
+        y = 0.035  # fallback
 
-    # 5) analytic 해법으로 목표 시점 계산
-    target_annual = 12000.0          # 월 1,000 USD
-    contrib_year = 200.0 * 12.0      # 연간 추가 투자액 (2,400 USD)
-    g = div_cagr
+    # ===== 7) 매월 200 USD → CAD 변환 후 투자 =====
+    monthly_usd = 200.0
+    monthly_cad = monthly_usd * usd_to_cad
+    annual_contrib_cad = monthly_cad * 12.0
 
-    if g <= 0.001:
-        # 이론상 거의 발생하지 않지만, 방어 코드
-        n_years = max(
-            0.0,
-            (target_annual - current_annual_income) / (contrib_year * y + 1e-9)
-        )
-    else:
-        # A = C*y/g
-        A = contrib_year * y / g
-        numerator = target_annual + A
-        denominator = current_annual_income + A
-        if numerator <= denominator:
-            n_years = 0.0
-        else:
-            ratio = numerator / denominator
-            n_years = np.log(ratio) / np.log(1.0 + g)
+    # USD 기준 배당 수익률이므로 CAD로 변환하기 위해 같은 배수 적용
+    # (DRIP는 주식 수 증가 → 배당 USD → CAD 변환)
+    # 성장률 공식 그대로 적용하며 마지막에 CAD로 해석하면 consistency 유지됨.
 
-    if n_years < 0:
+    A = annual_contrib_cad * (y / g)
+
+    target = 12000.0  # CAD 기준
+    numerator = target + A
+    denominator = current_annual_income_cad + A
+
+    if numerator <= denominator:
         n_years = 0.0
+    else:
+        n_years = np.log(numerator / denominator) / np.log(1.0 + g)
 
+    n_years = max(0.0, n_years)
     years_int = int(n_years)
     months_int = int(round((n_years - years_int) * 12.0))
 
+    # ===== 8) 결과 출력 =====
     txt = (
-        f"<p><strong>현재 예상 연 배당금:</strong> "
-        f"{fmt_money(current_annual_income, '$')} "
-        f"(보유 SCHD {current_shares:,.0f}주 기준, 직전 연도 배당 적용)</p>"
-        f"<p><strong>월 1,000 USD 배당 달성까지 예상 기간:</strong> "
+        f"<p><strong>현재 예상 연 배당금(CAD):</strong> "
+        f"{fmt_money(current_annual_income_cad, '$')} "
+        f"(보유 {current_shares:,.0f}주 기준)</p>"
+        f"<p><strong>월 CAD 1,000 달성 예상:</strong> "
         f"약 {years_int}년 {months_int}개월 "
-        f"(DRIP + 매월 200 USD 매수, 연평균 배당 성장률 11.0% 가정)</p>"
+        f"(DRIP + 매월 200 USD 투자 / 배당 성장률 11%)</p>"
     )
     return txt
     
