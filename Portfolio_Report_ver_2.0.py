@@ -596,70 +596,70 @@ def analyze_midterm_ticker(ticker):
     }
 
 
-def build_midterm_context(ticker):
+def build_midterm_context(ticker: str) -> str:
     """
-    뉴스·정책·펀더멘털·차트를 한 줄로 요약하는 '주요맥락' 텍스트 생성.
-    - yfinance 뉴스(최근 2건)
-    - 최근 1년 수익률, 변동성
-    - PER / Fwd PER
+    '주요 맥락' 열에 들어갈 지표 요약 텍스트 생성.
+    - 1년 수익률
+    - 연 변동성(연 환산)
+    - Fwd PER
+    각 수치에 대해 한 줄씩 간단한 설명을 붙인다.
     """
     tk = yf.Ticker(ticker)
 
     # 1) 가격/수익률/변동성
     try:
         hist = tk.history(period="1y")["Close"].dropna()
+        if len(hist) < 2:
+            raise ValueError("not enough price data")
         last = float(hist.iloc[-1])
         start = float(hist.iloc[0])
-        ret_1y = (last / start - 1.0) * 100.0 if start > 0 else 0.0
-        vol = float(np.log(hist / hist.shift(1)).dropna().std() * np.sqrt(252) * 100)
-    except Exception:
-        ret_1y, vol = None, None
+        ret_1y = (last / start - 1.0) * 100.0 if start > 0 else None
 
-    # 2) 밸류에이션
+        rets = np.log(hist / hist.shift(1)).dropna()
+        vol_annual = float(rets.std() * np.sqrt(252)) if len(rets) > 0 else None
+        vol_pct = vol_annual * 100.0 if vol_annual is not None else None
+    except Exception:
+        ret_1y, vol_pct = None, None
+
+    # 2) 밸류에이션 (Fwd PER)
     try:
         info = tk.info or {}
     except Exception:
         info = {}
-    pe = safe_float(info.get("trailingPE"), None)
     fpe = safe_float(info.get("forwardPE"), None)
 
-    # 3) 뉴스 (최근 2개) + 기사 날짜
-    try:
-        news_list = tk.news or []
-    except Exception:
-        news_list = []
+    lines = []
 
-    news_parts = []
-    for n in news_list[:2]:
-        title = n.get("title", "").strip()
-        if len(title) > 50:
-            title = title[:47] + "..."
-        ts = n.get("providerPublishTime")
-        if ts:
-            try:
-                date_str = datetime.fromtimestamp(int(ts)).strftime("%Y-%m-%d")
-                news_parts.append(f"{title}({date_str})")
-            except Exception:
-                news_parts.append(title)
-        else:
-            news_parts.append(title)
-
-    news_text = " / ".join(news_parts) if news_parts else "최근 뉴스 정보 제한"
-
-    # 4) 숫자 요약 + 뉴스 텍스트 결합
-    num_parts = []
+    # 1년 수익률
     if ret_1y is not None:
-        num_parts.append(f"1년 수익률 {ret_1y:+.1f}%")
-    if vol is not None:
-        num_parts.append(f"연 변동성 {vol:.1f}%")
-    if pe:
-        num_parts.append(f"PER {pe:.1f}")
-    if fpe:
-        num_parts.append(f"Fwd PER {fpe:.1f}")
+        lines.append(
+            f"· 1년 수익률: {ret_1y:+.1f}% "
+            f"(최근 1년간 종가 기준 주가 수익률)"
+        )
+    else:
+        lines.append("· 1년 수익률: N/A (데이터 부족)")
 
-    num_text = " · ".join(num_parts) if num_parts else "기초 지표 정보 제한"
+    # 연 변동성
+    if vol_pct is not None:
+        lines.append(
+            f"· 연 변동성: {vol_pct:.1f}% "
+            f"(연 환산 가격 등락 폭 – 수치가 높을수록 변동성이 큼)"
+        )
+    else:
+        lines.append("· 연 변동성: N/A (데이터 부족)")
 
-    return f"{num_text} · {news_text}"
+    # Fwd PER
+    if fpe is not None:
+        lines.append(
+            f"· Fwd PER: {fpe:.1f}배 "
+            f"(향후 1년 예상 이익 대비 현재 주가 배수 – 높을수록 밸류에이션 부담 구간일 가능성)"
+        )
+    else:
+        lines.append(
+            "· Fwd PER: N/A (향후 1년 예상 이익 데이터 부족)"
+        )
+
+    return "<br>".join(lines)
     
 
 def build_midterm_analysis_html(df_enriched):
@@ -912,9 +912,9 @@ def build_schd_dividend_html():
 def build_schd_dividend_summary_text(current_shares):
     """
     - 현재 보유 SCHD 기준 '현재 예상 연 배당금'
-    - DRIP + 매월 200 USD 매수 가정 시
-      '월 1,000 USD(연 12,000 USD) 배당 도달까지 analytic 근사년수'
-    를 계산해서 HTML 문장으로 반환.
+    - DRIP + 매월 200 USD 매수 가정,
+      연평균 배당 성장률을 11%로 고정해
+      월 1,000 USD(연 12,000 USD) 도달 예상 기간을 계산.
     """
     current_shares = safe_float(current_shares, 0.0)
     if current_shares <= 0:
@@ -925,7 +925,7 @@ def build_schd_dividend_summary_text(current_shares):
 
     tk = yf.Ticker("SCHD")
 
-    # 1) 배당 히스토리 → 직전 완전 연도의 배당/주
+    # 1) 배당 히스토리 → 직전 완전 연도 배당/주
     try:
         divs = tk.dividends.dropna()
     except Exception:
@@ -945,29 +945,10 @@ def build_schd_dividend_summary_text(current_shares):
     # 2) 현재 예상 연 배당금
     current_annual_income = current_shares * last_div_ps
 
-    # 3) 최근 5년 배당 CAGR
-    if len(years) >= 5:
-        use_years = years[-5:]
-    elif len(years) >= 2:
-        use_years = years
-    else:
-        use_years = years[-1:]
+    # 3) 배당 성장률 g 를 11%로 고정
+    div_cagr = 0.11  # 11%
 
-    if len(use_years) >= 2:
-        d0 = float(div_by_year[use_years[0]])
-        dN = float(div_by_year[use_years[-1]])
-        n = use_years[-1] - use_years[0]
-        if d0 > 0 and n > 0:
-            div_cagr = (dN / d0) ** (1.0 / n) - 1.0
-        else:
-            div_cagr = 0.07
-    else:
-        div_cagr = 0.07  # 기본 7% 가정
-
-    # 과도한 성장률 클리핑
-    div_cagr = max(0.03, min(0.12, div_cagr))  # 3% ~ 12%
-
-    # 4) 현재 가격 → 수익률 계산
+    # 4) 현재 가격 → 배당 수익률 계산
     try:
         hist = tk.history(period="1mo")["Close"].dropna()
         price = float(hist.iloc[-1]) if not hist.empty else 75.0
@@ -976,17 +957,15 @@ def build_schd_dividend_summary_text(current_shares):
 
     y = last_div_ps / price if price > 0 else 0.035  # 현재 배당수익률
     if y <= 0:
-        y = 0.035  # 기본 3.5% 가정
+        y = 0.035  # 안전 장치
 
     # 5) analytic 해법으로 목표 시점 계산
     target_annual = 12000.0          # 월 1,000 USD
-    contrib_year = 200.0 * 12.0      # 연간 추가 투자액
+    contrib_year = 200.0 * 12.0      # 연간 추가 투자액 (2,400 USD)
     g = div_cagr
 
-    # g가 너무 작을 경우(거의 0) 분모 문제 방지
     if g <= 0.001:
-        # 매우 단순한 선형 근사: 추가 배당 = contrib_year * y * n
-        # current_annual + contrib_year*y * n ≈ target_annual
+        # 이론상 거의 발생하지 않지만, 방어 코드
         n_years = max(
             0.0,
             (target_annual - current_annual_income) / (contrib_year * y + 1e-9)
@@ -1000,7 +979,6 @@ def build_schd_dividend_summary_text(current_shares):
             n_years = 0.0
         else:
             ratio = numerator / denominator
-            # ln(ratio) / ln(1+g)
             n_years = np.log(ratio) / np.log(1.0 + g)
 
     if n_years < 0:
@@ -1015,7 +993,7 @@ def build_schd_dividend_summary_text(current_shares):
         f"(보유 SCHD {current_shares:,.0f}주 기준, 직전 연도 배당 적용)</p>"
         f"<p><strong>월 1,000 USD 배당 달성까지 예상 기간:</strong> "
         f"약 {years_int}년 {months_int}개월 "
-        f"(DRIP + 매월 200 USD 매수, 배당 성장률 {div_cagr*100:.1f}% 가정)</p>"
+        f"(DRIP + 매월 200 USD 매수, 연평균 배당 성장률 11.0% 가정)</p>"
     )
     return txt
     
