@@ -251,19 +251,19 @@ JSON 형식으로만 답하라. 예시는 다음과 같다.
 def _summarize_news_bundle_ko_price_focus(ticker, articles):
     """
     여러 개의 영어 뉴스(articles)를 받아서
-    주가에 영향을 줄 수 있는 이슈 중심으로
+    각 기사별로
+      - 주가 영향 관점 감성(긍정/부정/중립)
+      - 한국어 한 줄 요약
+    을 뽑은 뒤,
 
-    - 긍정/부정 뉴스 개수
-    - 긍정 대표 최대 2줄
-    - 부정 대표 최대 2줄
+    최종적으로는 다음 형식의 여러 줄 텍스트를 만든다:
 
-    을 한국어로 요약한 "텍스트 여러 줄"을 반환한다.
-
-    각 대표 줄 형식:
+      긍정 뉴스 X건, 부정 뉴스 Y건
       · 대표 긍정: A기사 요약 | B기사 요약
       · 대표 부정: C기사 요약 | D기사 요약
 
-    (A, B는 서로 다른 기사에 기반한 요약)
+    - 긍정/부정 각각 최대 2개까지 사용
+    - 기사 수가 부족하면 있는 만큼만 사용
     """
     api_key = os.environ.get("OPENAI_API_KEY")
     if not api_key:
@@ -279,8 +279,8 @@ def _summarize_news_bundle_ko_price_focus(ticker, articles):
 
     client = OpenAI(api_key=api_key)
 
-    # 뉴스 내용을 한 번에 묶어서 프롬프트용 텍스트 생성
-    lines = []
+    # 1) 기사 묶음을 번호 붙여 하나의 텍스트로 만든다.
+    items = []
     for i, a in enumerate(articles, start=1):
         title = (a.get("title") or "").strip()
         desc = (a.get("description") or "").strip()
@@ -289,48 +289,28 @@ def _summarize_news_bundle_ko_price_focus(ticker, articles):
         item = f"[{i}] {date} {src} - {title}"
         if desc:
             item += f"\n{desc}"
-        lines.append(item)
+        items.append(item)
 
-    bundle_text = "\n\n".join(lines)
+    bundle_text = "\n\n".join(items)
 
+    # 2) 각 기사별 감성 + 한국어 요약을 JSON으로 요청
     prompt = f"""
 너는 미국 주식 애널리스트이다.
 아래는 {ticker} 관련 뉴스 목록이다.
 
-각 뉴스가 주가에 미치는 방향성을 먼저 내부적으로 '긍정', '부정', '중립'으로 나눈 다음,
-그 중 '주가에 의미 있는' 긍정/부정 뉴스들만 사용하여 요약해라.
+각 뉴스에 대해 다음 정보를 추출하라:
 
-[출력 형식(반드시 지켜라, 한국어로 텍스트 줄만 출력):]
+- sentiment: "긍정", "부정", "중립" 중 하나
+- summary_ko: 주가에 중요한 내용을 담은 한국어 한 문장 요약 (20~30자 내외)
 
-1줄째:
-긍정 뉴스 X건, 부정 뉴스 Y건
-
-그 아래 줄들(최대 4줄):
-
-1) 긍정 뉴스가 1건 이상인 경우:
-   - 최대 2줄까지 출력
-   - 각 줄 형식:
-     · 대표 긍정: A기사 요약 | B기사 요약
-   - A기사와 B기사는 서로 다른 기사여야 한다.
-   - 긍정 뉴스가 1건뿐이면:
-     · 대표 긍정: A기사 요약 | A기사의 다른 핵심 포인트
-     처럼 한 기사 안에서 두 포인트를 나눠 써도 된다.
-
-2) 부정 뉴스가 1건 이상인 경우:
-   - 최대 2줄까지 출력
-   - 각 줄 형식:
-     · 대표 부정: C기사 요약 | D기사 요약
-   - C기사와 D기사는 서로 다른 기사여야 한다.
-   - 부정 뉴스가 1건뿐이면:
-     · 대표 부정: C기사 요약 | C기사의 다른 핵심 포인트
-     처럼 한 기사 안에서 두 포인트를 나눠 써도 된다.
-
-세부 조건:
-- 'A기사 요약', 'B기사 요약'은 각각 20~30자 이내의 자연스러운 한국어 문장으로,
-  서로 다른 관점을 담도록 노력해라.
-- 특히 오른쪽 요약(B, D)은 왼쪽 요약과 다른 뉴스나 다른 포인트를 담도록 해라.
-- 총 줄 수는 3~5줄(1줄째 + 대표 긍정/부정 몇 줄) 정도로 맞춰라.
-- JSON, 따옴표, 번호표 등은 쓰지 말고, 위 형식 그대로 '텍스트 줄'만 출력해라.
+JSON 형식으로만 답하라. 예시는 다음과 같다.
+{{
+  "items": [
+    {{"index": 1, "sentiment": "긍정", "summary_ko": "테슬라 유럽 판매 회복으로 수요 기대"}},
+    {{"index": 2, "sentiment": "부정", "summary_ko": "유럽 보조금 축소로 전기차 성장 둔화 우려"}},
+    ...
+  ]
+}}
 
 뉴스 목록:
 {bundle_text}
@@ -340,13 +320,67 @@ def _summarize_news_bundle_ko_price_focus(ticker, articles):
         resp = client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[{"role": "user", "content": prompt}],
-            max_tokens=700,
+            max_tokens=900,
+            response_format={"type": "json_object"},
         )
-        text = resp.choices[0].message.content.strip()
-        return text
+        raw = resp.choices[0].message.content
+        data = json.loads(raw)
+        items_data = data.get("items", [])
     except Exception as e:
-        print(f"[WARN] _summarize_news_bundle_ko_price_focus 오류: {e}")
+        print(f"[WARN] _summarize_news_bundle_ko_price_focus JSON 파싱 오류: {e}")
         return "긍정 뉴스 0건, 부정 뉴스 0건"
+
+    # 3) 긍정/부정 리스트로 분리 (기사 순서 유지)
+    pos_summaries = []
+    neg_summaries = []
+
+    for x in items_data:
+        try:
+            idx = int(x.get("index"))
+        except Exception:
+            continue
+        if not (1 <= idx <= len(articles)):
+            continue
+
+        sent = (x.get("sentiment") or "").strip()
+        summary_ko = (x.get("summary_ko") or "").strip()
+        if not summary_ko:
+            continue
+
+        # 너무 길면 살짝 자르기
+        if len(summary_ko) > 40:
+            summary_ko = summary_ko[:40]
+
+        if sent == "긍정":
+            pos_summaries.append(summary_ko)
+        elif sent == "부정":
+            neg_summaries.append(summary_ko)
+        else:
+            # 중립은 여기서는 사용하지 않음
+            pass
+
+    pos_count = len(pos_summaries)
+    neg_count = len(neg_summaries)
+
+    lines = []
+    lines.append(f"긍정 뉴스 {pos_count}건, 부정 뉴스 {neg_count}건")
+
+    # 4) 긍정 대표 줄 1개 (최대 2개 기사 요약 사용)
+    if pos_count > 0:
+        left = pos_summaries[0]
+        right = pos_summaries[1] if pos_count > 1 else pos_summaries[0]
+        lines.append(f"· 대표 긍정: {left} | {right}")
+
+    # 5) 부정 대표 줄 1개 (최대 2개 기사 요약 사용)
+    if neg_count > 0:
+        left = neg_summaries[0]
+        right = neg_summaries[1] if neg_count > 1 else neg_summaries[0]
+        lines.append(f"· 대표 부정: {left} | {right}")
+
+    # 총 줄 수 제한 (예외 안전)
+    lines = lines[:5]
+
+    return "\n".join(lines)
 
 
 # =========================
