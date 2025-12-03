@@ -8,7 +8,7 @@ import numpy as np
 import yfinance as yf
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
-from email.mime_text import MIMEText
+from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 
 
