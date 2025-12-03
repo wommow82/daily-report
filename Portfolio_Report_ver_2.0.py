@@ -106,17 +106,15 @@ def _short_ko_summary_15(text):
 def _classify_news_sentiment_and_pick_reps(ticker, articles):
     """
     기사 리스트에 대해 긍정/부정 감성을 분류하고,
-    각 그룹에서 최대 2개까지 대표 요약을 뽑아
-    '요약1 | 요약2' 형식의 문자열로 반환한다.
+    각 그룹에서 대표 요약 문자열을 생성한다.
 
+    규칙:
     - 긍정/부정 각각:
-      · 실제 기사 개수(pos_count, neg_count)는 감성 분류 결과의 개수를 사용
-      · 대표 요약 문자열(pos_repr, neg_repr)은
-        최대 2개의 요약을 ' | '로 연결한 형태
-
-    - 긍정/부정 뉴스가 1건뿐인 경우:
-      · 해당 기사에서 제목/본문을 나눠 각각 요약 시도
-      · 본문이 없으면 같은 요약을 두 번 써서 'A | A' 형태가 될 수 있음
+      · pos_count / neg_count: 해당 감성으로 분류된 기사 개수
+      · pos_repr / neg_repr:
+          - 기사가 0개이면 None
+          - 기사가 1개이면 '요약1' (단일 문장, '|' 없음)
+          - 기사가 2개 이상이면 '요약1 | 요약2'
 
     입력:
         ticker   : 종목 티커 (예: "TSLA")
@@ -127,20 +125,12 @@ def _classify_news_sentiment_and_pick_reps(ticker, articles):
         {
           "pos_count": int,
           "neg_count": int,
-          "pos_repr": str or None,  # 대표 긍정 뉴스 요약1 | 요약2
-          "neg_repr": str or None,  # 대표 부정 뉴스 요약1 | 요약2
+          "pos_repr": str or None,
+          "neg_repr": str or None,
         }
     """
     api_key = os.environ.get("OPENAI_API_KEY")
-    if not api_key:
-        return {
-            "pos_count": 0,
-            "neg_count": 0,
-            "pos_repr": None,
-            "neg_repr": None,
-        }
-
-    if not articles:
+    if not api_key or not articles:
         return {
             "pos_count": 0,
             "neg_count": 0,
@@ -228,62 +218,47 @@ JSON 형식으로만 답하라. 예시는 다음과 같다.
     pos_count = len(pos_idx)
     neg_count = len(neg_idx)
 
-    # 3) 대표 기사(또는 포인트) 선택
-    def _build_repr_for_indices(idx_set):
+    # 3) 대표 요약 문자열 생성 로직
+    def _build_repr(idx_set):
         """
-        idx_set(기사 인덱스 집합)에서 최대 2개까지 선택해
-        '요약1 | 요약2' 형식의 문자열을 만든다.
+        idx_set(기사 인덱스 집합)에서 대표 요약 문자열 생성:
+
+        - len == 0 → None
+        - len == 1 → 기사 1개를 요약한 단일 문자열
+        - len >= 2 → 첫 두 개 기사를 요약하여 '요약1 | 요약2'
         """
         if not idx_set:
             return None
 
-        # 최신 기사 우선: articles는 이미 날짜 기준 내림차순 정렬 상태이므로
-        # index가 작은 것부터 사용
         sorted_idx = sorted(idx_set)
 
-        # 기사 2개 이상이면 서로 다른 기사 2개 사용
-        if len(sorted_idx) >= 2:
-            reps = sorted_idx[:2]
-            segs = []
-            for rep_i in reps:
-                art = articles[rep_i - 1]
-                title = (art.get("title") or "")
-                desc = (art.get("description") or "")
-                text = (title + "\n" + desc).strip()
-                segs.append(_short_ko_summary_15(text))
-            # 비어 있는 요약 제거
-            segs = [s for s in segs if s]
-            if not segs:
-                return None
-            return " | ".join(segs)
+        # 기사 1개인 경우: 단일 요약만
+        if len(sorted_idx) == 1:
+            rep_i = sorted_idx[0]
+            art = articles[rep_i - 1]
+            text = ((art.get("title") or "") + "\n" + (art.get("description") or "")).strip()
+            summary = _short_ko_summary_15(text)
+            return summary
 
-        # 기사 1개뿐인 경우: 제목/본문을 나눠 두 포인트 시도
-        rep_i = sorted_idx[0]
-        art = articles[rep_i - 1]
-        title = (art.get("title") or "").strip()
-        desc = (art.get("description") or "").strip()
+        # 기사 2개 이상: 앞에서 2개만 사용
+        rep_indices = sorted_idx[:2]
+        summaries = []
+        for rep_i in rep_indices:
+            art = articles[rep_i - 1]
+            text = ((art.get("title") or "") + "\n" + (art.get("description") or "")).strip()
+            summaries.append(_short_ko_summary_15(text))
 
-        if title:
-            s1 = _short_ko_summary_15(title)
-        else:
-            base = (title + "\n" + desc).strip()
-            s1 = _short_ko_summary_15(base)
-
-        if desc:
-            s2 = _short_ko_summary_15(desc)
-        else:
-            # 본문이 없으면 같은 요약을 한 번 더 사용
-            s2 = s1
-
-        # 빈 문자열 방어
-        segs = [s for s in [s1, s2] if s]
-        if not segs:
+        # 비어있는 요약 제거
+        summaries = [s for s in summaries if s]
+        if not summaries:
             return None
-        # 혹시 하나만 남으면 그대로, 두 개면 ' | '로 연결
-        return " | ".join(segs)
+        if len(summaries) == 1:
+            # 이 경우는 거의 없겠지만 방어적으로 단일 요약만 리턴
+            return summaries[0]
+        return f"{summaries[0]} | {summaries[1]}"
 
-    pos_repr = _build_repr_for_indices(pos_idx)
-    neg_repr = _build_repr_for_indices(neg_idx)
+    pos_repr = _build_repr(pos_idx)
+    neg_repr = _build_repr(neg_idx)
 
     return {
         "pos_count": pos_count,
