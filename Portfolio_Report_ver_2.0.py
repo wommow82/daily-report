@@ -1462,23 +1462,28 @@ def build_midterm_context(ticker: str) -> str:
 
 def build_midterm_analysis_html(df_enriched):
     """
-    📈 중단기 투자의 통합 분석 (TFSA 종목만, SCHD 제외)
+    📈 중단기 투자의 통합 분석 (전체 보유 종목 대상)
 
-    - TFSA 계좌 종목만 포함
-    - SCHD 는 중단기 분석에서 제외
-    - 출력: 요약 테이블 + 상세 테이블
+    1) 요약표 : Ticker + 중기 상승 확률 % / 매수 타이밍 % / 매도 타이밍 % / 1년 목표수익 범위
+    2) 상세표 : '핵심 투자 코멘트' + '주요맥락'
+
+    - 입력: df_enriched
+      · 최소한 'Ticker' 컬럼이 존재해야 함
+      · TFSA / RESP / 기타 계좌 구분 없이, 보유 중인 모든 Ticker를 사용
+    - 내부에서 사용하는 함수:
+      · analyze_midterm_ticker(ticker)  → 수치 + 코멘트 딕셔너리
+          - 기대 키: "Ticker", "UpProb", "BuyTiming", "SellTiming",
+                    "TargetRange", "Comment"
+      · build_midterm_context(ticker)   → '주요맥락'용 HTML 문자열
+      · colorize_value_html, fmt_pct    → 숫자/퍼센트 색상 처리
     """
+    # 0) 방어코드: Ticker 컬럼이 없으면 종료
+    if "Ticker" not in df_enriched.columns:
+        return "<p>Ticker 컬럼이 없어 중단기 분석을 생성할 수 없습니다.</p>"
 
-    # 0) 방어 코드
-    if "Ticker" not in df_enriched.columns or "Account" not in df_enriched.columns:
-        return "<p>Ticker 또는 Account 컬럼이 없어 중단기 분석을 생성할 수 없습니다.</p>"
-
-    # 1) TFSA 계좌 종목만 → SCHD 제외
+    # 1) 전체 보유 종목에서 Ticker 목록 추출 (TFSA/RESP 전체, SCHD 포함)
     tickers = (
-        df_enriched[
-            (df_enriched["Account"] == "TFSA") &
-            (df_enriched["Ticker"].str.upper() != "SCHD")
-        ]["Ticker"]
+        df_enriched["Ticker"]
         .dropna()
         .astype(str)
         .str.strip()
@@ -1489,12 +1494,12 @@ def build_midterm_analysis_html(df_enriched):
     )
 
     if not tickers:
-        return "<p>중단기 분석 대상(TFSA 비-SCHD)이 없습니다.</p>"
+        return "<p>중단기 대상 보유 종목이 없습니다.</p>"
 
     rows_summary = []
     rows_detail = []
 
-    # 2) 각 Ticker 중단기 분석
+    # 2) 각 종목별 중단기 분석 + 맥락 생성
     for t in sorted(tickers):
         try:
             stat = analyze_midterm_ticker(t)
@@ -1508,29 +1513,39 @@ def build_midterm_analysis_html(df_enriched):
             print(f"[WARN] build_midterm_context 실패: {t}, {e}")
             ctx = "맥락 정보를 불러오지 못했습니다."
 
-        # 요약 테이블
+        # ① 요약 테이블 행 (확률/타이밍/목표수익)
         up = stat.get("UpProb")
         buy = stat.get("BuyTiming")
         sell = stat.get("SellTiming")
 
-        up_str = colorize_value_html(fmt_pct(up), up) if up is not None else "N/A"
-        buy_str = colorize_value_html(fmt_pct(buy), buy) if buy is not None else "N/A"
-        sell_str = colorize_value_html(fmt_pct(sell), sell) if sell is not None else "N/A"
+        if up is not None:
+            up_str = colorize_value_html(fmt_pct(up), up)
+            buy_str = colorize_value_html(fmt_pct(buy), buy)
+            sell_str = colorize_value_html(fmt_pct(sell), sell)
+        else:
+            up_str = buy_str = sell_str = "N/A"
 
-        rows_summary.append({
-            "Ticker": stat.get("Ticker", t),
-            "중기 상승 확률 %": up_str,
-            "매수 타이밍 %": buy_str,
-            "매도 타이밍 %": sell_str,
-            "1년 목표수익 범위": stat.get("TargetRange", "N/A"),
-        })
+        rows_summary.append(
+            {
+                "Ticker": stat.get("Ticker", t),
+                "중기 상승 확률 %": up_str,
+                "매수 타이밍 %": buy_str,
+                "매도 타이밍 %": sell_str,
+                "1년 목표수익 범위": stat.get("TargetRange", "N/A"),
+            }
+        )
 
-        # 상세 테이블
-        rows_detail.append({
-            "Ticker": stat.get("Ticker", t),
-            "핵심 투자 코멘트": stat.get("Comment", "코멘트 없음"),
-            "주요맥락": ctx,
-        })
+        # ② 상세 테이블 행 (핵심 투자 코멘트 + 주요맥락)
+        rows_detail.append(
+            {
+                "Ticker": stat.get("Ticker", t),
+                "핵심 투자 코멘트": stat.get("Comment", "코멘트 없음"),
+                "주요맥락": ctx,
+            }
+        )
+
+    if not rows_summary:
+        return "<p>중단기 분석 결과를 생성하지 못했습니다.</p>"
 
     df_sum = pd.DataFrame(rows_summary)
     df_det = pd.DataFrame(rows_detail)
@@ -1539,11 +1554,11 @@ def build_midterm_analysis_html(df_enriched):
     html_detail = df_det.to_html(index=False, escape=False)
 
     return (
-        "<h3>① 요약 테이블</h3>" +
-        html_summary +
-        "<br/><br/>" +
-        "<h3>② 상세 테이블 (핵심 투자 코멘트 + 주요맥락)</h3>" +
-        html_detail
+        "<h3>① 요약 테이블</h3>"
+        + html_summary
+        + "<br/><br/>"
+        + "<h3>② 상세 테이블 (핵심 투자 코멘트 + 주요맥락)</h3>"
+        + html_detail
     )
 
 def simulate_schd_to_target(
@@ -1990,7 +2005,7 @@ def build_html_report(df_enriched, account_summary):
     tfsa_table = make_holdings_table("TFSA")
     resp_table = make_holdings_table("RESP")
 
-    # ---------- 3) 중단기 투자 분석 (TFSA 종목, SCHD 제외) ----------
+    # ---------- 3) 중단기 투자 분석 (전체 보유 종목) ----------
     midterm_html = build_midterm_analysis_html(df_enriched)
 
     # ---------- 4) SCHD 배당 분석 + DRIP/월 200 매수 시뮬레이션 ----------
