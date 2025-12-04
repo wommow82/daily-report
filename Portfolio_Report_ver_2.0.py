@@ -1462,30 +1462,25 @@ def build_midterm_context(ticker: str) -> str:
 
 def build_midterm_analysis_html(df_enriched):
     """
-    📈 중단기 투자의 통합 분석 (전체 보유 종목 대상)
+    📈 중단기 투자의 통합 분석 (TFSA 종목만, SCHD 제외)
 
     1) 요약표 : Ticker + 중기 상승 확률 % / 매수 타이밍 % / 매도 타이밍 % / 1년 목표수익 범위
     2) 상세표 : '핵심 투자 코멘트' + '주요맥락'
 
-    - 입력: df_enriched
-      · 최소한 'Ticker' 컬럼이 존재해야 함
-      · TFSA / RESP / 기타 계좌 구분 없이, 보유 중인 모든 Ticker를 사용
-    - 내부에서 사용하는 함수:
-      · analyze_midterm_ticker(ticker)  → 수치 + 코멘트 딕셔너리
-          - 기대 키: "Ticker", "UpProb", "BuyTiming", "SellTiming",
-                    "TargetRange", "Comment"
-      · build_midterm_context(ticker)   → '주요맥락'용 HTML 문자열
-      · colorize_value_html, fmt_pct    → 숫자/퍼센트 색상 처리
+    대상:
+      - df_enriched 중에서 Type == 'TFSA' 인 종목만 포함
+      - 그 중 Ticker != 'SCHD'
     """
-    # 0) 방어코드: Ticker 컬럼이 없으면 종료
-    if "Ticker" not in df_enriched.columns:
-        return "<p>Ticker 컬럼이 없어 중단기 분석을 생성할 수 없습니다.</p>"
 
-    # 1) 전체 보유 종목에서 Ticker 목록 추출 (TFSA/RESP 전체, SCHD 포함)
-    tickers = (
-        df_enriched["Ticker"]
-        .dropna()
+    # 0) 방어 코드: 필요한 컬럼 확인
+    if "Ticker" not in df_enriched.columns or "Type" not in df_enriched.columns:
+        return "<p>Type/Ticker 컬럼이 없어 중단기 분석을 생성할 수 없습니다.</p>"
+
+    # 1) TFSA 계좌의 Ticker만 추출
+    tfsa_tickers = (
+        df_enriched[df_enriched["Type"].astype(str).str.upper() == "TFSA"]["Ticker"]
         .astype(str)
+        .dropna()
         .str.strip()
         .replace("", np.nan)
         .dropna()
@@ -1493,60 +1488,48 @@ def build_midterm_analysis_html(df_enriched):
         .tolist()
     )
 
+    # 2) SCHD 제외
+    tickers = [t for t in tfsa_tickers if t.upper() != "SCHD"]
+
     if not tickers:
-        return "<p>중단기 대상 보유 종목이 없습니다.</p>"
+        return "<p>TFSA 중단기 대상 종목이 없습니다.</p>"
 
     rows_summary = []
     rows_detail = []
 
-    # 2) 각 종목별 중단기 분석 + 맥락 생성
+    # 3) 각 종목별 중단기 분석 + 맥락 생성
     for t in sorted(tickers):
-        try:
-            stat = analyze_midterm_ticker(t)
-        except Exception as e:
-            print(f"[WARN] analyze_midterm_ticker 실패: {t}, {e}")
-            continue
+        stat = analyze_midterm_ticker(t)
+        ctx = build_midterm_context(t)
 
-        try:
-            ctx = build_midterm_context(t)
-        except Exception as e:
-            print(f"[WARN] build_midterm_context 실패: {t}, {e}")
-            ctx = "맥락 정보를 불러오지 못했습니다."
-
-        # ① 요약 테이블 행 (확률/타이밍/목표수익)
-        up = stat.get("UpProb")
-        buy = stat.get("BuyTiming")
-        sell = stat.get("SellTiming")
-
-        if up is not None:
-            up_str = colorize_value_html(fmt_pct(up), up)
-            buy_str = colorize_value_html(fmt_pct(buy), buy)
-            sell_str = colorize_value_html(fmt_pct(sell), sell)
+        # ① 요약 테이블 행
+        if stat["UpProb"] is not None:
+            up_str = colorize_value_html(fmt_pct(stat["UpProb"]), stat["UpProb"])
+            buy_str = colorize_value_html(fmt_pct(stat["BuyTiming"]), stat["BuyTiming"])
+            sell_str = colorize_value_html(fmt_pct(stat["SellTiming"]), stat["SellTiming"])
         else:
             up_str = buy_str = sell_str = "N/A"
 
         rows_summary.append(
             {
-                "Ticker": stat.get("Ticker", t),
+                "Ticker": stat["Ticker"],
                 "중기 상승 확률 %": up_str,
                 "매수 타이밍 %": buy_str,
                 "매도 타이밍 %": sell_str,
-                "1년 목표수익 범위": stat.get("TargetRange", "N/A"),
+                "1년 목표수익 범위": stat["TargetRange"],
             }
         )
 
-        # ② 상세 테이블 행 (핵심 투자 코멘트 + 주요맥락)
+        # ② 상세 테이블 행
         rows_detail.append(
             {
-                "Ticker": stat.get("Ticker", t),
-                "핵심 투자 코멘트": stat.get("Comment", "코멘트 없음"),
+                "Ticker": stat["Ticker"],
+                "핵심 투자 코멘트": stat["Comment"],
                 "주요맥락": ctx,
             }
         )
 
-    if not rows_summary:
-        return "<p>중단기 분석 결과를 생성하지 못했습니다.</p>"
-
+    # 4) DataFrame → HTML
     df_sum = pd.DataFrame(rows_summary)
     df_det = pd.DataFrame(rows_detail)
 
@@ -1560,6 +1543,7 @@ def build_midterm_analysis_html(df_enriched):
         + "<h3>② 상세 테이블 (핵심 투자 코멘트 + 주요맥락)</h3>"
         + html_detail
     )
+
 
 def simulate_schd_to_target(
     current_shares,
