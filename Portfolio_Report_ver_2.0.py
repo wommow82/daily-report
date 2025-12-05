@@ -55,6 +55,60 @@ def colorize_value_html(text, raw_value):
 
     return f'<span style="color:{color}">{text}</span>'
 
+
+def colorize_midterm_metric(metric_name, value):
+    """
+    중단기 분석용 퍼센트 색칠 함수.
+
+    metric_name:
+      - "UpProb"     : 중기 상승 확률 %
+      - "BuyTiming"  : 매수 타이밍 %
+      - "SellTiming" : 매도 타이밍 %
+
+    색 규칙:
+      1) UpProb, BuyTiming (높을수록 '좋음'):
+         - >= 70 : 초록 (green)
+         - 40~69 : 주황 (orange)
+         - <  40 : 빨강 (red)
+
+      2) SellTiming (높을수록 '매도 신호'):
+         - >= 70 : 빨강 (red)
+         - 40~69 : 주황 (orange)
+         - <  40 : 초록 (green)
+    """
+    if value is None:
+        return "N/A"
+
+    try:
+        v = float(value)
+    except Exception:
+        return "N/A"
+
+    metric_name = str(metric_name)
+
+    if metric_name in ("UpProb", "BuyTiming"):
+        # 높을수록 좋은 경우
+        if v >= 70:
+            color = "green"
+        elif v >= 40:
+            color = "orange"
+        else:
+            color = "red"
+    elif metric_name == "SellTiming":
+        # 높을수록 매도 신호인 경우 (반대 의미)
+        if v >= 70:
+            color = "red"
+        elif v >= 40:
+            color = "orange"
+        else:
+            color = "green"
+    else:
+        # 정의되지 않은 metric은 색칠하지 않음
+        return f"{v:.0f}%"
+
+    return f'<span style="color:{color}; font-weight:bold;">{v:.0f}%</span>'
+
+
 import os
 
 # =========================
@@ -1499,14 +1553,23 @@ def build_midterm_analysis_html(df_enriched):
 
     # 3) 각 종목별 중단기 분석 + 맥락 생성
     for t in sorted(tickers):
-        stat = analyze_midterm_ticker(t)
-        ctx = build_midterm_context(t)
+        try:
+            stat = analyze_midterm_ticker(t)
+        except Exception as e:
+            print(f"[WARN] analyze_midterm_ticker 실패: {t}, {e}")
+            continue
 
-        # ① 요약 테이블 행
+        try:
+            ctx = build_midterm_context(t)
+        except Exception as e:
+            print(f"[WARN] build_midterm_context 실패: {t}, {e}")
+            ctx = "맥락 정보를 불러오지 못했습니다."
+
+        # ① 요약 테이블 행 (퍼센트 색칠 적용)
         if stat["UpProb"] is not None:
-            up_str = colorize_value_html(fmt_pct(stat["UpProb"]), stat["UpProb"])
-            buy_str = colorize_value_html(fmt_pct(stat["BuyTiming"]), stat["BuyTiming"])
-            sell_str = colorize_value_html(fmt_pct(stat["SellTiming"]), stat["SellTiming"])
+            up_str = colorize_midterm_metric("UpProb", stat["UpProb"])
+            buy_str = colorize_midterm_metric("BuyTiming", stat["BuyTiming"])
+            sell_str = colorize_midterm_metric("SellTiming", stat["SellTiming"])
         else:
             up_str = buy_str = sell_str = "N/A"
 
