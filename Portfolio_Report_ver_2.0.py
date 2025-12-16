@@ -1998,20 +1998,19 @@ def build_html_report(df_enriched, account_summary):
         if sub.empty:
             return f"<p>No holdings for {acc_type}.</p>"
 
-        # ✅ (추가) TFSA 표에만 "오늘의 Profit/Loss" = (LastPrice - PrevClose) * Shares
+        # ✅ (추가) TFSA/RESP 공통 "오늘의 Profit/Loss" = (LastPrice - PrevClose) * Shares
         # - 전일 대비 '일간 손익'을 의미
-        if acc_type.upper() == "TFSA":
-            shares_num = pd.to_numeric(sub["Shares"], errors="coerce").fillna(0.0)
-            last_num = pd.to_numeric(sub["LastPrice"], errors="coerce").fillna(0.0)
-            prev_num = pd.to_numeric(sub["PrevClose"], errors="coerce").fillna(0.0)
+        shares_num = pd.to_numeric(sub["Shares"], errors="coerce").fillna(0.0)
+        last_num = pd.to_numeric(sub["LastPrice"], errors="coerce").fillna(0.0)
+        prev_num = pd.to_numeric(sub["PrevClose"], errors="coerce").fillna(0.0)
 
-            today_pl_native = (last_num - prev_num) * shares_num  # USD (TFSA native)
-            today_pl_fmt = []
-            for v in today_pl_native.tolist():
-                v_num = safe_float(v, 0.0)
-                text = fmt_money(v_num, ccy_symbol)
-                today_pl_fmt.append(colorize_value_html(text, v_num))
-            sub["TodayPLNativeFmt"] = today_pl_fmt
+        today_pl_native = (last_num - prev_num) * shares_num  # 계좌 통화(nativ) 기준
+        today_pl_fmt = []
+        for v in today_pl_native.tolist():
+            v_num = safe_float(v, 0.0)
+            text = fmt_money(v_num, ccy_symbol)
+            today_pl_fmt.append(colorize_value_html(text, v_num))
+        sub["TodayPLNativeFmt"] = today_pl_fmt
 
         # 공통 포맷
         sub["Shares"] = sub["Shares"].map(lambda x: f"{float(x):,.2f}")
@@ -2044,43 +2043,24 @@ def build_html_report(df_enriched, account_summary):
         sub["ProfitLossNativeFmt"] = pl_native_fmt
         sub["ProfitLossPctFmt"] = pl_pct_fmt
 
-        # 컬럼 구성: TFSA만 TodayPLNativeFmt 추가
-        if acc_type.upper() == "TFSA":
-            cols = [
-                "Ticker",
-                "Type",
-                "Shares",
-                "AvgPrice",
-                "LastPriceNativeFmt",
-                "PositionValueNativeFmt",
-                "TodayPLNativeFmt",          # ✅ 추가
-                "ProfitLossNativeFmt",
-                "ProfitLossPctFmt",
-            ]
-            rename_map = {
-                "LastPriceNativeFmt": "LastPrice",
-                "PositionValueNativeFmt": "PositionValue",
-                "TodayPLNativeFmt": "Today's P/L",   # ✅ 표 헤더
-                "ProfitLossNativeFmt": "Profit/Loss",
-                "ProfitLossPctFmt": "Profit/Loss %",
-            }
-        else:
-            cols = [
-                "Ticker",
-                "Type",
-                "Shares",
-                "AvgPrice",
-                "LastPriceNativeFmt",
-                "PositionValueNativeFmt",
-                "ProfitLossNativeFmt",
-                "ProfitLossPctFmt",
-            ]
-            rename_map = {
-                "LastPriceNativeFmt": "LastPrice",
-                "PositionValueNativeFmt": "PositionValue",
-                "ProfitLossNativeFmt": "Profit/Loss",
-                "ProfitLossPctFmt": "Profit/Loss %",
-            }
+        # 컬럼 구성: TFSA/RESP 모두 Today's P/L 추가
+        cols = [
+            "Ticker",
+            "Shares",
+            "AvgPrice",
+            "LastPriceNativeFmt",
+            "PositionValueNativeFmt",
+            "TodayPLNativeFmt",          # ✅ TFSA/RESP 공통 추가
+            "ProfitLossNativeFmt",
+            "ProfitLossPctFmt",
+        ]
+        rename_map = {
+            "LastPriceNativeFmt": "LastPrice",
+            "PositionValueNativeFmt": "PositionValue",
+            "TodayPLNativeFmt": "Today's P/L",   # ✅ 표 헤더
+            "ProfitLossNativeFmt": "Profit/Loss",
+            "ProfitLossPctFmt": "Profit/Loss %",
+        }
 
         sub = sub[cols].rename(columns=rename_map)
         return sub.to_html(index=False, escape=False)
