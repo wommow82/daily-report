@@ -963,23 +963,87 @@ def get_gspread_client():
     return gspread.authorize(creds)
 
 
-def open_gsheet(gs_id, retries=3, delay=5):
+def open_gsheet(gs_id, retries=6, delay=5):
+    """
+    Google Sheets를 open_by_key로 여는 함수.
+    - Google API에서 간헐적으로 500/503/502/504/429 등의 일시 오류가 발생할 수 있어 재시도 로직을 포함한다.
+    - retries: 총 시도 횟수 (기본 6회)
+    - delay: 초기 대기 시간(초) (기본 5초) -> 이후 지수적으로 증가
+
+    기존 코드에서는 503만 재시도했지만, 500도 흔한 일시 장애이므로 포함한다.
+    """
     if not gs_id:
         raise EnvironmentError("환경변수 GSHEET_ID 가 설정되어 있지 않습니다.")
 
-    client = get_gspread_client()
+    # 지터를 쓰기 위해 random 사용
+    import random
+
+    # 재시도할 HTTP status code 집합
+    # 429: Too Many Requests (rate limit)
+    # 500: Internal error
+    # 502/503/504: Bad gateway / Service unavailable / Gateway timeout
+    retryable_codes = {"429", "500", "502", "503", "504"}
+
+    last_exc = None
     for i in range(retries):
         try:
+            # 매번 client를 새로 생성 (토큰/세션 이슈 완화 목적)
+            client = get_gspread_client()
             return client.open_by_key(gs_id)
+
         except gspread.exceptions.APIError as e:
-            if "503" in str(e) and i < retries - 1:
-                print(
-                    f"⚠️ Google API 503 오류 발생, {delay}초 후 재시도... "
-                    f"({i + 1}/{retries})"
-                )
-                time.sleep(delay)
-                continue
-            raise
+            last_exc = e
+            msg = str(e)
+
+            # 에러 문자열에 포함된 status code를 단순 탐지
+            is_retryable = any(code in msg for code in retryable_codes)
+
+            # 재시도 불가이거나 마지막 시도면 그대로 raise
+            if (not is_retryable) or (i >= retries - 1):
+                raise
+
+            # 지수 백오프 + 지터 (동시 실행 시 재충돌 방지)
+            # 예: delay=5 -> 5, 10, 20, 40...
+            backoff = delay * (2 ** i)
+            jitter = random.uniform(0, 1.0)  # 0~1초
+            sleep_s = backoff + jitter
+
+            # 로그
+            # 예: APIError: [500]: Internal error encountered.
+            code_hint = None
+            for code in retryable_codes:
+                if code in msg:
+                    code_hint = code
+                    break
+            code_hint = code_hint or "UNKNOWN"
+
+            print(
+                f"⚠️ Google API {code_hint} 오류 발생, {sleep_s:.1f}초 후 재시도... "
+                f"({i + 1}/{retries})"
+            )
+            time.sleep(sleep_s)
+            continue
+
+        except Exception as e:
+            # 네트워크 타임아웃 등 gspread APIError 외 예외도 간헐적일 수 있어 제한적으로 재시도
+            last_exc = e
+
+            if i >= retries - 1:
+                raise
+
+            backoff = delay * (2 ** i)
+            sleep_s = backoff + 0.5
+            print(
+                f"⚠️ Google Sheets 연결 중 예외({type(e).__name__}) 발생, {sleep_s:.1f}초 후 재시도... "
+                f"({i + 1}/{retries})"
+            )
+            time.sleep(sleep_s)
+            continue
+
+    # 논리적으로 여기 오면 안 되지만, 안전장치
+    if last_exc:
+        raise last_exc
+    raise RuntimeError("open_gsheet 실패: 알 수 없는 이유로 시트 오픈에 실패했습니다.")
 
 
 
