@@ -2,6 +2,7 @@ import os
 import re
 import time
 import smtplib
+import requests
 from datetime import datetime
 
 import pandas as pd
