@@ -1855,45 +1855,115 @@ def build_schd_dividend_html():
         ["Year", "Type", "Year-end Price", "Dividend / Share", "YoY Dividend Growth %", "Dividend Yield %"]
     ].to_html(index=False, escape=False)
 
-def build_schd_dividend_summary_text(current_shares):
+def build_schd_dividend_summary_text(df_enriched):
     """
     SCHD 장기 배당 분석 요약 (yfinance 기반, 현재 동작 방식 유지)
 
-    핵심 로직(현재 동작 방식):
-    - 연배당/주(USD): yfinance 배당 지급 내역을 연도별 합산 후, '현재 연도는 제외'한 마지막 완료 연도(예: 2024) 사용
-    - 배당 성장률: 최근 완료 연도 기반 CAGR(기본 5년 창, -10%~+15% 클리핑)
-    - 배당수익률: (완료 연도 연배당/주) / 현재가(USD) (근사)
-    - 목표 도달 기간(월 CAD 1,000): 단순 모델로 역산 (DRIP + 매월 200 USD 투자 가정)
+    - 호출부를 단순화하기 위해 df_enriched에서 SCHD의
+      (1) 보유주식수 schd_shares
+      (2) 투자원금(CAD) schd_total_cost_cad
+      를 내부에서 자동 계산한다.
 
-    출력(요청 반영):
-    - "배당 성장률 g=" / "배당수익률 y=" 표기를 제거하여
-      "배당 성장률 CAGR 10.13% / 배당수익률 3.60% 근사" 형태로 출력
+    출력 템플릿(요청 반영):
+    현재 예상 연 배당금(CAD): C$... (보유 ...주 기준)
+    월 CAD 1,000 배당 달성 예상: 약 X년 Y개월
+    (DRIP + 매월 200 USD(환전 후 투자) / 배당 성장률 CAGR a% / 배당수익률 b% / 투자원금 배당률: c%)
     """
 
     import numpy as np
     import pandas as pd
     from datetime import datetime
 
-    # yfinance는 프로젝트 상단에서 import되어 있다고 가정하지만,
-    # 안전을 위해 여기서도 접근(이미 import된 경우에도 문제 없음)
     try:
         import yfinance as yf
     except Exception:
         yf = None
 
-    current_shares = safe_float(current_shares, 0.0)
-    if current_shares <= 0:
+    # -----------------------------
+    # 0) 입력 방어
+    # -----------------------------
+    if df_enriched is None or getattr(df_enriched, "empty", True):
         return (
-            "<p><strong>현재 예상 연 배당금(CAD):</strong> N/A (보유 SCHD 없음)</p>"
+            "<p><strong>현재 예상 연 배당금(CAD):</strong> 데이터 부족</p>"
             "<p><strong>월 CAD 1,000 배당 달성 예상:</strong> 계산 불가</p>"
         )
 
-    symbol = "SCHD"
-    today = datetime.today()
-    current_year = today.year
+    # -----------------------------
+    # 1) df_enriched에서 SCHD 보유/원금(CAD) 자동 산출
+    # -----------------------------
+    sub = df_enriched.copy()
+    if "Ticker" not in sub.columns:
+        return (
+            "<p><strong>현재 예상 연 배당금(CAD):</strong> df_enriched에 Ticker 컬럼이 없습니다</p>"
+            "<p><strong>월 CAD 1,000 배당 달성 예상:</strong> 계산 불가</p>"
+        )
+
+    sub["TickerU"] = sub["Ticker"].astype(str).str.upper().str.strip()
+    schd_df = sub[sub["TickerU"] == "SCHD"].copy()
+
+    if schd_df.empty:
+        return (
+            "<p><strong>현재 예상 연 배당금(CAD):</strong> N/A (SCHD 보유 없음)</p>"
+            "<p><strong>월 CAD 1,000 배당 달성 예상:</strong> 계산 불가</p>"
+        )
+
+    # 필요한 컬럼 방어
+    for col in ["Shares", "AvgPrice"]:
+        if col not in schd_df.columns:
+            return (
+                f"<p><strong>현재 예상 연 배당금(CAD):</strong> SCHD 계산에 필요한 컬럼 누락: {col}</p>"
+                "<p><strong>월 CAD 1,000 배당 달성 예상:</strong> 계산 불가</p>"
+            )
+
+    # Shares / AvgPrice 숫자화
+    schd_df["SharesNum"] = pd.to_numeric(schd_df["Shares"], errors="coerce").fillna(0.0)
+    schd_df["AvgPriceNum"] = pd.to_numeric(schd_df["AvgPrice"], errors="coerce").fillna(0.0)
+
+    schd_shares = float(schd_df["SharesNum"].sum())
+    if schd_shares <= 0:
+        return (
+            "<p><strong>현재 예상 연 배당금(CAD):</strong> N/A (SCHD 보유 없음)</p>"
+            "<p><strong>월 CAD 1,000 배당 달성 예상:</strong> 계산 불가</p>"
+        )
+
+    # 환율(USD→CAD): 기존 코드 스타일과 동일하게 CAD=X 사용
+    if yf is None:
+        usd_to_cad = 1.35
+    else:
+        try:
+            fx = yf.Ticker("CAD=X").history(period="5d")["Close"].dropna()
+            usd_to_cad = float(fx.iloc[-1]) if not fx.empty else 1.35
+        except Exception:
+            usd_to_cad = 1.35
+
+    # SCHD 총 투자원금(CAD) 계산
+    # - Type이 TFSA면 AvgPrice가 USD라고 가정하고 CAD로 변환
+    # - Type이 RESP면 AvgPrice가 CAD라고 가정(변환 없음)
+    # - Type 컬럼이 없으면 보수적으로 "USD"로 보고 환율 적용(현 리포트 구조 상 SCHD는 대부분 TFSA)
+    if "Type" in schd_df.columns:
+        schd_df["TypeU"] = schd_df["Type"].astype(str).str.upper().str.strip()
+    else:
+        schd_df["TypeU"] = "TFSA"
+
+    # 원금(계정 통화 기준) = Shares * AvgPrice
+    schd_df["CostNative"] = schd_df["SharesNum"] * schd_df["AvgPriceNum"]
+
+    # CAD 환산
+    # TFSA(USD) -> * usd_to_cad
+    # RESP(CAD) -> 그대로
+    schd_df["CostCAD"] = np.where(
+        schd_df["TypeU"] == "RESP",
+        schd_df["CostNative"],
+        schd_df["CostNative"] * usd_to_cad
+    )
+
+    schd_total_cost_cad = float(schd_df["CostCAD"].sum())
+    if schd_total_cost_cad <= 0:
+        # 원금이 없으면 YOC는 의미가 없으니 0으로 출력
+        schd_total_cost_cad = 0.0
 
     # -----------------------------
-    # 1) 배당 데이터 로드 (yfinance)
+    # 2) 배당 데이터(yfinance) → 완료 연도 연배당/주(USD)
     # -----------------------------
     if yf is None:
         return (
@@ -1901,8 +1971,11 @@ def build_schd_dividend_summary_text(current_shares):
             "<p><strong>월 CAD 1,000 배당 달성 예상:</strong> 계산 불가</p>"
         )
 
+    today = datetime.today()
+    current_year = today.year
+
     try:
-        tk = yf.Ticker(symbol)
+        tk = yf.Ticker("SCHD")
         divs = tk.dividends.dropna()
     except Exception:
         divs = pd.Series(dtype=float)
@@ -1913,14 +1986,10 @@ def build_schd_dividend_summary_text(current_shares):
             "<p><strong>월 CAD 1,000 배당 달성 예상:</strong> 계산 불가</p>"
         )
 
-    # -----------------------------
-    # 2) 연도별 연배당/주(USD) 계산, 완료 연도만 사용
-    # -----------------------------
     div_by_year = divs.groupby(divs.index.year).sum()
     years_done = sorted([int(y) for y in div_by_year.index if int(y) < current_year])
 
     if not years_done:
-        # 완료 연도가 없으면 가장 최신 연도(불완전일 수 있음)를 사용 (방어)
         years_all = sorted([int(y) for y in div_by_year.index])
         if not years_all:
             return (
@@ -1939,27 +2008,20 @@ def build_schd_dividend_summary_text(current_shares):
         )
 
     # -----------------------------
-    # 3) 환율(USD→CAD) 및 현재가(USD) 로드
+    # 3) 현재가(USD) 및 배당수익률(근사)
     # -----------------------------
     try:
-        fx = yf.Ticker("CAD=X").history(period="5d")["Close"].dropna()
-        usd_to_cad = float(fx.iloc[-1]) if not fx.empty else 1.35
-    except Exception:
-        usd_to_cad = 1.35
-
-    try:
-        hist_px = yf.Ticker(symbol).history(period="5d")["Close"].dropna()
+        hist_px = yf.Ticker("SCHD").history(period="5d")["Close"].dropna()
         price_usd = float(hist_px.iloc[-1]) if not hist_px.empty else 0.0
     except Exception:
         price_usd = 0.0
 
-    # 배당수익률(근사): 완료 연도 연배당/주 / 현재가
-    yld = (last_div_ps_usd / price_usd) if price_usd > 0 else 0.035
-    if yld <= 0:
-        yld = 0.035
+    dividend_yield = (last_div_ps_usd / price_usd) if price_usd > 0 else 0.035
+    if dividend_yield <= 0:
+        dividend_yield = 0.035
 
     # -----------------------------
-    # 4) 배당 성장률 CAGR 계산 (최근 완료 연도 기반)
+    # 4) 배당 성장률 CAGR (최근 완료 연도 기반)
     # -----------------------------
     g_fallback = 0.11
     g = g_fallback
@@ -1975,39 +2037,43 @@ def build_schd_dividend_summary_text(current_shares):
         if d0 > 0 and dN > 0 and n > 0:
             g = (dN / d0) ** (1.0 / n) - 1.0
 
-    # 과도한 값 방어(기존 스타일 유지)
     g = max(-0.10, min(0.15, safe_float(g, g_fallback)))
 
     # -----------------------------
-    # 5) 현재 런레이트 연 배당(CAD)
+    # 5) 현재 연 배당금(CAD, 런레이트) 및 투자원금 배당률(YOC)
     # -----------------------------
-    current_annual_income_cad = current_shares * last_div_ps_usd * usd_to_cad
+    annual_div_cad = schd_shares * last_div_ps_usd * usd_to_cad
+
+    if schd_total_cost_cad > 0:
+        yoc = annual_div_cad / schd_total_cost_cad
+    else:
+        yoc = 0.0
 
     # -----------------------------
-    # 6) 목표(월 CAD 1,000) 도달 기간 계산 (기존 단순 모델 유지)
+    # 6) 목표 도달 기간 (기존 단순 모델 유지)
     # -----------------------------
     monthly_usd = 200.0
     monthly_cad = monthly_usd * usd_to_cad
     annual_contrib_cad = monthly_cad * 12.0
-
     target_annual_cad = 12_000.0
 
-    # g<=0이면 단순 모델이 불안정해질 수 있어 방어
     if g <= 0:
+        annual_cad_str = fmt_money(annual_div_cad, "C$")
+        g_str = fmt_pct(g * 100.0)
+        y_str = fmt_pct(dividend_yield * 100.0)
+        yoc_str = fmt_pct(yoc * 100.0)
+
         return (
             "<p style='text-align:left;'>"
-            f"<strong>현재 예상 연 배당금(CAD):</strong> {fmt_money(current_annual_income_cad, 'C$')} "
-            f"(보유 {current_shares:,.0f}주 기준)<br>"
-            f"<strong>월 CAD 1,000 배당 달성 예상:</strong> g<=0 구간은 단순 모델로 추정 불안정 "
-            f"(DRIP + 매월 200 USD(환전 후 투자) / 배당 성장률 CAGR {fmt_pct(g * 100.0)} / 배당수익률 {fmt_pct(yld * 100.0)} 근사)"
+            f"<strong>현재 예상 연 배당금(CAD):</strong> {annual_cad_str} (보유 {schd_shares:,.0f}주 기준)<br>"
+            "<strong>월 CAD 1,000 배당 달성 예상:</strong> g<=0 구간은 단순 모델로 추정 불안정<br>"
+            f"(DRIP + 매월 200 USD(환전 후 투자) / 배당 성장률 CAGR {g_str} / 배당수익률 {y_str} / 투자원금 배당률: {yoc_str})"
             "</p>"
         )
 
-    # 기존 모델: A = 연간기여금 × (수익률 / 성장률)
-    A = annual_contrib_cad * (yld / g)
-
+    A = annual_contrib_cad * (dividend_yield / g)
     numerator = target_annual_cad + A
-    denominator = current_annual_income_cad + A
+    denominator = annual_div_cad + A
 
     if numerator <= denominator:
         n_years = 0.0
@@ -2022,17 +2088,18 @@ def build_schd_dividend_summary_text(current_shares):
         months_int = 0
 
     # -----------------------------
-    # 7) 출력 (요청한 문구 형태로)
+    # 7) 출력(짧은 템플릿)
     # -----------------------------
-    annual_cad_str = fmt_money(current_annual_income_cad, "C$")
+    annual_cad_str = fmt_money(annual_div_cad, "C$")
     g_str = fmt_pct(g * 100.0)
-    y_str = fmt_pct(yld * 100.0)
+    y_str = fmt_pct(dividend_yield * 100.0)
+    yoc_str = fmt_pct(yoc * 100.0)
 
     return (
         "<p style='text-align:left;'>"
-        f"<strong>현재 예상 연 배당금(CAD):</strong> {annual_cad_str} (보유 {current_shares:,.0f}주 기준)<br>"
-        f"<strong>월 CAD 1,000 배당 달성 예상:</strong> 약 {years_int}년 {months_int}개월 "
-        f"(DRIP + 매월 200 USD(환전 후 투자) / 배당 성장률 CAGR {g_str} / 배당수익률 {y_str} 근사)"
+        f"<strong>현재 예상 연 배당금(CAD):</strong> {annual_cad_str} (보유 {schd_shares:,.0f}주 기준)<br>"
+        f"<strong>월 CAD 1,000 배당 달성 예상:</strong> 약 {years_int}년 {months_int}개월<br>"
+        f"(DRIP + 매월 200 USD(환전 후 투자) / 배당 성장률 CAGR {g_str} / 배당수익률 {y_str} / 투자원금 배당률: {yoc_str})"
         "</p>"
     )
     
@@ -2223,7 +2290,7 @@ def build_html_report(df_enriched, account_summary):
     except Exception:
         schd_shares = 0.0
 
-    schd_summary_text = build_schd_dividend_summary_text(schd_shares)
+    schd_summary_text = build_schd_dividend_summary_text(df_enriched)
 
     # ---------- 5) HTML 템플릿 ----------
     style = """
