@@ -1857,17 +1857,22 @@ def build_schd_dividend_html():
 
 def build_schd_dividend_summary_text(df_enriched):
     """
-    SCHD 장기 배당 분석 요약 (yfinance 기반, 현재 동작 방식 유지)
+    SCHD 장기 배당 분석 요약 (yfinance 기반, 현재 동작 방식 유지 + TFSA 원천징수 15% 반영)
 
-    - 호출부를 단순화하기 위해 df_enriched에서 SCHD의
-      (1) 보유주식수 schd_shares
-      (2) 투자원금(CAD) schd_total_cost_cad
-      를 내부에서 자동 계산한다.
+    핵심:
+    - 연배당/주(USD): yfinance 배당 지급 내역을 연도별 합산 후, '현재 연도 제외'한 마지막 완료 연도 사용
+    - 배당 성장률(CAGR): 최근 완료 연도 기반 CAGR(기본 5년 창, -10%~+15% 클리핑)
+    - 배당수익률: 완료 연도 연배당/주 ÷ 현재가(USD) (세전 근사)
+    - 원천징수(기본 15%): 계좌(Type)별로 적용하여 '세후(Net) 연배당(CAD)' 계산 및 목표 기간 계산에 반영
+      * RRSP: 0%
+      * TFSA/RESP/기타: 15% (보수적 기본)
+    - 목표(월 CAD 1,000): 세후(Net) 배당 기준으로 추정
+    - 투자원금 배당률(YOC): 세후(Net) 연배당(CAD) ÷ 총 투자원금(CAD)
 
-    출력 템플릿(요청 반영):
+    출력 템플릿(줄 줄인 버전):
     현재 예상 연 배당금(CAD): C$... (보유 ...주 기준)
     월 CAD 1,000 배당 달성 예상: 약 X년 Y개월
-    (DRIP + 매월 200 USD(환전 후 투자) / 배당 성장률 CAGR a% / 배당수익률 b% / 투자원금 배당률: c%)
+    (원천징수 반영 / DRIP + 매월 200 USD(환전 후 투자) / 배당 성장률 CAGR a% / 배당수익률 b%(세전) / c%(세후) / 투자원금 배당률: d%(세후))
     """
 
     import numpy as np
@@ -1888,9 +1893,6 @@ def build_schd_dividend_summary_text(df_enriched):
             "<p><strong>월 CAD 1,000 배당 달성 예상:</strong> 계산 불가</p>"
         )
 
-    # -----------------------------
-    # 1) df_enriched에서 SCHD 보유/원금(CAD) 자동 산출
-    # -----------------------------
     sub = df_enriched.copy()
     if "Ticker" not in sub.columns:
         return (
@@ -1898,6 +1900,9 @@ def build_schd_dividend_summary_text(df_enriched):
             "<p><strong>월 CAD 1,000 배당 달성 예상:</strong> 계산 불가</p>"
         )
 
+    # -----------------------------
+    # 1) df_enriched에서 SCHD 보유/원금(CAD) 자동 산출
+    # -----------------------------
     sub["TickerU"] = sub["Ticker"].astype(str).str.upper().str.strip()
     schd_df = sub[sub["TickerU"] == "SCHD"].copy()
 
@@ -1915,18 +1920,17 @@ def build_schd_dividend_summary_text(df_enriched):
                 "<p><strong>월 CAD 1,000 배당 달성 예상:</strong> 계산 불가</p>"
             )
 
-    # Shares / AvgPrice 숫자화
     schd_df["SharesNum"] = pd.to_numeric(schd_df["Shares"], errors="coerce").fillna(0.0)
     schd_df["AvgPriceNum"] = pd.to_numeric(schd_df["AvgPrice"], errors="coerce").fillna(0.0)
 
-    schd_shares = float(schd_df["SharesNum"].sum())
-    if schd_shares <= 0:
+    schd_shares_total = float(schd_df["SharesNum"].sum())
+    if schd_shares_total <= 0:
         return (
             "<p><strong>현재 예상 연 배당금(CAD):</strong> N/A (SCHD 보유 없음)</p>"
             "<p><strong>월 CAD 1,000 배당 달성 예상:</strong> 계산 불가</p>"
         )
 
-    # 환율(USD→CAD): 기존 코드 스타일과 동일하게 CAD=X 사용
+    # 환율(USD→CAD): CAD=X 사용 (기존 스타일)
     if yf is None:
         usd_to_cad = 1.35
     else:
@@ -1936,34 +1940,48 @@ def build_schd_dividend_summary_text(df_enriched):
         except Exception:
             usd_to_cad = 1.35
 
-    # SCHD 총 투자원금(CAD) 계산
-    # - Type이 TFSA면 AvgPrice가 USD라고 가정하고 CAD로 변환
-    # - Type이 RESP면 AvgPrice가 CAD라고 가정(변환 없음)
-    # - Type 컬럼이 없으면 보수적으로 "USD"로 보고 환율 적용(현 리포트 구조 상 SCHD는 대부분 TFSA)
+    # Type 정규화
     if "Type" in schd_df.columns:
         schd_df["TypeU"] = schd_df["Type"].astype(str).str.upper().str.strip()
     else:
+        # Type이 없으면 보수적으로 TFSA로 가정(원천징수 15% 적용)
         schd_df["TypeU"] = "TFSA"
 
-    # 원금(계정 통화 기준) = Shares * AvgPrice
+    # 총 투자원금(CAD) 계산
+    # - TFSA/RRSP(USD로 가정): Shares * AvgPrice(USD) * usd_to_cad
+    # - RESP(CAD로 가정): Shares * AvgPrice(CAD)
     schd_df["CostNative"] = schd_df["SharesNum"] * schd_df["AvgPriceNum"]
-
-    # CAD 환산
-    # TFSA(USD) -> * usd_to_cad
-    # RESP(CAD) -> 그대로
     schd_df["CostCAD"] = np.where(
         schd_df["TypeU"] == "RESP",
         schd_df["CostNative"],
         schd_df["CostNative"] * usd_to_cad
     )
-
-    schd_total_cost_cad = float(schd_df["CostCAD"].sum())
-    if schd_total_cost_cad <= 0:
-        # 원금이 없으면 YOC는 의미가 없으니 0으로 출력
-        schd_total_cost_cad = 0.0
+    total_cost_cad = float(schd_df["CostCAD"].sum())
+    if total_cost_cad < 0:
+        total_cost_cad = 0.0
 
     # -----------------------------
-    # 2) 배당 데이터(yfinance) → 완료 연도 연배당/주(USD)
+    # 2) 원천징수율(Effective) 계산: 계좌별 주식수 가중 평균
+    # -----------------------------
+    # 가정(보수적):
+    # - RRSP: 0% (미국 배당 원천징수 면제 취급)
+    # - TFSA/RESP/기타: 15%
+    def _withholding_rate_by_type(t: str) -> float:
+        t = (t or "").upper().strip()
+        if t == "RRSP":
+            return 0.0
+        # TFSA, RESP, 기타 모두 15%로 처리 (보수적, 일관성 목적)
+        return 0.15
+
+    schd_df["WHTRate"] = schd_df["TypeU"].apply(_withholding_rate_by_type)
+    # shares 가중 평균 원천징수율
+    eff_wht = float(
+        (schd_df["SharesNum"] * schd_df["WHTRate"]).sum() / schd_shares_total
+    )
+    eff_wht = max(0.0, min(0.30, eff_wht))  # 방어
+
+    # -----------------------------
+    # 3) 배당 데이터(yfinance) → 완료 연도 연배당/주(USD)
     # -----------------------------
     if yf is None:
         return (
@@ -2008,7 +2026,7 @@ def build_schd_dividend_summary_text(df_enriched):
         )
 
     # -----------------------------
-    # 3) 현재가(USD) 및 배당수익률(근사)
+    # 4) 현재가(USD) 및 배당수익률(세전/세후)
     # -----------------------------
     try:
         hist_px = yf.Ticker("SCHD").history(period="5d")["Close"].dropna()
@@ -2016,12 +2034,16 @@ def build_schd_dividend_summary_text(df_enriched):
     except Exception:
         price_usd = 0.0
 
-    dividend_yield = (last_div_ps_usd / price_usd) if price_usd > 0 else 0.035
-    if dividend_yield <= 0:
-        dividend_yield = 0.035
+    # 세전 배당수익률(근사)
+    y_gross = (last_div_ps_usd / price_usd) if price_usd > 0 else 0.035
+    if y_gross <= 0:
+        y_gross = 0.035
+
+    # 세후 배당수익률(근사): 원천징수 반영
+    y_net = y_gross * (1.0 - eff_wht)
 
     # -----------------------------
-    # 4) 배당 성장률 CAGR (최근 완료 연도 기반)
+    # 5) 배당 성장률 CAGR (최근 완료 연도 기반, 세전/세후 동일한 성장률로 취급)
     # -----------------------------
     g_fallback = 0.11
     g = g_fallback
@@ -2040,40 +2062,52 @@ def build_schd_dividend_summary_text(df_enriched):
     g = max(-0.10, min(0.15, safe_float(g, g_fallback)))
 
     # -----------------------------
-    # 5) 현재 연 배당금(CAD, 런레이트) 및 투자원금 배당률(YOC)
+    # 6) 현재 연 배당금(CAD): 세전/세후
     # -----------------------------
-    annual_div_cad = schd_shares * last_div_ps_usd * usd_to_cad
+    annual_div_cad_gross = schd_shares_total * last_div_ps_usd * usd_to_cad
+    annual_div_cad_net = annual_div_cad_gross * (1.0 - eff_wht)
 
-    if schd_total_cost_cad > 0:
-        yoc = annual_div_cad / schd_total_cost_cad
+    # -----------------------------
+    # 7) 투자원금 배당률(YOC): 세후 기준
+    # -----------------------------
+    if total_cost_cad > 0:
+        yoc_net = annual_div_cad_net / total_cost_cad
     else:
-        yoc = 0.0
+        yoc_net = 0.0
 
     # -----------------------------
-    # 6) 목표 도달 기간 (기존 단순 모델 유지)
+    # 8) 목표 도달 기간: 세후(Net) 배당 기준으로 추정
     # -----------------------------
+    # - 시작 연배당: annual_div_cad_net
+    # - 기여금: 매월 200 USD 환전 후 투자(가정)
+    # - 모델 내 yield도 세후 수익률(y_net) 사용 (목표는 '실수령 월 1,000 CAD'로 해석)
     monthly_usd = 200.0
     monthly_cad = monthly_usd * usd_to_cad
     annual_contrib_cad = monthly_cad * 12.0
     target_annual_cad = 12_000.0
 
     if g <= 0:
-        annual_cad_str = fmt_money(annual_div_cad, "C$")
+        annual_cad_str = fmt_money(annual_div_cad_net, "C$")
         g_str = fmt_pct(g * 100.0)
-        y_str = fmt_pct(dividend_yield * 100.0)
-        yoc_str = fmt_pct(yoc * 100.0)
+        yg_str = fmt_pct(y_gross * 100.0)
+        yn_str = fmt_pct(y_net * 100.0)
+        yoc_str = fmt_pct(yoc_net * 100.0)
+        wht_str = fmt_pct(eff_wht * 100.0)
 
         return (
             "<p style='text-align:left;'>"
-            f"<strong>현재 예상 연 배당금(CAD):</strong> {annual_cad_str} (보유 {schd_shares:,.0f}주 기준)<br>"
+            f"<strong>현재 예상 연 배당금(CAD):</strong> {annual_cad_str} (보유 {schd_shares_total:,.0f}주 기준)<br>"
             "<strong>월 CAD 1,000 배당 달성 예상:</strong> g<=0 구간은 단순 모델로 추정 불안정<br>"
-            f"(DRIP + 매월 200 USD(환전 후 투자) / 배당 성장률 CAGR {g_str} / 배당수익률 {y_str} / 투자원금 배당률: {yoc_str})"
+            f"(원천징수 {wht_str} 반영 / DRIP + 매월 200 USD(환전 후 투자) / "
+            f"배당 성장률 CAGR {g_str} / 배당수익률 {yg_str}(세전) / {yn_str}(세후) / 투자원금 배당률: {yoc_str}(세후))"
             "</p>"
         )
 
-    A = annual_contrib_cad * (dividend_yield / g)
+    # A = 연간기여금 × (수익률 / 성장률)  (세후 y_net 사용)
+    A = annual_contrib_cad * (y_net / g)
+
     numerator = target_annual_cad + A
-    denominator = annual_div_cad + A
+    denominator = annual_div_cad_net + A
 
     if numerator <= denominator:
         n_years = 0.0
@@ -2088,20 +2122,24 @@ def build_schd_dividend_summary_text(df_enriched):
         months_int = 0
 
     # -----------------------------
-    # 7) 출력(짧은 템플릿)
+    # 9) 출력(요청 템플릿): 세후(Net) 연배당 표시
     # -----------------------------
-    annual_cad_str = fmt_money(annual_div_cad, "C$")
+    annual_cad_str = fmt_money(annual_div_cad_net, "C$")
     g_str = fmt_pct(g * 100.0)
-    y_str = fmt_pct(dividend_yield * 100.0)
-    yoc_str = fmt_pct(yoc * 100.0)
+    yg_str = fmt_pct(y_gross * 100.0)
+    yn_str = fmt_pct(y_net * 100.0)
+    yoc_str = fmt_pct(yoc_net * 100.0)
+    wht_str = fmt_pct(eff_wht * 100.0)
 
     return (
         "<p style='text-align:left;'>"
-        f"<strong>현재 예상 연 배당금(CAD):</strong> {annual_cad_str} (보유 {schd_shares:,.0f}주 기준)<br>"
+        f"<strong>현재 예상 연 배당금(CAD):</strong> {annual_cad_str} (보유 {schd_shares_total:,.0f}주 기준)<br>"
         f"<strong>월 CAD 1,000 배당 달성 예상:</strong> 약 {years_int}년 {months_int}개월<br>"
-        f"(DRIP + 매월 200 USD(환전 후 투자) / 배당 성장률 CAGR {g_str} / 배당수익률 {y_str} / 투자원금 배당률: {yoc_str})"
+        f"(원천징수 {wht_str} 반영 / DRIP + 매월 200 USD(환전 후 투자) / "
+        f"배당 성장률 CAGR {g_str} / 배당수익률 {yg_str}(세전) / {yn_str}(세후) / 투자원금 배당률: {yoc_str}(세후))"
         "</p>"
     )
+
     
 
 # =========================
