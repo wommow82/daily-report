@@ -1857,18 +1857,21 @@ def build_schd_dividend_html():
 
 def build_schd_dividend_summary_text(current_shares):
     """
-    SCHD 장기 배당 분석 (모든 값을 CAD 기준으로 계산 및 표시).
+    SCHD 장기 배당 분석(요약) - FMP Stable Dividends API 기반.
 
-    개선점(중요):
-    - 배당 데이터: yfinance 대신 FMP Dividends Historical API 사용
-    - '완료 연도(last completed year)'만 사용 (현재 연도 YTD 과소추정 방지)
-    - 배당 성장률 g: 고정(11%) 대신 최근 완료 연도 기반 CAGR로 자동 계산
-    - FMP 429/500/502/503/504 등 일시 오류 재시도
+    데이터 소스 우선순위:
+      1) FMP Stable Dividends endpoint: https://financialmodelingprep.com/stable/dividends?symbol=SCHD
+      2) yfinance fallback
 
-    가정(기존 유지):
-    - DRIP 적용 (배당금 재투자)
-    - 매월 200 USD를 환전(CAD)해서 매수
-    - 목표 배당: 월 CAD 1,000 (연 CAD 12,000)
+    계산 정의(핵심):
+      - '완료 연도' 연배당/주(USD): 현재 연도 제외하고 마지막으로 끝난 연도 기준으로 연간 배당 합(USD/주)
+      - 배당 성장률 g: 최근 완료 연도 기반 CAGR(기본 5년, -10%~+15% 클리핑)
+      - 배당수익률 y: (완료 연도 연배당/주) / 현재가(USD)
+      - 목표: 월 CAD 1,000 (연 CAD 12,000) 도달 기간(단순 모델)
+
+    가정(기존 보고서 컨셉 유지):
+      - DRIP ON
+      - 매월 200 USD 추가 매수(USD→CAD 환산)
     """
 
     import os
@@ -1891,82 +1894,99 @@ def build_schd_dividend_summary_text(current_shares):
     current_year = today.year
 
     # -----------------------------
-    # 1) FMP에서 배당 지급 이력 가져오기
+    # 1) FMP Stable Dividends API 호출
     # -----------------------------
-    def _fetch_fmp_stock_dividends(sym: str, api_key: str, retries: int = 6, base_delay: float = 2.0):
+    def _fetch_fmp_stable_dividends(sym: str, api_key: str, retries: int = 6, base_delay: float = 2.0):
         """
-        FMP Dividends Historical API (legacy)
-        Endpoint:
-          https://financialmodelingprep.com/api/v3/historical-price-full/stock_dividend/{sym}?apikey=...
-        반환:
-          list[dict]  (각 항목에 date, dividend 등 포함)
+        FMP Stable Dividends endpoint (문서 예시: /stable/dividends?symbol=AAPL)
+        https://financialmodelingprep.com/stable/dividends?symbol=SCHD&apikey=...
+        기대 반환: list[dict]
+          - date / paymentDate / recordDate / declarationDate 등의 필드가 있을 수 있음
+          - 배당 금액 필드명은 'dividend' 또는 'amount' 등으로 올 수 있어 다중 후보로 처리
         """
         if not api_key:
-            return None
+            return None, "FMP_API_KEY missing"
 
-        url = f"https://financialmodelingprep.com/api/v3/historical-price-full/stock_dividend/{sym}"
-        params = {"apikey": api_key}
+        url = "https://financialmodelingprep.com/stable/dividends"
+        params = {"symbol": sym, "apikey": api_key}
 
         retryable = {429, 500, 502, 503, 504}
-        last_exc = None
+        last_err = None
 
         for i in range(retries):
             try:
                 r = requests.get(url, params=params, timeout=20)
                 if r.status_code == 200:
-                    data = r.json() if r.text else {}
-                    hist = data.get("historical")
-                    if isinstance(hist, list):
-                        return hist
-                    # 형식이 예상과 다르면 None
-                    return None
+                    try:
+                        data = r.json()
+                    except Exception:
+                        return None, "FMP JSON parse failed"
+                    if isinstance(data, list):
+                        return data, "ok"
+                    return None, "FMP returned non-list JSON"
 
                 if r.status_code in retryable and i < retries - 1:
                     backoff = base_delay * (2 ** i) + random.uniform(0, 1.0)
-                    print(f"⚠️ FMP {r.status_code} 오류, {backoff:.1f}s 후 재시도... ({i+1}/{retries})")
+                    print(f"⚠️ FMP stable/dividends HTTP {r.status_code}, {backoff:.1f}s 후 재시도... ({i+1}/{retries})")
                     time.sleep(backoff)
                     continue
 
-                # 재시도 대상 아니거나 마지막 시도면 실패 처리
-                print(f"⚠️ FMP 요청 실패: HTTP {r.status_code} / body={r.text[:200]}")
-                return None
+                # 403/401 등은 재시도 의미가 낮음
+                body_head = (r.text or "")[:200]
+                return None, f"FMP HTTP {r.status_code}: {body_head}"
 
             except Exception as e:
-                last_exc = e
+                last_err = e
                 if i < retries - 1:
                     backoff = base_delay * (2 ** i) + random.uniform(0, 1.0)
-                    print(f"⚠️ FMP 예외({type(e).__name__}), {backoff:.1f}s 후 재시도... ({i+1}/{retries})")
+                    print(f"⚠️ FMP stable/dividends 예외({type(e).__name__}), {backoff:.1f}s 후 재시도... ({i+1}/{retries})")
                     time.sleep(backoff)
                     continue
-                return None
+                return None, f"FMP exception: {type(e).__name__}: {e}"
 
-        if last_exc:
-            print(f"⚠️ FMP 최종 실패: {last_exc}")
-        return None
+        return None, f"FMP failed: {last_err}"
 
     fmp_key = os.environ.get("FMP_API_KEY", "").strip()
-    fmp_hist = _fetch_fmp_stock_dividends(symbol, fmp_key)
+    fmp_list, fmp_status = _fetch_fmp_stable_dividends(symbol, fmp_key)
 
     # -----------------------------
-    # 2) 배당 데이터 소스 fallback (FMP 실패 시 yfinance 유지)
+    # 2) (date, dividend) 형태로 표준화 (FMP 우선, 실패 시 yfinance)
     # -----------------------------
-    # 결과를 "date, dividend" 형태의 DataFrame으로 통일
     df_div = None
+    src_label = None
 
-    if fmp_hist:
-        # fmp_hist: [{"date":"YYYY-MM-DD", "dividend":0.xx, ...}, ...]
+    def _coalesce_amount(x: dict):
+        # 필드명이 플랜/버전별로 다를 수 있어 후보를 여러 개 둠
+        for k in ["dividend", "amount", "adjDividend", "adjustedDividend"]:
+            if k in x and x[k] is not None:
+                v = safe_float(x[k], None)
+                if v is not None:
+                    return v
+        return None
+
+    def _coalesce_date(x: dict):
+        # 일반적으로 date 또는 paymentDate/recordDate 등이 존재할 수 있음
+        for k in ["date", "paymentDate", "recordDate", "declarationDate", "exDividendDate", "exDate"]:
+            if k in x and x[k]:
+                return str(x[k]).strip()
+        return ""
+
+    if isinstance(fmp_list, list) and fmp_list:
         rows = []
-        for x in fmp_hist:
-            d = (x.get("date") or "").strip()
-            dv = safe_float(x.get("dividend"), None)
+        for item in fmp_list:
+            if not isinstance(item, dict):
+                continue
+            d = _coalesce_date(item)
+            dv = _coalesce_amount(item)
             if not d or dv is None:
                 continue
             rows.append({"date": d, "dividend": dv})
         if rows:
             df_div = pd.DataFrame(rows)
+            src_label = "FMP(stable/dividends)"
 
     if df_div is None or df_div.empty:
-        # fallback: 기존 yfinance
+        # fallback: yfinance
         try:
             tk = yf.Ticker(symbol)
             divs = tk.dividends.dropna()
@@ -1974,22 +1994,25 @@ def build_schd_dividend_summary_text(current_shares):
             divs = pd.Series(dtype=float)
 
         if divs is None or divs.empty:
+            # FMP도 실패했고 yfinance도 실패
             return (
                 "<p><strong>현재 예상 연 배당금(CAD):</strong> 배당 데이터 부족</p>"
+                f"<p><strong>FMP 상태:</strong> {fmp_status}</p>"
                 "<p><strong>월 CAD 1,000 배당 달성 예상:</strong> 계산 불가</p>"
             )
 
         df_div = pd.DataFrame(
             {"date": [d.strftime("%Y-%m-%d") for d in divs.index], "dividend": divs.values}
         )
+        src_label = f"yfinance(fallback) / FMP={fmp_status}"
 
     # date 파싱
     try:
         df_div["date"] = pd.to_datetime(df_div["date"])
     except Exception:
-        # 파싱 실패 시 종료
         return (
             "<p><strong>현재 예상 연 배당금(CAD):</strong> 배당 날짜 파싱 실패</p>"
+            f"<p><strong>데이터 소스:</strong> {src_label}</p>"
             "<p><strong>월 CAD 1,000 배당 달성 예상:</strong> 계산 불가</p>"
         )
 
@@ -1997,22 +2020,23 @@ def build_schd_dividend_summary_text(current_shares):
     if df_div.empty:
         return (
             "<p><strong>현재 예상 연 배당금(CAD):</strong> 배당 데이터 부족</p>"
+            f"<p><strong>데이터 소스:</strong> {src_label}</p>"
             "<p><strong>월 CAD 1,000 배당 달성 예상:</strong> 계산 불가</p>"
         )
 
     # -----------------------------
-    # 3) 연간 총 배당(USD/주) 계산: 완료 연도만 사용
+    # 3) 완료 연도 기준 연배당/주(USD) 산출
     # -----------------------------
     df_div["Year"] = df_div["date"].dt.year.astype(int)
     div_by_year = df_div.groupby("Year")["dividend"].sum().to_dict()
 
     years_done = sorted([y for y in div_by_year.keys() if y < current_year])
     if not years_done:
-        # 완료 연도 데이터가 없으면 가장 최신 연도(어쩔 수 없이) 사용
         years_all = sorted(div_by_year.keys())
         if not years_all:
             return (
                 "<p><strong>현재 예상 연 배당금(CAD):</strong> 연도별 데이터 부족</p>"
+                f"<p><strong>데이터 소스:</strong> {src_label}</p>"
                 "<p><strong>월 CAD 1,000 배당 달성 예상:</strong> 계산 불가</p>"
             )
         last_done_year = years_all[-1]
@@ -2022,22 +2046,20 @@ def build_schd_dividend_summary_text(current_shares):
     last_div_ps_usd = safe_float(div_by_year.get(last_done_year, 0.0), 0.0)
     if last_div_ps_usd <= 0:
         return (
-            "<p><strong>현재 예상 연 배당금(CAD):</strong> 연배당/주 데이터 부족</p>"
+            "<p><strong>현재 예상 연 배당금(CAD):</strong> 완료 연도 연배당/주(USD) 계산 실패</p>"
+            f"<p><strong>데이터 소스:</strong> {src_label}</p>"
             "<p><strong>월 CAD 1,000 배당 달성 예상:</strong> 계산 불가</p>"
         )
 
     # -----------------------------
-    # 4) 환율(USD→CAD) 및 현재가(배당수익률 y) 계산 (기존 방식 유지)
+    # 4) 환율(USD→CAD) & 현재가(USD) & y 계산
     # -----------------------------
-    # USD→CAD 환율 (기존 코드 스타일 유지)
     try:
         fx = yf.Ticker("CAD=X").history(period="5d")["Close"].dropna()
         usd_to_cad = float(fx.iloc[-1]) if not fx.empty else 1.35
     except Exception:
         usd_to_cad = 1.35
 
-    # 현재가(USD) → 배당수익률 y = 연배당/주 / 현재가
-    # (기존 로직과 유사하게 3.5% 최소치 보수 가정 유지)
     try:
         hist_px = yf.Ticker(symbol).history(period="5d")["Close"].dropna()
         price_usd = float(hist_px.iloc[-1]) if not hist_px.empty else 0.0
@@ -2049,10 +2071,8 @@ def build_schd_dividend_summary_text(current_shares):
         y = 0.035
 
     # -----------------------------
-    # 5) 배당 성장률 g 자동 산출 (최근 완료 연도 CAGR)
+    # 5) 배당 성장률 g: 최근 완료 연도 CAGR
     # -----------------------------
-    # 최근 5년(가능하면) 완료 연도 기반 CAGR
-    # g = (dN/d0)^(1/n) - 1
     g_fallback = 0.11
     g = g_fallback
 
@@ -2064,35 +2084,26 @@ def build_schd_dividend_summary_text(current_shares):
         d0 = safe_float(div_by_year.get(y0, 0.0), 0.0)
         dN = safe_float(div_by_year.get(yN, 0.0), 0.0)
         n = int(yN - y0)
-
         if d0 > 0 and dN > 0 and n > 0:
             g = (dN / d0) ** (1.0 / n) - 1.0
 
-    # 과도한 값 방어(기존 스타일 유지: -10%~+15%)
     g = max(-0.10, min(0.15, safe_float(g, g_fallback)))
 
     # -----------------------------
-    # 6) 현재 연 배당금(CAD 기준) & 목표 달성 기간 계산 (기존 공식 유지)
+    # 6) 현재 런레이트 연배당(CAD) 및 목표 도달 기간(단순 모델)
     # -----------------------------
-    # (보유주수 × 연간 배당(USD/주) × 환율)
     current_annual_income_cad = current_shares * last_div_ps_usd * usd_to_cad
 
-    # 매월 200 USD를 CAD로 환전 후 투자
     monthly_usd = 200.0
     monthly_cad = monthly_usd * usd_to_cad
     annual_contrib_cad = monthly_cad * 12.0
 
-    # 기존 코드의 단순화 공식 유지:
-    # A = 연간 기여금 × (수익률 / 성장률)
-    # n_years = ln((Target + A) / (I0 + A)) / ln(1 + g)
-    # 단위는 CAD 기준
-    # (g가 0 또는 음수에 근접하면 분모/해석이 깨지므로 방어)
-    target_annual_cad = 12_000.0  # 월 CAD 1,000
+    target_annual_cad = 12_000.0
 
     if g <= 0:
-        # g<=0이면 기존 공식이 불안정해짐 → 보수적으로 "계산 불가" 처리
         return (
             "<p style='text-align:left;'>"
+            f"<strong>데이터 소스:</strong> {src_label}<br>"
             f"<strong>기준 연도(완료 연도):</strong> {last_done_year}<br>"
             f"<strong>완료 연도 연배당/주(USD):</strong> {fmt_money(last_div_ps_usd, '$')}<br>"
             f"<strong>배당 성장률 g(최근 완료 연도 CAGR):</strong> {fmt_pct(g * 100.0)}<br>"
@@ -2117,11 +2128,6 @@ def build_schd_dividend_summary_text(current_shares):
     if months_int == 12:
         years_int += 1
         months_int = 0
-
-    # -----------------------------
-    # 7) HTML 출력
-    # -----------------------------
-    src_label = "FMP" if fmp_hist else "yfinance(fallback)"
 
     return (
         "<p style='text-align:left;'>"
