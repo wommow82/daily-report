@@ -465,151 +465,9 @@ JSON 형식으로만 답하라. 예시는 다음과 같다.
 # NewsAPI/RSS 기반 종목 뉴스 → 주가 영향 중심 요약(30줄) → HTML 생성 함수
 # =========================
 
-def build_earnings_date_html(ticker, limit=1):
-    """
-    yfinance 기반 '실적발표일(Earnings Date)' HTML 생성.
-    - 데이터가 없거나 조회 실패 시: "업데이트 없음" 표기
-    - 전망치(EPS estimate)는 이번 버전에서 제외(보류)
-    """
-    import pandas as pd
-
-    t = (ticker or "").strip().upper()
-    if not t:
-        return (
-            "<p style='text-align:left;'>"
-            "<strong>실적발표일:</strong> 업데이트 없음"
-            "</p>"
-        )
-
-    try:
-        import yfinance as yf
-    except Exception:
-        return (
-            "<p style='text-align:left;'>"
-            "<strong>실적발표일:</strong> 업데이트 없음"
-            "</p>"
-        )
-
-    # 기본 출력값
-    result_text = "업데이트 없음"
-
-    try:
-        tk = yf.Ticker(t)
-
-        # 1) get_earnings_dates() 우선 시도 (버전/티커에 따라 지원)
-        df = None
-        try:
-            df = tk.get_earnings_dates(limit=limit)
-        except Exception:
-            df = None
-
-        # df에서 날짜 추출
-        dt_list = []
-
-        if isinstance(df, pd.DataFrame) and not df.empty:
-            # 케이스 A) 인덱스가 datetime
-            try:
-                if getattr(df.index, "dtype", None) is not None:
-                    idx = df.index
-                    # DatetimeIndex면 바로 사용
-                    try:
-                        dt_index = pd.to_datetime(idx, errors="coerce")
-                        dt_index = dt_index.dropna()
-                        for d in dt_index[:limit]:
-                            dt_list.append(d)
-                    except Exception:
-                        pass
-            except Exception:
-                pass
-
-            # 케이스 B) 'Earnings Date' 컬럼이 있는 경우
-            if not dt_list:
-                for col in ["Earnings Date", "EarningsDate", "earningsDate"]:
-                    if col in df.columns:
-                        try:
-                            ser = pd.to_datetime(df[col], errors="coerce").dropna()
-                            for d in ser[:limit]:
-                                dt_list.append(d)
-                        except Exception:
-                            pass
-                        break
-
-        # 2) calendar fallback (일부 티커/버전에서 제공)
-        if not dt_list:
-            cal = None
-            try:
-                cal = tk.calendar
-            except Exception:
-                cal = None
-
-            # calendar가 DataFrame/Series/Dict 등으로 올 수 있어 방어적으로 처리
-            # yfinance 캘린더의 'Earnings Date' 항목이 있으면 사용
-            try:
-                if cal is not None:
-                    # DataFrame 형태
-                    if isinstance(cal, pd.DataFrame) and not cal.empty:
-                        if "Earnings Date" in cal.index:
-                            raw = cal.loc["Earnings Date"].values
-                            for v in raw:
-                                d = pd.to_datetime(v, errors="coerce")
-                                if pd.notna(d):
-                                    dt_list.append(d)
-                        elif "Earnings Date" in cal.columns:
-                            raw = cal["Earnings Date"].values
-                            for v in raw:
-                                d = pd.to_datetime(v, errors="coerce")
-                                if pd.notna(d):
-                                    dt_list.append(d)
-                    # dict-like
-                    elif isinstance(cal, dict):
-                        raw = cal.get("Earnings Date") or cal.get("EarningsDate")
-                        if raw is not None:
-                            if isinstance(raw, (list, tuple)):
-                                for v in raw:
-                                    d = pd.to_datetime(v, errors="coerce")
-                                    if pd.notna(d):
-                                        dt_list.append(d)
-                            else:
-                                d = pd.to_datetime(raw, errors="coerce")
-                                if pd.notna(d):
-                                    dt_list.append(d)
-            except Exception:
-                pass
-
-        # 최종 포맷
-        if dt_list:
-            # 중복 제거 + 정렬
-            dt_list = sorted(list({pd.Timestamp(d).to_pydatetime() for d in dt_list}))
-            # 날짜만 표기(시간이 있으면 같이 표기)
-            out = []
-            for d in dt_list[:limit]:
-                try:
-                    # 시간이 00:00:00이면 날짜만
-                    if getattr(d, "hour", 0) == 0 and getattr(d, "minute", 0) == 0:
-                        out.append(pd.Timestamp(d).strftime("%Y-%m-%d"))
-                    else:
-                        out.append(pd.Timestamp(d).strftime("%Y-%m-%d %H:%M"))
-                except Exception:
-                    out.append(str(d))
-            result_text = ", ".join(out)
-
-    except Exception:
-        result_text = "업데이트 없음"
-
-    return (
-        "<p style='text-align:left;'>"
-        f"<strong>실적발표일:</strong> {result_text}"
-        "</p>"
-    )
-
-
 def build_midterm_news_comment_from_apis_combined(ticker, max_items=10, days=30):
     """
     중기 분석 섹션에서 사용할 '최근 1개월 뉴스 요약' HTML 생성.
-    (요구사항 반영)
-    - 같은 코멘트 블록 내부에서:
-      1) 실적발표일(earnings date) 출력 (없으면 '업데이트 없음')
-      2) 그 아래에 뉴스 요약 (최근 1개월, 주가 영향 이슈)
 
     - 최근 30일 뉴스만 사용
     - NewsAPI → 실패 시 Google News RSS
@@ -622,19 +480,11 @@ def build_midterm_news_comment_from_apis_combined(ticker, max_items=10, days=30)
       · 부정 라인은 빨간색
       · 전체 왼쪽 정렬
     """
-    import os
-    from datetime import datetime, timedelta
-
-    # 0) 먼저 실적발표일 블록 생성 (항상 표시)
-    earnings_html = build_earnings_date_html(ticker, limit=1)
-
     api_key = os.environ.get("NEWS_API_KEY")
     if not api_key:
-        # 뉴스는 못 가져오더라도 "실적발표일"은 위에 표시
         return (
-            earnings_html
-            + "<p style='text-align:left;'>"
-            "<strong>뉴스 요약 (최근 1개월, 주가 영향 이슈):</strong><br>"
+            "<p style='text-align:left;'>"
+            "<strong>뉴스 요약 (최근 1개월):</strong><br>"
             "- NEWS_API_KEY가 설정되어 있지 않아 뉴스를 불러올 수 없습니다."
             "</p>"
         )
@@ -649,14 +499,14 @@ def build_midterm_news_comment_from_apis_combined(ticker, max_items=10, days=30)
 
     if not articles:
         return (
-            earnings_html
-            + "<p style='text-align:left;'>"
-            "<strong>뉴스 요약 (최근 1개월, 주가 영향 이슈):</strong><br>"
+            "<p style='text-align:left;'>"
+            "<strong>뉴스 요약 (최근 1개월):</strong><br>"
             f"- 최근 {days}일 내 {ticker} 관련 주요 뉴스를 찾지 못했습니다."
             "</p>"
         )
 
     # 1-1) 실제 최근 30일만 필터링
+    from datetime import datetime, timedelta
     cutoff = datetime.utcnow() - timedelta(days=30)
     filtered_recent = []
     for a in articles:
@@ -664,7 +514,7 @@ def build_midterm_news_comment_from_apis_combined(ticker, max_items=10, days=30)
         dt = None
         for fmt in ("%Y-%m-%dT%H:%M:%SZ", "%Y-%m-%d %H:%M", "%Y-%m-%d"):
             try:
-                dt = datetime.strptime(p[: len(fmt)], fmt)
+                dt = datetime.strptime(p[:len(fmt)], fmt)
                 break
             except Exception:
                 continue
@@ -676,9 +526,8 @@ def build_midterm_news_comment_from_apis_combined(ticker, max_items=10, days=30)
 
     if not filtered_recent:
         return (
-            earnings_html
-            + "<p style='text-align:left;'>"
-            "<strong>뉴스 요약 (최근 1개월, 주가 영향 이슈):</strong><br>"
+            "<p style='text-align:left;'>"
+            "<strong>뉴스 요약 (최근 1개월):</strong><br>"
             f"- 최근 30일 내 {ticker} 관련 유효한 날짜의 뉴스를 찾지 못했습니다."
             "</p>"
         )
@@ -686,8 +535,8 @@ def build_midterm_news_comment_from_apis_combined(ticker, max_items=10, days=30)
     articles = filtered_recent
 
     # 2) 티커/회사명 기준 관련 기사 필터
-    ticker_upper = (ticker or "").upper().strip()
-    keywords = [ticker_upper] if ticker_upper else []
+    ticker_upper = ticker.upper()
+    keywords = [ticker_upper]
 
     company_map = {
         "NVDA": "NVIDIA",
@@ -699,58 +548,58 @@ def build_midterm_news_comment_from_apis_combined(ticker, max_items=10, days=30)
 
     filtered = []
     for a in articles:
-        title = (a.get("title") or "").upper()
-        if any(k and (k in title) for k in keywords):
+        text_all = (
+            (a.get("title") or "") + " " + (a.get("description") or "")
+        ).upper()
+        if any(k in text_all for k in keywords):
             filtered.append(a)
 
-    if not filtered:
-        filtered = articles  # 필터 결과가 비면 원본 사용
+    if len(filtered) >= 3:
+        use_articles = filtered[:max_items]
+    else:
+        use_articles = articles[:max_items]
 
-    # 3) (중요) 주가 영향 중심 5줄 요약 생성
-    # - 기존 함수: _summarize_news_bundle_ko_price_focus()
-    # - 기존 로직에 맞춰 그대로 사용
-    summary_text = _summarize_news_bundle_ko_price_focus(ticker_upper, filtered)
+    # 2-1) 최신 뉴스 우선 정렬
+    def _parse_dt(a):
+        p = (a.get("published") or "").strip()
+        for fmt in ("%Y-%m-%dT%H:%M:%SZ", "%Y-%m-%d %H:%M", "%Y-%m-%d"):
+            try:
+                return datetime.strptime(p[:len(fmt)], fmt)
+            except Exception:
+                continue
+        return datetime.min
 
-    # 4) HTML 구성 (색상 강조) — 기존 스타일 유지
-    # summary_text는 줄바꿈(\n) 포함 문자열
-    lines_raw = [ln.strip() for ln in (summary_text or "").split("\n") if ln.strip()]
+    use_articles = sorted(use_articles, key=_parse_dt, reverse=True)
 
-    # 기본값 방어
-    if not lines_raw:
-        return (
-            earnings_html
-            + "<p style='text-align:left;'>"
-            "<strong>뉴스 요약 (최근 1개월, 주가 영향 이슈):</strong><br>"
-            "- 요약 가능한 뉴스 텍스트가 없습니다."
-            "</p>"
-        )
+    # 3) 여러 기사 → 텍스트 요약 (긍정/부정 + 대표 2개씩)
+    summary_ko = _summarize_news_bundle_ko_price_focus(ticker, use_articles)
 
-    # 긍정/부정 라인 색칠은 기존 함수 규칙을 최대한 존중
-    # (첫 줄은 카운트, 이후 대표 긍정/부정)
-    html_lines = []
-    for ln in lines_raw:
-        if "긍정" in ln and "부정" in ln and "건" in ln:
-            # 카운트 줄: 긍정/부정 모두 포함
-            # 이미 _summarize_news_bundle_ko_price_focus의 build가 있다면 단순 출력
-            html_lines.append(ln)
-        elif "대표 긍정" in ln or ln.startswith("· 대표 긍정"):
-            html_lines.append(f"<span style='color:green;'>{ln}</span>")
-        elif "대표 부정" in ln or ln.startswith("· 대표 부정"):
-            html_lines.append(f"<span style='color:red;'>{ln}</span>")
+    # 4) 줄 단위로 나눠 색 입히기
+    raw_lines = [ln.strip() for ln in summary_ko.splitlines() if ln.strip()]
+    colored_lines = []
+
+    for ln in raw_lines:
+        if ln.startswith("· 대표 긍정:"):
+            colored_lines.append(
+                f"<span style='color:green;'>{ln}</span>"
+            )
+        elif ln.startswith("· 대표 부정:"):
+            colored_lines.append(
+                f"<span style='color:red;'>{ln}</span>"
+            )
         else:
-            html_lines.append(ln)
+            # 첫 줄 "긍정 뉴스 X건, 부정 뉴스 Y건" 등은 기본 색
+            colored_lines.append(ln)
 
-    news_html_body = "<br>".join(html_lines)
+    html_body = "<br>".join(colored_lines) if colored_lines else "관련 뉴스를 요약할 수 없습니다."
 
-    news_html = (
+    html = (
         "<p style='text-align:left;'>"
         "<strong>뉴스 요약 (최근 1개월, 주가 영향 이슈):</strong><br>"
-        f"{news_html_body}"
+        f"{html_body}"
         "</p>"
     )
-
-    # 5) 최종: 실적발표일 블록 + 뉴스 요약(아래)
-    return earnings_html + news_html
+    return html
 
 
 # =========================
