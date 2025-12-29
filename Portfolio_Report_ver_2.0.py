@@ -435,15 +435,11 @@ def _format_big_number(n):
 
 def build_gpt_earnings_analysis_html(ticker: str, fundamentals: dict) -> str:
     """
-    GPT로 '실적 분석'을 생성하고,
-    각 문장을 [POS]/[NEG]/[NEU] 태그로 받아 '태그 자체'도 색상으로 표시한다.
-
-    표시 규칙:
-    - [POS] : 태그 초록색 + 문장 초록색
-    - [NEG] : 태그 빨간색 + 문장 빨간색
-    - [NEU] : 태그 검정색 + 문장 검정색(기본)
-
-    - 데이터/키/SDK/응답 없음: '업데이트 없음'
+    개선 버전:
+    - 태그([POS]/[NEG]/[NEU])는 GPT가 아니라 '규칙'으로 결정 (일관성 확보)
+    - GPT는 문장 생성만 수행(태그 출력 금지)
+    - 최종 HTML에서 태그+문장에 색 적용
+      POS=초록, NEG=빨강, NEU=검정
     """
     import os
     import json
@@ -455,13 +451,51 @@ def build_gpt_earnings_analysis_html(ticker: str, fundamentals: dict) -> str:
     if not fundamentals:
         return "<p style='text-align:left;'><strong>실적 분석(GPT):</strong> 업데이트 없음</p>"
 
-    has_any = any(
-        fundamentals.get(k) is not None
-        for k in ["revenue_last", "operating_income_last", "net_income_last"]
-    )
-    if not has_any:
-        return "<p style='text-align:left;'><strong>실적 분석(GPT):</strong> 업데이트 없음</p>"
+    # 핵심 수치
+    rev_last = fundamentals.get("revenue_last")
+    rev_prev = fundamentals.get("revenue_prev")
+    op_last = fundamentals.get("operating_income_last")
+    op_prev = fundamentals.get("operating_income_prev")
+    ni_last = fundamentals.get("net_income_last")
+    ni_prev = fundamentals.get("net_income_prev")
 
+    # 비교 함수
+    def _cmp(a, b):
+        try:
+            if a is None or b is None:
+                return None
+            a = float(a); b = float(b)
+            if a > b:
+                return 1
+            if a < b:
+                return -1
+            return 0
+        except Exception:
+            return None
+
+    # 규칙 기반 태그 결정 (가중치 방식)
+    score = 0
+    any_cmp = False
+
+    for pair in [(rev_last, rev_prev), (op_last, op_prev), (ni_last, ni_prev)]:
+        c = _cmp(pair[0], pair[1])
+        if c is None:
+            continue
+        any_cmp = True
+        score += c  # 증가 +1, 감소 -1, 동일 0
+
+    if not any_cmp:
+        tag = "[NEU]"
+    else:
+        if score >= 2:
+            tag = "[POS]"
+        elif score <= -2:
+            tag = "[NEG]"
+        else:
+            # 혼재(좋은 것도 있고 나쁜 것도 있음) 또는 미세 변화
+            tag = "[NEU]"
+
+    # OpenAI 호출 가능 여부
     api_key = os.environ.get("OPENAI_API_KEY")
     if not api_key:
         return "<p style='text-align:left;'><strong>실적 분석(GPT):</strong> 업데이트 없음</p>"
@@ -471,20 +505,7 @@ def build_gpt_earnings_analysis_html(ticker: str, fundamentals: dict) -> str:
     except Exception:
         return "<p style='text-align:left;'><strong>실적 분석(GPT):</strong> 업데이트 없음</p>"
 
-    # 숫자 축약 표시 함수가 없으면 안전하게 fallback
-    def _format_big_number_local(n):
-        try:
-            x = float(n)
-        except Exception:
-            return "확인 불가"
-        absx = abs(x)
-        if absx >= 1_000_000_000:
-            return f"{x/1_000_000_000:.2f}B"
-        if absx >= 1_000_000:
-            return f"{x/1_000_000:.2f}M"
-        return f"{x:,.0f}"
-
-    # HTML escape (파일에 _html_escape가 이미 있으면 그걸 우선 사용)
+    # HTML escape (파일에 이미 _html_escape가 있으면 사용)
     try:
         esc = _html_escape  # noqa
     except Exception:
@@ -500,59 +521,49 @@ def build_gpt_earnings_analysis_html(ticker: str, fundamentals: dict) -> str:
                 .replace("'", "&#39;")
             )
 
+    # GPT에게는 태그를 맡기지 않음
+    # (요약 문장만 생성, 근거 없는 과장 금지)
     payload = {
         "ticker": t,
         "quarter_last": fundamentals.get("quarter_last"),
         "quarter_prev": fundamentals.get("quarter_prev"),
-        "revenue_last": fundamentals.get("revenue_last"),
-        "revenue_prev": fundamentals.get("revenue_prev"),
-        "operating_income_last": fundamentals.get("operating_income_last"),
-        "operating_income_prev": fundamentals.get("operating_income_prev"),
-        "net_income_last": fundamentals.get("net_income_last"),
-        "net_income_prev": fundamentals.get("net_income_prev"),
+        "revenue_last": rev_last,
+        "revenue_prev": rev_prev,
+        "operating_income_last": op_last,
+        "operating_income_prev": op_prev,
+        "net_income_last": ni_last,
+        "net_income_prev": ni_prev,
     }
 
-    pretty = dict(payload)
-    for k in [
-        "revenue_last", "revenue_prev",
-        "operating_income_last", "operating_income_prev",
-        "net_income_last", "net_income_prev",
-    ]:
-        if pretty.get(k) is not None:
-            pretty[k] = _format_big_number_local(pretty[k])
-
     prompt = (
-    "너는 투자 리포트 작성자다. 아래는 한 종목의 최근 분기 손익 일부 데이터다.\n"
-    "요구사항:\n"
-    "1) 한국어, 3줄 이내(불릿 2~3개)\n"
-    "2) 각 줄 맨 앞에 반드시 태그를 정확히 1개만 붙여라\n"
-    "   - 허용 태그: [POS], [NEG], [NEU]\n"
-    "   - 한 줄에 태그는 하나만 허용된다\n"
-    "   - 다른 태그를 중복하거나 추가하지 마라\n"
-    "3) 제공된 숫자에 근거해 해석하되, 없는 항목은 '확인 불가'로 명시\n"
-    "4) 가격 예측/매수매도 권유 금지\n\n"
-    f"INPUT_JSON:\n{json.dumps(pretty, ensure_ascii=False)}"
+        "너는 투자 리포트 작성자다.\n"
+        "아래 JSON은 '최근 분기 vs 이전 분기'의 일부 손익 데이터다.\n"
+        "요구사항:\n"
+        "1) 한국어로 2~3개 불릿 문장만 출력하라.\n"
+        "2) 태그([POS]/[NEG]/[NEU])를 출력하지 마라.\n"
+        "3) 숫자 비교에 근거해 간결히 서술하라.\n"
+        "4) 데이터가 없는 항목은 '확인 불가'라고 명시하라.\n"
+        "5) 가격 예측/매수매도 권유 금지.\n\n"
+        f"INPUT_JSON:\n{json.dumps(payload, ensure_ascii=False)}"
     )
 
     try:
         client = OpenAI(api_key=api_key)
-
-        # 현재 파일 스타일에 맞춰 chat.completions 사용
         resp = client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[{"role": "user", "content": prompt}],
-            max_tokens=240,
+            max_tokens=220,
             temperature=0.2,
         )
         text = (resp.choices[0].message.content or "").strip()
         if not text:
             return "<p style='text-align:left;'><strong>실적 분석(GPT):</strong> 업데이트 없음</p>"
 
-        lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+        lines = [ln.strip("•- \t") for ln in text.splitlines() if ln.strip()]
         if not lines:
             return "<p style='text-align:left;'><strong>실적 분석(GPT):</strong> 업데이트 없음</p>"
 
-        # 태그 정의
+        # 태그 색상 및 문장 색상
         tag_style = {
             "[POS]": "color:green; font-weight:700;",
             "[NEG]": "color:red; font-weight:700;",
@@ -563,32 +574,13 @@ def build_gpt_earnings_analysis_html(ticker: str, fundamentals: dict) -> str:
             "[NEG]": "color:red;",
             "[NEU]": "color:black;",
         }
-        
-        out_lines = []
-        for ln in lines:
-            # 허용 태그 중 첫 번째만 사용
-            tag = None
-            for candidate in ["[POS]", "[NEG]", "[NEU]"]:
-                if ln.strip().startswith(candidate):
-                    tag = candidate
-                    break
-        
-            if tag is None:
-                tag = "[NEU]"
-                content = ln
-            else:
-                content = ln[len(tag):].strip()
-        
-            # 혹시 남아 있는 다른 태그 제거 (방어)
-            for extra in ["[POS]", "[NEG]", "[NEU]"]:
-                content = content.replace(extra, "").strip()
-        
-            tag_html = f"<span style='{tag_style[tag]}'>{tag}</span>"
-            content_html = f"<span style='{line_style[tag]}'>{_html_escape(content)}</span>"
-        
-            out_lines.append(f"· {tag_html} {content_html}")
 
-        
+        tag_html = f"<span style='{tag_style[tag]}'>{tag}</span>"
+
+        out_lines = []
+        for ln in lines[:3]:
+            out_lines.append(f"· {tag_html} <span style='{line_style[tag]}'>{esc(ln)}</span>")
+
         return (
             "<p style='text-align:left;'>"
             "<strong>실적 분석(GPT):</strong><br>"
@@ -599,6 +591,7 @@ def build_gpt_earnings_analysis_html(ticker: str, fundamentals: dict) -> str:
     except Exception as e:
         print(f"[WARN] build_gpt_earnings_analysis_html 오류: {e}")
         return "<p style='text-align:left;'><strong>실적 분석(GPT):</strong> 업데이트 없음</p>"
+
 
 
 # =========================
