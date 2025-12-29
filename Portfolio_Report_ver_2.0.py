@@ -436,10 +436,13 @@ def _format_big_number(n):
 def build_gpt_earnings_analysis_html(ticker: str, fundamentals: dict) -> str:
     """
     GPT로 '실적 분석'을 생성하고,
-    각 문장을 [POS]/[NEG]/[NEU] 태그로 받아 색상 처리한다.
-    - [POS] : 녹색
-    - [NEG] : 빨간색
-    - [NEU] : 기본색
+    각 문장을 [POS]/[NEG]/[NEU] 태그로 받아 '태그 자체'도 색상으로 표시한다.
+
+    표시 규칙:
+    - [POS] : 태그 초록색 + 문장 초록색
+    - [NEG] : 태그 빨간색 + 문장 빨간색
+    - [NEU] : 태그 검정색 + 문장 검정색(기본)
+
     - 데이터/키/SDK/응답 없음: '업데이트 없음'
     """
     import os
@@ -468,7 +471,35 @@ def build_gpt_earnings_analysis_html(ticker: str, fundamentals: dict) -> str:
     except Exception:
         return "<p style='text-align:left;'><strong>실적 분석(GPT):</strong> 업데이트 없음</p>"
 
-    # GPT 입력(가독성용 축약 숫자 제공)
+    # 숫자 축약 표시 함수가 없으면 안전하게 fallback
+    def _format_big_number_local(n):
+        try:
+            x = float(n)
+        except Exception:
+            return "확인 불가"
+        absx = abs(x)
+        if absx >= 1_000_000_000:
+            return f"{x/1_000_000_000:.2f}B"
+        if absx >= 1_000_000:
+            return f"{x/1_000_000:.2f}M"
+        return f"{x:,.0f}"
+
+    # HTML escape (파일에 _html_escape가 이미 있으면 그걸 우선 사용)
+    try:
+        esc = _html_escape  # noqa
+    except Exception:
+        def esc(s: str) -> str:
+            if s is None:
+                return ""
+            return (
+                str(s)
+                .replace("&", "&amp;")
+                .replace("<", "&lt;")
+                .replace(">", "&gt;")
+                .replace('"', "&quot;")
+                .replace("'", "&#39;")
+            )
+
     payload = {
         "ticker": t,
         "quarter_last": fundamentals.get("quarter_last"),
@@ -488,7 +519,7 @@ def build_gpt_earnings_analysis_html(ticker: str, fundamentals: dict) -> str:
         "net_income_last", "net_income_prev",
     ]:
         if pretty.get(k) is not None:
-            pretty[k] = _format_big_number(pretty[k])
+            pretty[k] = _format_big_number_local(pretty[k])
 
     prompt = (
         "너는 미국 주식 리포트 작성자다. 아래는 한 종목의 최근 분기 손익 일부 데이터다.\n"
@@ -503,11 +534,11 @@ def build_gpt_earnings_analysis_html(ticker: str, fundamentals: dict) -> str:
     try:
         client = OpenAI(api_key=api_key)
 
-        # 당신 파일은 chat.completions 패턴을 이미 사용중이므로 동일 계열로 맞춤
+        # 현재 파일 스타일에 맞춰 chat.completions 사용
         resp = client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[{"role": "user", "content": prompt}],
-            max_tokens=220,
+            max_tokens=240,
             temperature=0.2,
         )
         text = (resp.choices[0].message.content or "").strip()
@@ -517,6 +548,18 @@ def build_gpt_earnings_analysis_html(ticker: str, fundamentals: dict) -> str:
         lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
         if not lines:
             return "<p style='text-align:left;'><strong>실적 분석(GPT):</strong> 업데이트 없음</p>"
+
+        # 태그 표시 + 색상 적용
+        tag_style = {
+            "[POS]": "color:green; font-weight:700;",
+            "[NEG]": "color:red; font-weight:700;",
+            "[NEU]": "color:black; font-weight:700;",
+        }
+        line_style = {
+            "[POS]": "color:green;",
+            "[NEG]": "color:red;",
+            "[NEU]": "color:black;",
+        }
 
         out_lines = []
         for ln in lines:
@@ -528,14 +571,14 @@ def build_gpt_earnings_analysis_html(ticker: str, fundamentals: dict) -> str:
                     content = ln[len(candidate):].strip()
                     break
 
-            safe = _html_escape(content)
+            # 태그가 없으면 NEU로 처리(보수적)
+            if tag is None:
+                tag = "[NEU]"
 
-            if tag == "[POS]":
-                out_lines.append(f"<span style='color:green;'>· {safe}</span>")
-            elif tag == "[NEG]":
-                out_lines.append(f"<span style='color:red;'>· {safe}</span>")
-            else:
-                out_lines.append(f"· {safe}")
+            tag_html = f"<span style='{tag_style[tag]}'>{esc(tag)}</span>"
+            content_html = f"<span style='{line_style[tag]}'>{esc(content)}</span>"
+
+            out_lines.append(f"· {tag_html} {content_html}")
 
         return (
             "<p style='text-align:left;'>"
