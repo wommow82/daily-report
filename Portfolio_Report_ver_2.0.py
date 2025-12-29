@@ -887,60 +887,60 @@ def _extract_article_date_midterm(article):
         return date_raw[:10]
 
 
-def build_midterm_news_comment_from_apis(ticker, max_items=2, days=7):
-    """
-    NVDA/TSLA 중기 분석 섹션에서 사용할 뉴스 요약 HTML 생성.
+# def build_midterm_news_comment_from_apis(ticker, max_items=2, days=7):
+#     """
+#     NVDA/TSLA 중기 분석 섹션에서 사용할 뉴스 요약 HTML 생성.
 
-    - 소스: NewsAPI → 실패 시 Google News RSS
-    - 최대 max_items개
-    - 각 뉴스는 한국어 15자 이내 요약
-    - 반환: HTML <p> 블록
-    """
-    api_key = os.environ.get("NEWS_API_KEY")
-    if not api_key:
-        return (
-            "<p style='text-align:left;'>"
-            "<strong>뉴스 요약:</strong><br>"
-            "- NEWS_API_KEY가 설정되어 있지 않아 뉴스를 불러올 수 없습니다."
-            "</p>"
-        )
+#     - 소스: NewsAPI → 실패 시 Google News RSS
+#     - 최대 max_items개
+#     - 각 뉴스는 한국어 15자 이내 요약
+#     - 반환: HTML <p> 블록
+#     """
+#     api_key = os.environ.get("NEWS_API_KEY")
+#     if not api_key:
+#         return (
+#             "<p style='text-align:left;'>"
+#             "<strong>뉴스 요약:</strong><br>"
+#             "- NEWS_API_KEY가 설정되어 있지 않아 뉴스를 불러올 수 없습니다."
+#             "</p>"
+#         )
 
-    articles = _fetch_news_for_ticker_midterm(
-        ticker=ticker,
-        api_key=api_key,
-        page_size=max_items,
-        days=days,
-    )
+#     articles = _fetch_news_for_ticker_midterm(
+#         ticker=ticker,
+#         api_key=api_key,
+#         page_size=max_items,
+#         days=days,
+#     )
 
-    if not articles:
-        return (
-            "<p style='text-align:left;'>"
-            "<strong>뉴스 요약:</strong><br>"
-            f"- 최근 {days}일 내 주요 뉴스를 찾지 못했습니다."
-            "</p>"
-        )
+#     if not articles:
+#         return (
+#             "<p style='text-align:left;'>"
+#             "<strong>뉴스 요약:</strong><br>"
+#             f"- 최근 {days}일 내 주요 뉴스를 찾지 못했습니다."
+#             "</p>"
+#         )
 
-    lines = []
-    for a in articles[:max_items]:
-        title = (a.get("title") or "").strip()
-        desc = (a.get("description") or "").strip()
-        base_text = (title + "\n" + desc).strip()
+#     lines = []
+#     for a in articles[:max_items]:
+#         title = (a.get("title") or "").strip()
+#         desc = (a.get("description") or "").strip()
+#         base_text = (title + "\n" + desc).strip()
 
-        summary_ko = _summarize_news_ko_15(base_text)
-        date_str = _extract_article_date_midterm(a)
-        src = (a.get("source") or "").strip()
+#         summary_ko = _summarize_news_ko_15(base_text)
+#         date_str = _extract_article_date_midterm(a)
+#         src = (a.get("source") or "").strip()
 
-        if src:
-            line = f"- {date_str} {src}: {summary_ko}"
-        else:
-            line = f"- {date_str}: {summary_ko}"
+#         if src:
+#             line = f"- {date_str} {src}: {summary_ko}"
+#         else:
+#             line = f"- {date_str}: {summary_ko}"
 
-        lines.append(line)
+#         lines.append(line)
 
-    html = "<p style='text-align:left;'><strong>뉴스 요약:</strong><br>"
-    html += "<br>".join(lines)
-    html += "</p>"
-    return html
+#     html = "<p style='text-align:left;'><strong>뉴스 요약:</strong><br>"
+#     html += "<br>".join(lines)
+#     html += "</p>"
+#     return html
 
 
 
