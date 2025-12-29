@@ -334,6 +334,134 @@ def _html_escape(s: str) -> str:
         .replace("'", "&#39;")
     )
 
+def build_earnings_analysis_by_metric_html(ticker: str, fundamentals: dict) -> str:
+    """
+    항목별(매출/운영소득/순이익)로 POS/NEG/NEU를 각각 판단해 표시하는 HTML.
+
+    - 기존 파일에 이미 있는 함수/헬퍼를 최대한 재사용:
+      * _format_big_number(n): B/M 축약
+      * _html_escape(s): HTML escape
+
+    출력 예(색상 적용):
+      · [POS][매출] 51.24B → 47.52B 대비 증가
+      · [POS][운영소득] 20.54B → 20.44B 소폭 증가
+      · [NEG][순이익] 2.71B → 18.34B 대비 감소
+    """
+
+    t = (ticker or "").strip().upper()
+    if not t:
+        return "<p style='text-align:left;'><strong>실적 분석(항목별):</strong> 업데이트 없음</p>"
+
+    if not fundamentals:
+        return "<p style='text-align:left;'><strong>실적 분석(항목별):</strong> 업데이트 없음</p>"
+
+    # 근거 수치 추출
+    rev_last = fundamentals.get("revenue_last")
+    rev_prev = fundamentals.get("revenue_prev")
+    op_last = fundamentals.get("operating_income_last")
+    op_prev = fundamentals.get("operating_income_prev")
+    ni_last = fundamentals.get("net_income_last")
+    ni_prev = fundamentals.get("net_income_prev")
+
+    # 최소 하나라도 있어야 의미가 있음
+    has_any = any(v is not None for v in [rev_last, rev_prev, op_last, op_prev, ni_last, ni_prev])
+    if not has_any:
+        return "<p style='text-align:left;'><strong>실적 분석(항목별):</strong> 업데이트 없음</p>"
+
+    # 비교 함수
+    def _cmp(a, b):
+        try:
+            if a is None or b is None:
+                return None
+            a = float(a)
+            b = float(b)
+            if a > b:
+                return 1
+            if a < b:
+                return -1
+            return 0
+        except Exception:
+            return None
+
+    # 태그 매핑
+    def _tag(cmp_result):
+        if cmp_result is None:
+            return "[NEU]"
+        if cmp_result > 0:
+            return "[POS]"
+        if cmp_result < 0:
+            return "[NEG]"
+        return "[NEU]"
+
+    # 태그별 스타일
+    def _styles(tag):
+        # (tag_style, text_style)
+        if tag == "[POS]":
+            return ("color:green; font-weight:700;", "color:green;")
+        if tag == "[NEG]":
+            return ("color:red; font-weight:700;", "color:red;")
+        return ("color:black; font-weight:700;", "color:black;")
+
+    # 소폭 변화 판단(상대 3% 미만이면 '소폭' 표시)
+    def _nuance(last, prev, cmp_result):
+        if cmp_result not in (1, -1):
+            return ""
+        try:
+            if prev is None:
+                return ""
+            prev_f = float(prev)
+            last_f = float(last)
+            if prev_f == 0:
+                return ""
+            pct = (last_f - prev_f) / abs(prev_f)
+            return "소폭 " if abs(pct) < 0.03 else ""
+        except Exception:
+            return ""
+
+    # 한 줄 생성
+    def _line(metric_ko, last, prev):
+        c = _cmp(last, prev)
+        tag = _tag(c)
+        tag_style, txt_style = _styles(tag)
+
+        last_s = _format_big_number(last) if last is not None else "확인 불가"
+        prev_s = _format_big_number(prev) if prev is not None else "확인 불가"
+
+        if c is None:
+            change = "비교 불가"
+        elif c > 0:
+            change = "증가"
+        elif c < 0:
+            change = "감소"
+        else:
+            change = "변화 없음"
+
+        nu = _nuance(last, prev, c)
+
+        tag_html = f"<span style='{tag_style}'>{_html_escape(tag)}</span>"
+        metric_html = f"<span style='{tag_style}'>[{_html_escape(metric_ko)}]</span>"
+        txt = f"{last_s} → {prev_s} 대비 {nu}{change}"
+        txt_html = f"<span style='{txt_style}'>{_html_escape(txt)}</span>"
+
+        return f"· {tag_html} {metric_html} {txt_html}"
+
+    lines = [
+        _line("매출", rev_last, rev_prev),
+        _line("운영소득", op_last, op_prev),
+        _line("순이익", ni_last, ni_prev),
+    ]
+
+    # 전부 비교 불가면 업데이트 없음
+    if _cmp(rev_last, rev_prev) is None and _cmp(op_last, op_prev) is None and _cmp(ni_last, ni_prev) is None:
+        return "<p style='text-align:left;'><strong>실적 분석(항목별):</strong> 업데이트 없음</p>"
+
+    return (
+        "<p style='text-align:left;'>"
+        "<strong>실적 분석(항목별):</strong><br>"
+        + "<br>".join(lines)
+        + "</p>"
+    )
+
 
 def fetch_recent_quarterly_fundamentals_yf(ticker: str) -> dict:
     """
@@ -962,7 +1090,7 @@ def build_midterm_news_comment_from_apis_combined(ticker, max_items=10, days=30)
 
     출력 순서(요구사항):
     1) yfinance 기반 '실적발표일' (없으면 '업데이트 없음')
-    2) GPT 기반 '실적 분석' (없으면 '업데이트 없음')  ← 실적발표일 아래
+    2) (NEW) 항목별 '실적 분석' (매출/운영소득/순이익 각각 POS/NEG/NEU)  ← 실적발표일 아래
     3) 뉴스 요약 (최근 1개월, 주가 영향 이슈)
 
     추가:
@@ -970,18 +1098,19 @@ def build_midterm_news_comment_from_apis_combined(ticker, max_items=10, days=30)
       · 대표 긍정: 초록색
       · 대표 부정: 빨간색
     """
+
     # 1) 실적발표일(기존 함수 사용)
     earnings_html = build_earnings_date_html(ticker)
 
-    # 2) GPT 실적분석(근거 수치 수집 + 분석)
+    # 2) (NEW) 항목별 실적 분석(규칙 기반, GPT 불필요)
     fundamentals = fetch_recent_quarterly_fundamentals_yf(ticker)
-    earnings_gpt_html = build_gpt_earnings_analysis_html(ticker, fundamentals)
+    earnings_metric_html = build_earnings_analysis_by_metric_html(ticker, fundamentals)
 
     api_key = os.environ.get("NEWS_API_KEY")
     if not api_key:
         return (
             earnings_html
-            + earnings_gpt_html
+            + earnings_metric_html
             + "<p style='text-align:left;'>"
             "<strong>뉴스 요약 (최근 1개월):</strong><br>"
             "- NEWS_API_KEY가 설정되어 있지 않아 뉴스를 불러올 수 없습니다."
@@ -999,7 +1128,7 @@ def build_midterm_news_comment_from_apis_combined(ticker, max_items=10, days=30)
     if not articles:
         return (
             earnings_html
-            + earnings_gpt_html
+            + earnings_metric_html
             + "<p style='text-align:left;'>"
             "<strong>뉴스 요약 (최근 1개월):</strong><br>"
             f"- 최근 {days}일 내 {ticker} 관련 주요 뉴스를 찾지 못했습니다."
@@ -1028,7 +1157,7 @@ def build_midterm_news_comment_from_apis_combined(ticker, max_items=10, days=30)
     if not filtered_recent:
         return (
             earnings_html
-            + earnings_gpt_html
+            + earnings_metric_html
             + "<p style='text-align:left;'>"
             "<strong>뉴스 요약 (최근 1개월):</strong><br>"
             f"- 최근 30일 내 {ticker} 관련 유효한 날짜의 뉴스를 찾지 못했습니다."
@@ -1051,9 +1180,7 @@ def build_midterm_news_comment_from_apis_combined(ticker, max_items=10, days=30)
 
     filtered = []
     for a in articles:
-        text_all = (
-            (a.get("title") or "") + " " + (a.get("description") or "")
-        ).upper()
+        text_all = ((a.get("title") or "") + " " + (a.get("description") or "")).upper()
         if any(k in text_all for k in keywords):
             filtered.append(a)
 
@@ -1098,7 +1225,7 @@ def build_midterm_news_comment_from_apis_combined(ticker, max_items=10, days=30)
         "</p>"
     )
 
-    return earnings_html + earnings_gpt_html + news_html
+    return earnings_html + earnings_metric_html + news_html
 
 
 def _extract_article_date_midterm(article):
