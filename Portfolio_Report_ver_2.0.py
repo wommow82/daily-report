@@ -522,13 +522,16 @@ def build_gpt_earnings_analysis_html(ticker: str, fundamentals: dict) -> str:
             pretty[k] = _format_big_number_local(pretty[k])
 
     prompt = (
-        "너는 미국 주식 리포트 작성자다. 아래는 한 종목의 최근 분기 손익 일부 데이터다.\n"
-        "요구사항:\n"
-        "1) 한국어, 3줄 이내(불릿 2~3개)\n"
-        "2) 각 줄 맨 앞에 반드시 태그를 붙여라: [POS] 또는 [NEG] 또는 [NEU]\n"
-        "3) 제공된 숫자에 근거해 해석하되, 없는 항목은 '확인 불가'로 명시\n"
-        "4) 가격 예측/매수매도 권유 금지\n\n"
-        f"INPUT_JSON:\n{json.dumps(pretty, ensure_ascii=False)}"
+    "너는 투자 리포트 작성자다. 아래는 한 종목의 최근 분기 손익 일부 데이터다.\n"
+    "요구사항:\n"
+    "1) 한국어, 3줄 이내(불릿 2~3개)\n"
+    "2) 각 줄 맨 앞에 반드시 태그를 정확히 1개만 붙여라\n"
+    "   - 허용 태그: [POS], [NEG], [NEU]\n"
+    "   - 한 줄에 태그는 하나만 허용된다\n"
+    "   - 다른 태그를 중복하거나 추가하지 마라\n"
+    "3) 제공된 숫자에 근거해 해석하되, 없는 항목은 '확인 불가'로 명시\n"
+    "4) 가격 예측/매수매도 권유 금지\n\n"
+    f"INPUT_JSON:\n{json.dumps(pretty, ensure_ascii=False)}"
     )
 
     try:
@@ -549,7 +552,7 @@ def build_gpt_earnings_analysis_html(ticker: str, fundamentals: dict) -> str:
         if not lines:
             return "<p style='text-align:left;'><strong>실적 분석(GPT):</strong> 업데이트 없음</p>"
 
-        # 태그 표시 + 색상 적용
+        # 태그 정의
         tag_style = {
             "[POS]": "color:green; font-weight:700;",
             "[NEG]": "color:red; font-weight:700;",
@@ -560,26 +563,32 @@ def build_gpt_earnings_analysis_html(ticker: str, fundamentals: dict) -> str:
             "[NEG]": "color:red;",
             "[NEU]": "color:black;",
         }
-
+        
         out_lines = []
         for ln in lines:
+            # 허용 태그 중 첫 번째만 사용
             tag = None
-            content = ln
             for candidate in ["[POS]", "[NEG]", "[NEU]"]:
-                if ln.startswith(candidate):
+                if ln.strip().startswith(candidate):
                     tag = candidate
-                    content = ln[len(candidate):].strip()
                     break
-
-            # 태그가 없으면 NEU로 처리(보수적)
+        
             if tag is None:
                 tag = "[NEU]"
-
-            tag_html = f"<span style='{tag_style[tag]}'>{esc(tag)}</span>"
-            content_html = f"<span style='{line_style[tag]}'>{esc(content)}</span>"
-
+                content = ln
+            else:
+                content = ln[len(tag):].strip()
+        
+            # 혹시 남아 있는 다른 태그 제거 (방어)
+            for extra in ["[POS]", "[NEG]", "[NEU]"]:
+                content = content.replace(extra, "").strip()
+        
+            tag_html = f"<span style='{tag_style[tag]}'>{tag}</span>"
+            content_html = f"<span style='{line_style[tag]}'>{_html_escape(content)}</span>"
+        
             out_lines.append(f"· {tag_html} {content_html}")
 
+        
         return (
             "<p style='text-align:left;'>"
             "<strong>실적 분석(GPT):</strong><br>"
