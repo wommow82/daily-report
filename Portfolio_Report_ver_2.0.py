@@ -322,6 +322,233 @@ JSON 형식으로만 답하라. 예시는 다음과 같다.
     }
 
 
+def _html_escape(s: str) -> str:
+    if s is None:
+        return ""
+    return (
+        str(s)
+        .replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+        .replace('"', "&quot;")
+        .replace("'", "&#39;")
+    )
+
+
+def fetch_recent_quarterly_fundamentals_yf(ticker: str) -> dict:
+    """
+    yfinance로부터 최근 분기 손익(가능 범위) 근거 수치를 수집한다.
+    - 반환 dict는 GPT 실적 분석에 들어가는 근거 데이터
+    - 데이터가 없으면 최소 dict({ticker})만 반환하거나 빈 dict 반환
+    """
+    import pandas as pd
+
+    t = (ticker or "").strip().upper()
+    if not t:
+        return {}
+
+    try:
+        import yfinance as yf
+    except Exception:
+        return {}
+
+    out = {"ticker": t}
+
+    try:
+        tk = yf.Ticker(t)
+
+        qf = None
+        try:
+            qf = tk.quarterly_financials
+        except Exception:
+            qf = None
+
+        # 버전에 따라 다른 속성일 수 있어 fallback
+        if qf is None or getattr(qf, "empty", True):
+            try:
+                qf = tk.income_stmt
+            except Exception:
+                qf = None
+
+        if qf is None or getattr(qf, "empty", True):
+            return out
+
+        cols = list(qf.columns)
+        if not cols:
+            return out
+
+        # 날짜 정렬(방어)
+        try:
+            cols_sorted = sorted(cols, key=lambda x: pd.to_datetime(x, errors="coerce"))
+        except Exception:
+            cols_sorted = cols
+
+        last = cols_sorted[-1]
+        prev = cols_sorted[-2] if len(cols_sorted) >= 2 else None
+
+        def _get(row_names, col):
+            for rn in row_names:
+                if rn in qf.index:
+                    v = qf.loc[rn, col]
+                    try:
+                        return float(v)
+                    except Exception:
+                        try:
+                            return float(pd.to_numeric(v, errors="coerce"))
+                        except Exception:
+                            return None
+            return None
+
+        out["quarter_last"] = str(last)
+        out["revenue_last"] = _get(["Total Revenue", "Revenue", "TotalRevenue"], last)
+        out["operating_income_last"] = _get(["Operating Income", "OperatingIncome"], last)
+        out["net_income_last"] = _get(["Net Income", "NetIncome"], last)
+
+        if prev is not None:
+            out["quarter_prev"] = str(prev)
+            out["revenue_prev"] = _get(["Total Revenue", "Revenue", "TotalRevenue"], prev)
+            out["operating_income_prev"] = _get(["Operating Income", "OperatingIncome"], prev)
+            out["net_income_prev"] = _get(["Net Income", "NetIncome"], prev)
+
+        return out
+
+    except Exception:
+        return out
+
+
+def _format_big_number(n):
+    """
+    숫자 축약 표시(B/M). 실패 시 '확인 불가'
+    """
+    try:
+        x = float(n)
+    except Exception:
+        return "확인 불가"
+
+    absx = abs(x)
+    if absx >= 1_000_000_000:
+        return f"{x/1_000_000_000:.2f}B"
+    if absx >= 1_000_000:
+        return f"{x/1_000_000:.2f}M"
+    return f"{x:,.0f}"
+
+
+def build_gpt_earnings_analysis_html(ticker: str, fundamentals: dict) -> str:
+    """
+    GPT로 '실적 분석'을 생성하고,
+    각 문장을 [POS]/[NEG]/[NEU] 태그로 받아 색상 처리한다.
+    - [POS] : 녹색
+    - [NEG] : 빨간색
+    - [NEU] : 기본색
+    - 데이터/키/SDK/응답 없음: '업데이트 없음'
+    """
+    import os
+    import json
+
+    t = (ticker or "").strip().upper()
+    if not t:
+        return "<p style='text-align:left;'><strong>실적 분석(GPT):</strong> 업데이트 없음</p>"
+
+    if not fundamentals:
+        return "<p style='text-align:left;'><strong>실적 분석(GPT):</strong> 업데이트 없음</p>"
+
+    has_any = any(
+        fundamentals.get(k) is not None
+        for k in ["revenue_last", "operating_income_last", "net_income_last"]
+    )
+    if not has_any:
+        return "<p style='text-align:left;'><strong>실적 분석(GPT):</strong> 업데이트 없음</p>"
+
+    api_key = os.environ.get("OPENAI_API_KEY")
+    if not api_key:
+        return "<p style='text-align:left;'><strong>실적 분석(GPT):</strong> 업데이트 없음</p>"
+
+    try:
+        from openai import OpenAI
+    except Exception:
+        return "<p style='text-align:left;'><strong>실적 분석(GPT):</strong> 업데이트 없음</p>"
+
+    # GPT 입력(가독성용 축약 숫자 제공)
+    payload = {
+        "ticker": t,
+        "quarter_last": fundamentals.get("quarter_last"),
+        "quarter_prev": fundamentals.get("quarter_prev"),
+        "revenue_last": fundamentals.get("revenue_last"),
+        "revenue_prev": fundamentals.get("revenue_prev"),
+        "operating_income_last": fundamentals.get("operating_income_last"),
+        "operating_income_prev": fundamentals.get("operating_income_prev"),
+        "net_income_last": fundamentals.get("net_income_last"),
+        "net_income_prev": fundamentals.get("net_income_prev"),
+    }
+
+    pretty = dict(payload)
+    for k in [
+        "revenue_last", "revenue_prev",
+        "operating_income_last", "operating_income_prev",
+        "net_income_last", "net_income_prev",
+    ]:
+        if pretty.get(k) is not None:
+            pretty[k] = _format_big_number(pretty[k])
+
+    prompt = (
+        "너는 미국 주식 리포트 작성자다. 아래는 한 종목의 최근 분기 손익 일부 데이터다.\n"
+        "요구사항:\n"
+        "1) 한국어, 3줄 이내(불릿 2~3개)\n"
+        "2) 각 줄 맨 앞에 반드시 태그를 붙여라: [POS] 또는 [NEG] 또는 [NEU]\n"
+        "3) 제공된 숫자에 근거해 해석하되, 없는 항목은 '확인 불가'로 명시\n"
+        "4) 가격 예측/매수매도 권유 금지\n\n"
+        f"INPUT_JSON:\n{json.dumps(pretty, ensure_ascii=False)}"
+    )
+
+    try:
+        client = OpenAI(api_key=api_key)
+
+        # 당신 파일은 chat.completions 패턴을 이미 사용중이므로 동일 계열로 맞춤
+        resp = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=220,
+            temperature=0.2,
+        )
+        text = (resp.choices[0].message.content or "").strip()
+        if not text:
+            return "<p style='text-align:left;'><strong>실적 분석(GPT):</strong> 업데이트 없음</p>"
+
+        lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+        if not lines:
+            return "<p style='text-align:left;'><strong>실적 분석(GPT):</strong> 업데이트 없음</p>"
+
+        out_lines = []
+        for ln in lines:
+            tag = None
+            content = ln
+            for candidate in ["[POS]", "[NEG]", "[NEU]"]:
+                if ln.startswith(candidate):
+                    tag = candidate
+                    content = ln[len(candidate):].strip()
+                    break
+
+            safe = _html_escape(content)
+
+            if tag == "[POS]":
+                out_lines.append(f"<span style='color:green;'>· {safe}</span>")
+            elif tag == "[NEG]":
+                out_lines.append(f"<span style='color:red;'>· {safe}</span>")
+            else:
+                out_lines.append(f"· {safe}")
+
+        return (
+            "<p style='text-align:left;'>"
+            "<strong>실적 분석(GPT):</strong><br>"
+            + "<br>".join(out_lines)
+            + "</p>"
+        )
+
+    except Exception as e:
+        print(f"[WARN] build_gpt_earnings_analysis_html 오류: {e}")
+        return "<p style='text-align:left;'><strong>실적 분석(GPT):</strong> 업데이트 없음</p>"
+
+
 # =========================
 # 뉴스 여러개 종합요약 함수
 # =========================
@@ -688,34 +915,35 @@ def build_midterm_news_comment_from_apis_combined(ticker, max_items=10, days=30)
     """
     중기 분석 섹션에서 사용할 '최근 1개월 뉴스 요약' HTML 생성.
 
-    - 최근 30일 뉴스만 사용
-    - NewsAPI → 실패 시 Google News RSS
-    - 최대 max_items개 기사 사용
-    - 티커/회사명 필터
-    - _summarize_news_bundle_ko_price_focus()를 호출해
-      "긍정/부정 개수 + 대표 2개씩 (맥락 | 키워드)" 텍스트를 생성
-    - HTML로 변환할 때:
-      · 긍정 라인은 초록색
-      · 부정 라인은 빨간색
-      · 전체 왼쪽 정렬
+    출력 순서(요구사항):
+    1) yfinance 기반 '실적발표일' (없으면 '업데이트 없음')
+    2) GPT 기반 '실적 분석' (없으면 '업데이트 없음')  ← 실적발표일 아래
+    3) 뉴스 요약 (최근 1개월, 주가 영향 이슈)
 
     추가:
-    - yfinance 기반 '실적발표일'을 뉴스 요약 위에 표시 (없으면 '업데이트 없음')
+    - 뉴스 요약 라인 색상:
+      · 대표 긍정: 초록색
+      · 대표 부정: 빨간색
     """
-    # (추가) 실적발표일 HTML은 NEWS_API_KEY 여부와 무관하게 항상 만든다
+    # 1) 실적발표일(기존 함수 사용)
     earnings_html = build_earnings_date_html(ticker)
+
+    # 2) GPT 실적분석(근거 수치 수집 + 분석)
+    fundamentals = fetch_recent_quarterly_fundamentals_yf(ticker)
+    earnings_gpt_html = build_gpt_earnings_analysis_html(ticker, fundamentals)
 
     api_key = os.environ.get("NEWS_API_KEY")
     if not api_key:
         return (
             earnings_html
+            + earnings_gpt_html
             + "<p style='text-align:left;'>"
             "<strong>뉴스 요약 (최근 1개월):</strong><br>"
             "- NEWS_API_KEY가 설정되어 있지 않아 뉴스를 불러올 수 없습니다."
             "</p>"
         )
 
-    # 1) NewsAPI + Google News로 기사 목록 가져오기
+    # 3) NewsAPI + Google News로 기사 목록 가져오기
     articles = _fetch_news_for_ticker_midterm(
         ticker=ticker,
         api_key=api_key,
@@ -726,13 +954,14 @@ def build_midterm_news_comment_from_apis_combined(ticker, max_items=10, days=30)
     if not articles:
         return (
             earnings_html
+            + earnings_gpt_html
             + "<p style='text-align:left;'>"
             "<strong>뉴스 요약 (최근 1개월):</strong><br>"
             f"- 최근 {days}일 내 {ticker} 관련 주요 뉴스를 찾지 못했습니다."
             "</p>"
         )
 
-    # 1-1) 실제 최근 30일만 필터링
+    # 3-1) 실제 최근 30일만 필터링
     from datetime import datetime, timedelta
     cutoff = datetime.utcnow() - timedelta(days=30)
     filtered_recent = []
@@ -754,6 +983,7 @@ def build_midterm_news_comment_from_apis_combined(ticker, max_items=10, days=30)
     if not filtered_recent:
         return (
             earnings_html
+            + earnings_gpt_html
             + "<p style='text-align:left;'>"
             "<strong>뉴스 요약 (최근 1개월):</strong><br>"
             f"- 최근 30일 내 {ticker} 관련 유효한 날짜의 뉴스를 찾지 못했습니다."
@@ -762,7 +992,7 @@ def build_midterm_news_comment_from_apis_combined(ticker, max_items=10, days=30)
 
     articles = filtered_recent
 
-    # 2) 티커/회사명 기준 관련 기사 필터
+    # 3-2) 티커/회사명 기준 관련 기사 필터
     ticker_upper = ticker.upper()
     keywords = [ticker_upper]
 
@@ -787,7 +1017,7 @@ def build_midterm_news_comment_from_apis_combined(ticker, max_items=10, days=30)
     else:
         use_articles = articles[:max_items]
 
-    # 2-1) 최신 뉴스 우선 정렬
+    # 3-3) 최신 뉴스 우선 정렬
     def _parse_dt(a):
         p = (a.get("published") or "").strip()
         for fmt in ("%Y-%m-%dT%H:%M:%SZ", "%Y-%m-%d %H:%M", "%Y-%m-%d"):
@@ -799,37 +1029,31 @@ def build_midterm_news_comment_from_apis_combined(ticker, max_items=10, days=30)
 
     use_articles = sorted(use_articles, key=_parse_dt, reverse=True)
 
-    # 3) 여러 기사 → 텍스트 요약 (긍정/부정 + 대표 2개씩)
+    # 4) 여러 기사 → 텍스트 요약 (긍정/부정 + 대표 2개씩)
     summary_ko = _summarize_news_bundle_ko_price_focus(ticker, use_articles)
 
-    # 4) 줄 단위로 나눠 색 입히기
+    # 5) 줄 단위로 나눠 색 입히기
     raw_lines = [ln.strip() for ln in summary_ko.splitlines() if ln.strip()]
     colored_lines = []
 
     for ln in raw_lines:
         if ln.startswith("· 대표 긍정:"):
-            colored_lines.append(
-                f"<span style='color:green;'>{ln}</span>"
-            )
+            colored_lines.append(f"<span style='color:green;'>{_html_escape(ln)}</span>")
         elif ln.startswith("· 대표 부정:"):
-            colored_lines.append(
-                f"<span style='color:red;'>{ln}</span>"
-            )
+            colored_lines.append(f"<span style='color:red;'>{_html_escape(ln)}</span>")
         else:
-            # 첫 줄 "긍정 뉴스 X건, 부정 뉴스 Y건" 등은 기본 색
-            colored_lines.append(ln)
+            colored_lines.append(_html_escape(ln))
 
     html_body = "<br>".join(colored_lines) if colored_lines else "관련 뉴스를 요약할 수 없습니다."
 
-    html = (
+    news_html = (
         "<p style='text-align:left;'>"
         "<strong>뉴스 요약 (최근 1개월, 주가 영향 이슈):</strong><br>"
         f"{html_body}"
         "</p>"
     )
 
-    # (추가) 실적발표일을 뉴스 위에 붙여서 반환
-    return earnings_html + html
+    return earnings_html + earnings_gpt_html + news_html
 
 
 def _extract_article_date_midterm(article):
@@ -1497,11 +1721,8 @@ def build_midterm_analysis_html(df_enriched):
     📈 중단기 투자의 통합 분석 (TFSA 종목만, SCHD 제외)
 
     1) 요약표 : Ticker + 중기 상승 확률 % / 매수 타이밍 % / 매도 타이밍 % / 1년 목표수익 범위
-    2) 상세표 : '핵심 투자 코멘트' + '주요맥락'
-
-    대상:
-      - df_enriched 중에서 Type == 'TFSA' 인 종목만 포함
-      - 그 중 Ticker != 'SCHD'
+    2) 상세표 : '핵심 투자 코멘트' (실적발표일 → 실적분석(GPT) → 뉴스요약)
+       ※ '주요맥락' 컬럼 제거
     """
 
     # 0) 방어 코드: 필요한 컬럼 확인
@@ -1529,19 +1750,13 @@ def build_midterm_analysis_html(df_enriched):
     rows_summary = []
     rows_detail = []
 
-    # 3) 각 종목별 중단기 분석 + 맥락 생성
+    # 3) 각 종목별 중단기 분석
     for t in sorted(tickers):
         try:
             stat = analyze_midterm_ticker(t)
         except Exception as e:
             print(f"[WARN] analyze_midterm_ticker 실패: {t}, {e}")
             continue
-
-        try:
-            ctx = build_midterm_context(t)
-        except Exception as e:
-            print(f"[WARN] build_midterm_context 실패: {t}, {e}")
-            ctx = "맥락 정보를 불러오지 못했습니다."
 
         # ① 요약 테이블 행 (퍼센트 색칠 적용)
         if stat["UpProb"] is not None:
@@ -1561,12 +1776,11 @@ def build_midterm_analysis_html(df_enriched):
             }
         )
 
-        # ② 상세 테이블 행
+        # ② 상세 테이블 행 (주요맥락 제거)
         rows_detail.append(
             {
                 "Ticker": stat["Ticker"],
                 "핵심 투자 코멘트": stat["Comment"],
-                "주요맥락": ctx,
             }
         )
 
@@ -1581,7 +1795,7 @@ def build_midterm_analysis_html(df_enriched):
         "<h3>① 요약 테이블</h3>"
         + html_summary
         + "<br/><br/>"
-        + "<h3>② 상세 테이블 (핵심 투자 코멘트 + 주요맥락)</h3>"
+        + "<h3>② 상세 테이블 (핵심 투자 코멘트)</h3>"
         + html_detail
     )
 
