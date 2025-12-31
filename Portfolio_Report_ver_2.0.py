@@ -689,14 +689,14 @@ def build_earnings_date_html(ticker: str) -> str:
     return html
 
 
-def build_midterm_news_comment_from_apis_combined(ticker, max_items=10, days=30):
+def build_midterm_news_comment_from_apis_combined(ticker, max_items=10, days=14):
     """
-    중기 분석 섹션에서 사용할 '최근 1개월 뉴스 요약' HTML 생성.
+    중기 분석 섹션에서 사용할 '최근 2주 뉴스 요약' HTML 생성.
 
-    출력 순서(요구사항):
+    출력 순서:
     1) yfinance 기반 '실적발표일' (없으면 '업데이트 없음')
-    2) (NEW) 항목별 '실적 분석' (매출/운영소득/순이익 각각 POS/NEG/NEU)  ← 실적발표일 아래
-    3) 뉴스 요약 (최근 1개월, 주가 영향 이슈)
+    2) 항목별 '실적 분석' (매출/운영소득/순이익 각각 POS/NEG/NEU)
+    3) 뉴스 요약 (최근 2주, 주가 영향 이슈)
 
     추가:
     - 뉴스 요약 라인 색상:
@@ -704,10 +704,10 @@ def build_midterm_news_comment_from_apis_combined(ticker, max_items=10, days=30)
       · 대표 부정: 빨간색
     """
 
-    # 1) 실적발표일(기존 함수 사용)
+    # 1) 실적발표일
     earnings_html = build_earnings_date_html(ticker)
 
-    # 2) (NEW) 항목별 실적 분석(규칙 기반, GPT 불필요)
+    # 2) 항목별 실적 분석
     fundamentals = fetch_recent_quarterly_fundamentals_yf(ticker)
     earnings_metric_html = build_earnings_analysis_by_metric_html(ticker, fundamentals)
 
@@ -717,12 +717,12 @@ def build_midterm_news_comment_from_apis_combined(ticker, max_items=10, days=30)
             earnings_html
             + earnings_metric_html
             + "<p style='text-align:left;'>"
-            "<strong>뉴스 요약 (최근 1개월):</strong><br>"
+            "<strong>뉴스 요약 (최근 2주):</strong><br>"
             "- NEWS_API_KEY가 설정되어 있지 않아 뉴스를 불러올 수 없습니다."
             "</p>"
         )
 
-    # 3) NewsAPI + Google News로 기사 목록 가져오기
+    # 3) NewsAPI + Google News로 기사 목록 가져오기 (days=14)
     articles = _fetch_news_for_ticker_midterm(
         ticker=ticker,
         api_key=api_key,
@@ -735,14 +735,15 @@ def build_midterm_news_comment_from_apis_combined(ticker, max_items=10, days=30)
             earnings_html
             + earnings_metric_html
             + "<p style='text-align:left;'>"
-            "<strong>뉴스 요약 (최근 1개월):</strong><br>"
+            "<strong>뉴스 요약 (최근 2주):</strong><br>"
             f"- 최근 {days}일 내 {ticker} 관련 주요 뉴스를 찾지 못했습니다."
             "</p>"
         )
 
-    # 3-1) 실제 최근 30일만 필터링
+    # 3-1) 실제 최근 14일만 필터링
     from datetime import datetime, timedelta
-    cutoff = datetime.utcnow() - timedelta(days=30)
+    cutoff = datetime.utcnow() - timedelta(days=14)
+
     filtered_recent = []
     for a in articles:
         p = (a.get("published") or "").strip()
@@ -753,7 +754,9 @@ def build_midterm_news_comment_from_apis_combined(ticker, max_items=10, days=30)
                 break
             except Exception:
                 continue
+
         if dt is None:
+            # 날짜 파싱 실패는 일단 포함(정보 손실 방지)
             filtered_recent.append(a)
         else:
             if dt >= cutoff:
@@ -764,8 +767,8 @@ def build_midterm_news_comment_from_apis_combined(ticker, max_items=10, days=30)
             earnings_html
             + earnings_metric_html
             + "<p style='text-align:left;'>"
-            "<strong>뉴스 요약 (최근 1개월):</strong><br>"
-            f"- 최근 30일 내 {ticker} 관련 유효한 날짜의 뉴스를 찾지 못했습니다."
+            "<strong>뉴스 요약 (최근 2주):</strong><br>"
+            f"- 최근 14일 내 {ticker} 관련 유효한 날짜의 뉴스를 찾지 못했습니다."
             "</p>"
         )
 
@@ -789,10 +792,7 @@ def build_midterm_news_comment_from_apis_combined(ticker, max_items=10, days=30)
         if any(k in text_all for k in keywords):
             filtered.append(a)
 
-    if len(filtered) >= 3:
-        use_articles = filtered[:max_items]
-    else:
-        use_articles = articles[:max_items]
+    use_articles = filtered[:max_items] if len(filtered) >= 3 else articles[:max_items]
 
     # 3-3) 최신 뉴스 우선 정렬
     def _parse_dt(a):
@@ -825,15 +825,12 @@ def build_midterm_news_comment_from_apis_combined(ticker, max_items=10, days=30)
 
     news_html = (
         "<p style='text-align:left;'>"
-        "<strong>뉴스 요약 (최근 1개월, 주가 영향 이슈):</strong><br>"
+        "<strong>뉴스 요약 (최근 2주, 주가 영향 이슈):</strong><br>"
         f"{html_body}"
         "</p>"
     )
 
     return earnings_html + earnings_metric_html + news_html
-
-
-
 
 
 # =========================
