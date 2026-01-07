@@ -26,3 +26,6 @@ deep-translator>=1.11.4
 
 # OpenAI 최신 API
 openai>=1.12.0
+
+# 환경 변수 로딩
+python-dotenv
