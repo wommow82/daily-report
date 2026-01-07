@@ -1,0 +1,44 @@
+name: Identification Expiry Notifier
+
+on:
+  # 매일/주기적으로 자동 실행하고 싶으면 아래 주석을 해제하고 cron 조정
+  # 예: 매일 15:10 UTC (앨버타 겨울 08:10 근처)
+  # schedule:
+  #   - cron: '10 15 * * *'
+  workflow_dispatch: {}     # 수동 실행
+
+jobs:
+  notify-id-expiry:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          # requirements.txt에 gspread, pandas, python-dotenv 등 포함되어 있다고 가정
+          pip install -r requirements.txt
+
+      - name: Run identification expiry notifier
+        env:
+          IDENT_SHEET_ID: ${{ secrets.IDENT_SHEET_ID }}
+          # 워크시트 이름이 기본 'IDs'이면 secrets로 안 넘겨도 되지만,
+          # 필요하면 secrets 또는 env로 별도 관리 가능
+          IDENT_WORKSHEET_NAME: IDs
+
+          SMTP_HOST: ${{ secrets.SMTP_HOST }}
+          SMTP_PORT: ${{ secrets.SMTP_PORT }}
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
+
+          IDENT_SENDER_EMAIL: ${{ secrets.IDENT_SENDER_EMAIL }}
+          IDENT_ADMIN_EMAIL: ${{ secrets.IDENT_ADMIN_EMAIL }}
+        run: |
+          python identification_expiry_notifier.py
