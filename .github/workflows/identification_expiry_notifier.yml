@@ -1,11 +1,8 @@
 name: Identification Expiry Notifier
 
 on:
-  # 매일/주기적으로 자동 실행하고 싶으면 아래 주석을 해제하고 cron 조정
-  # 예: 매일 15:10 UTC (앨버타 겨울 08:10 근처)
-  # schedule:
-  #   - cron: '10 15 * * *'
-  workflow_dispatch: {}     # 수동 실행
+  workflow_dispatch: {}
+  # 필요하면 schedule도 추가
 
 jobs:
   notify-id-expiry:
@@ -23,14 +20,19 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          # requirements.txt에 gspread, pandas, python-dotenv 등 포함되어 있다고 가정
           pip install -r requirements.txt
+
+      # 🔹 여기에 새로 추가하는 단계
+      - name: Setup gspread service account
+        env:
+          GSPREAD_SERVICE_ACCOUNT_JSON: ${{ secrets.GSPREAD_SERVICE_ACCOUNT_JSON }}
+        run: |
+          mkdir -p ~/.config/gspread
+          echo "$GSPREAD_SERVICE_ACCOUNT_JSON" > ~/.config/gspread/service_account.json
 
       - name: Run identification expiry notifier
         env:
           IDENT_SHEET_ID: ${{ secrets.IDENT_SHEET_ID }}
-          # 워크시트 이름이 기본 'IDs'이면 secrets로 안 넘겨도 되지만,
-          # 필요하면 secrets 또는 env로 별도 관리 가능
           IDENT_WORKSHEET_NAME: IDs
 
           SMTP_HOST: ${{ secrets.SMTP_HOST }}
