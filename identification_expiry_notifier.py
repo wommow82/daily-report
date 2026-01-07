@@ -1,5 +1,7 @@
 import os
 import datetime as dt
+import json
+from google.oauth2.service_account import Credentials
 from typing import Dict
 
 import pandas as pd
@@ -41,15 +43,23 @@ def load_env():
 
     return config
 
-
 def get_gsheet_client():
     """
-    gspread 인증:
-    - 기존 포트폴리오 코드처럼 service_account.json을 사용한다는 가정.
-    - 다른 방식(예: OAuth) 쓰고 있으면 그 방식 그대로 맞춰도 됨.
+    우선 환경변수 GSPREAD_SERVICE_ACCOUNT_JSON에서 JSON을 읽어서 인증을 시도하고,
+    없으면 기존처럼 gspread.service_account()를 사용.
     """
-    client = gspread.service_account()  # repo 루트에 service_account.json 필요
-    return client
+    sa_json = os.getenv("GSPREAD_SERVICE_ACCOUNT_JSON")
+
+    if sa_json:
+        # GitHub Secret에 저장된 JSON 문자열을 파싱
+        info = json.loads(sa_json)
+        # gspread가 제공하는 from_dict 사용
+        client = gspread.service_account_from_dict(info)
+        return client
+    else:
+        # 로컬 실행 등에서 ~/.config/gspread/service_account.json을 쓰고 싶을 때
+        return gspread.service_account()
+
 
 
 # ======================
