@@ -137,7 +137,7 @@ def find_ids_to_alert(df_ids: pd.DataFrame, today: dt.date) -> pd.DataFrame:
 # 5) Email
 # ======================
 
-def build_personal_alert_html(person_name: str, df_person: pd.DataFrame, today: dt.date) -> str:
+def build_personal_alert_html(df_person: pd.DataFrame, today: dt.date) -> str:
     """
     Korean template per request.
     Output columns: IDType, Country, ExpiryDate, DaysToExpiry
