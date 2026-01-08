@@ -1,75 +1,105 @@
+from __future__ import annotations
+
 import os
-import datetime as dt
 import json
-from google.oauth2.service_account import Credentials
-from typing import Dict
+import smtplib
+import datetime as dt
+from typing import Dict, Tuple, List, Optional
 
 import pandas as pd
 import gspread
 from dotenv import load_dotenv
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
-import smtplib
+
+try:
+    from zoneinfo import ZoneInfo  # Python 3.9+
+except Exception:  # pragma: no cover
+    ZoneInfo = None  # type: ignore
 
 
 # ======================
-# 1. 환경 변수 로드
+# 1) Environment
 # ======================
 
-def load_env():
-    """
-    IDENT_SHEET_ID:      Google Sheet ID (identification_alert 파일)
-    IDENT_WORKSHEET_NAME: 워크시트 이름 (기본값: IDs)
-    SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASSWORD: 이메일 SMTP 설정
-    IDENT_SENDER_EMAIL:  발신자 이메일
-    IDENT_ADMIN_EMAIL:   에러/요약 수신용 (선택)
-    """
+def load_env() -> Dict[str, object]:
+    """Load env vars (supports local .env via python-dotenv)."""
     load_dotenv()
 
-    config = {
+    cfg: Dict[str, object] = {
         "spreadsheet_id": os.getenv("IDENT_SHEET_ID"),
         "worksheet_name": os.getenv("IDENT_WORKSHEET_NAME", "IDs"),
+        "timezone": os.getenv("IDENT_TIMEZONE", "America/Edmonton"),
         "smtp_host": os.getenv("SMTP_HOST"),
         "smtp_port": int(os.getenv("SMTP_PORT", "587")),
         "smtp_user": os.getenv("SMTP_USER"),
         "smtp_password": os.getenv("SMTP_PASSWORD"),
         "sender_email": os.getenv("IDENT_SENDER_EMAIL"),
         "admin_email": os.getenv("IDENT_ADMIN_EMAIL"),  # optional
+        "sa_json": os.getenv("GSPREAD_SERVICE_ACCOUNT_JSON"),  # recommended
     }
 
-    missing = [k for k, v in config.items() if v is None and k not in ("admin_email",)]
+    required = ["spreadsheet_id", "smtp_host", "smtp_user", "smtp_password", "sender_email"]
+    missing = [k for k in required if not cfg.get(k)]
     if missing:
-        raise RuntimeError(f"Missing environment variables: {missing}")
+        raise RuntimeError(f"Missing required environment variables: {missing}")
 
-    return config
+    return cfg
 
-def get_gsheet_client():
+
+def get_today_local(tz_name: str) -> dt.date:
+    """Return local date using IANA timezone (fallback to dt.date.today())."""
+    if ZoneInfo is None:
+        return dt.date.today()
+    try:
+        return dt.datetime.now(ZoneInfo(tz_name)).date()
+    except Exception:
+        # If timezone string is invalid, degrade gracefully
+        return dt.date.today()
+
+
+# ======================
+# 2) Google Sheets Auth
+# ======================
+
+def get_gsheet_client(sa_json: Optional[str] = None) -> gspread.client.Client:
     """
-    우선 환경변수 GSPREAD_SERVICE_ACCOUNT_JSON에서 JSON을 읽어서 인증을 시도하고,
-    없으면 기존처럼 gspread.service_account()를 사용.
+    Preferred: use env var GSPREAD_SERVICE_ACCOUNT_JSON (string content of the JSON key).
+    Fallback: gspread.service_account() which reads ~/.config/gspread/service_account.json.
     """
-    sa_json = os.getenv("GSPREAD_SERVICE_ACCOUNT_JSON")
-
     if sa_json:
-        # GitHub Secret에 저장된 JSON 문자열을 파싱
         info = json.loads(sa_json)
-        # gspread가 제공하는 from_dict 사용
-        client = gspread.service_account_from_dict(info)
-        return client
-    else:
-        # 로컬 실행 등에서 ~/.config/gspread/service_account.json을 쓰고 싶을 때
-        return gspread.service_account()
-
+        return gspread.service_account_from_dict(info)
+    return gspread.service_account()
 
 
 # ======================
-# 2. Sheet → DataFrame
+# 3) Sheet -> DataFrame
 # ======================
 
-def load_identifications_df(spreadsheet_id: str, worksheet_name: str, client: gspread.client.Client):
+EXPECTED_COLUMNS = [
+    "PersonName",
+    "PersonEmail",
+    "IDType",
+    "IDNumber",
+    "Country",
+    "Issuer",
+    "ExpiryDate",
+    "AlertDaysBefore",
+    "Active",
+    "LastAlertDate",
+    "Notes",
+]
+
+
+def load_identifications_df(
+    spreadsheet_id: str,
+    worksheet_name: str,
+    client: gspread.client.Client,
+) -> Tuple[pd.DataFrame, gspread.Worksheet]:
     """
-    Google Sheet에서 전체 데이터를 읽어 DataFrame으로 변환.
-    Row 번호를 저장해서 나중에 LastAlertDate 업데이트에 사용.
+    Read worksheet values into a DataFrame and return (df, worksheet).
+    Adds RowNumber for later updates.
     """
     sh = client.open_by_key(spreadsheet_id)
     ws = sh.worksheet(worksheet_name)
@@ -82,209 +112,191 @@ def load_identifications_df(spreadsheet_id: str, worksheet_name: str, client: gs
     data_rows = rows[1:]
 
     records = []
-    # 1행이 header이므로 실제 데이터는 2행부터 시작
-    for idx, row in enumerate(data_rows, start=2):
+    for idx, row in enumerate(data_rows, start=2):  # header at row 1
         rec = {col: (row[i] if i < len(row) else "") for i, col in enumerate(header)}
         rec["RowNumber"] = idx
         records.append(rec)
 
     df = pd.DataFrame(records)
 
-    # 필요한 컬럼이 Sheet에 아직 없을 가능성 대비
-    for col in [
-        "PersonName",
-        "PersonEmail",
-        "IDType",
-        "IDNumber",
-        "Country",
-        "Issuer",
-        "ExpiryDate",
-        "AlertDaysBefore",
-        "Active",
-        "LastAlertDate",
-        "Notes",
-    ]:
+    # Ensure expected columns exist even if user hasn't added them yet
+    for col in EXPECTED_COLUMNS:
         if col not in df.columns:
             df[col] = ""
 
-    # 타입 변환
+    # Parse & normalize types
     df["ExpiryDate"] = pd.to_datetime(df["ExpiryDate"], errors="coerce").dt.date
     df["AlertDaysBefore"] = pd.to_numeric(df["AlertDaysBefore"], errors="coerce").fillna(0).astype(int)
-    df["Active"] = df["Active"].astype(str).str.strip().str.upper().isin(["TRUE", "1", "Y", "YES"])
+
+    # Accept TRUE/true/1/yes/y
+    df["Active"] = (
+        df["Active"]
+        .astype(str)
+        .str.strip()
+        .str.upper()
+        .isin(["TRUE", "1", "Y", "YES"])
+    )
+
     df["LastAlertDate"] = pd.to_datetime(df["LastAlertDate"], errors="coerce").dt.date
 
     return df, ws
 
 
-# ==========================
-# 3. 알림 대상 필터링
-# ==========================
+# ======================
+# 4) Alert Logic
+# ======================
 
 def find_ids_to_alert(df_ids: pd.DataFrame, today: dt.date) -> pd.DataFrame:
+    """
+    Alert criteria per row:
+      - Active is True
+      - ExpiryDate exists
+      - 0 <= DaysToExpiry <= AlertDaysBefore
+      - LastAlertDate is empty OR LastAlertDate < today
+      - PersonEmail contains '@'
+    """
     df = df_ids.copy()
 
-    # ExpiryDate가 있고 Active인 항목만
-    df = df[df["ExpiryDate"].notna() & df["Active"]]
+    # Active + has expiry date
+    df = df[df["Active"] & df["ExpiryDate"].notna()].copy()
+    if df.empty:
+        return df
 
     df["DaysToExpiry"] = (df["ExpiryDate"] - today).apply(lambda x: x.days)
 
-    # 조건:
-    #   0 <= DaysToExpiry <= AlertDaysBefore
-    #   LastAlertDate가 없거나, today보다 이전
     cond_in_window = (df["DaysToExpiry"] >= 0) & (df["DaysToExpiry"] <= df["AlertDaysBefore"])
     cond_not_alerted_today = df["LastAlertDate"].isna() | (df["LastAlertDate"] < today)
 
-    df_alerts = df[cond_in_window & cond_not_alerted_today].copy()
+    df = df[cond_in_window & cond_not_alerted_today].copy()
 
-    # PersonEmail 없는 행은 제외
-    df_alerts = df_alerts[df_alerts["PersonEmail"].astype(str).str.contains("@")]
+    # Require a plausible email
+    df = df[df["PersonEmail"].astype(str).str.contains("@", na=False)]
 
-    return df_alerts
+    return df
 
 
-# ==========================
-# 4. 사람별 이메일 HTML 생성
-# ==========================
+# ======================
+# 5) Email
+# ======================
 
 def build_personal_alert_html(person_name: str, df_person: pd.DataFrame, today: dt.date) -> str:
-    """
-    한 사람(PersonName/PersonEmail)에 대한 알림 HTML 본문.
-    """
     rows_html = []
     for _, r in df_person.iterrows():
-        id_type = r.get("IDType", "")
-        id_number = r.get("IDNumber", "")
-        country = r.get("Country", "")
-        issuer = r.get("Issuer", "")
         expiry = r.get("ExpiryDate")
-        days_to_expiry = r.get("DaysToExpiry")
-        notes = r.get("Notes", "")
-
         expiry_str = expiry.strftime("%Y-%m-%d") if isinstance(expiry, dt.date) else ""
-
-        row_html = f"""
-        <tr>
-            <td>{id_type}</td>
-            <td>{id_number}</td>
-            <td>{country}</td>
-            <td>{issuer}</td>
-            <td>{expiry_str}</td>
-            <td>{days_to_expiry}</td>
-            <td>{notes}</td>
-        </tr>
-        """
-        rows_html.append(row_html)
-
-    table_html = f"""
-    <p>Hi {person_name},</p>
-    <p>The following identification(s) are approaching their expiry date as of {today.strftime("%Y-%m-%d")}:</p>
-    <table border="1" cellspacing="0" cellpadding="4">
-        <thead>
+        rows_html.append(
+            f"""
             <tr>
-                <th>ID Type</th>
-                <th>ID Number</th>
-                <th>Country</th>
-                <th>Issuer</th>
-                <th>Expiry Date</th>
-                <th>Days to Expiry</th>
-                <th>Notes</th>
+              <td>{r.get("IDType","")}</td>
+              <td>{r.get("IDNumber","")}</td>
+              <td>{r.get("Country","")}</td>
+              <td>{r.get("Issuer","")}</td>
+              <td>{expiry_str}</td>
+              <td>{r.get("DaysToExpiry","")}</td>
+              <td>{r.get("Notes","")}</td>
             </tr>
-        </thead>
-        <tbody>
-            {''.join(rows_html)}
-        </tbody>
+            """
+        )
+
+    html = f"""
+    <p>Hi {person_name},</p>
+    <p>The following identification(s) are approaching their expiry date as of <b>{today.strftime('%Y-%m-%d')}</b>:</p>
+
+    <table border="1" cellspacing="0" cellpadding="6">
+      <thead>
+        <tr>
+          <th>ID Type</th>
+          <th>ID Number</th>
+          <th>Country</th>
+          <th>Issuer</th>
+          <th>Expiry Date</th>
+          <th>Days to Expiry</th>
+          <th>Notes</th>
+        </tr>
+      </thead>
+      <tbody>
+        {''.join(rows_html)}
+      </tbody>
     </table>
+
     <p>Please review and renew them if necessary.</p>
     """
+    return html
 
-    return table_html
 
-
-# ==========================
-# 5. 이메일 발송
-# ==========================
-
-def send_html_email(smtp_conf: Dict, to_email: str, subject: str, html_body: str):
+def send_html_email(smtp_conf: Dict[str, object], to_email: str, subject: str, html_body: str) -> None:
     msg = MIMEMultipart("alternative")
     msg["Subject"] = subject
-    msg["From"] = smtp_conf["sender_email"]
+    msg["From"] = str(smtp_conf["sender_email"])
     msg["To"] = to_email
+    msg.attach(MIMEText(html_body, "html"))
 
-    part_html = MIMEText(html_body, "html")
-    msg.attach(part_html)
+    host = str(smtp_conf["smtp_host"])
+    port = int(smtp_conf["smtp_port"])
+    user = str(smtp_conf["smtp_user"])
+    password = str(smtp_conf["smtp_password"])
 
-    with smtplib.SMTP(smtp_conf["smtp_host"], smtp_conf["smtp_port"]) as server:
+    with smtplib.SMTP(host, port, timeout=30) as server:
+        server.ehlo()
         server.starttls()
-        server.login(smtp_conf["smtp_user"], smtp_conf["smtp_password"])
-        server.sendmail(smtp_conf["sender_email"], [to_email], msg.as_string())
+        server.ehlo()
+        server.login(user, password)
+        server.sendmail(msg["From"], [to_email], msg.as_string())
 
 
-# ==========================
-# 6. Sheet에서 LastAlertDate 업데이트
-# ==========================
+# ======================
+# 6) Sheet Update
+# ======================
 
-def update_last_alert_dates(ws: gspread.Worksheet, df_alerts: pd.DataFrame, today: dt.date):
+def update_last_alert_dates(ws: gspread.Worksheet, df_sent: pd.DataFrame, today: dt.date) -> None:
     """
-    실제로 메일 발송이 완료된 row들에 대해 LastAlertDate를 today로 업데이트.
+    Update LastAlertDate for sent rows.
+    Uses per-cell update for simplicity (small volumes). Can be batched later if needed.
     """
-    if df_alerts.empty:
+    if df_sent.empty:
         return
 
     header = ws.row_values(1)
-    try:
-        col_idx = header.index("LastAlertDate") + 1  # 1-based index
-    except ValueError:
+    if "LastAlertDate" not in header:
         raise RuntimeError("LastAlertDate column not found in sheet header")
 
-    for _, row in df_alerts.iterrows():
-        row_number = int(row["RowNumber"])
-        ws.update_cell(row_number, col_idx, today.strftime("%Y-%m-%d"))
+    col_idx = header.index("LastAlertDate") + 1  # 1-based
+    for _, row in df_sent.iterrows():
+        ws.update_cell(int(row["RowNumber"]), col_idx, today.strftime("%Y-%m-%d"))
 
 
-# ==========================
-# 7. main 오케스트레이션
-# ==========================
+# ======================
+# 7) Main
+# ======================
 
-def main():
-    today = dt.date.today()
-    config = load_env()
+def main() -> None:
+    cfg = load_env()
+    today = get_today_local(str(cfg["timezone"]))
 
     smtp_conf = {
-        "smtp_host": config["smtp_host"],
-        "smtp_port": config["smtp_port"],
-        "smtp_user": config["smtp_user"],
-        "smtp_password": config["smtp_password"],
-        "sender_email": config["sender_email"],
+        "smtp_host": cfg["smtp_host"],
+        "smtp_port": cfg["smtp_port"],
+        "smtp_user": cfg["smtp_user"],
+        "smtp_password": cfg["smtp_password"],
+        "sender_email": cfg["sender_email"],
     }
 
-    try:
-        client = get_gsheet_client()
-        df_ids, ws = load_identifications_df(
-            config["spreadsheet_id"],
-            config["worksheet_name"],
-            client,
-        )
-    except Exception as e:
-        # 초기 로딩 단계에서 실패하면 admin_email로 에러 통지(선택)
-        if config.get("admin_email"):
-            err_html = f"<p>ID expiry notifier failed:</p><pre>{e}</pre>"
-            try:
-                send_html_email(
-                    smtp_conf,
-                    config["admin_email"],
-                    "[ID Expiry Notifier] ERROR",
-                    err_html,
-                )
-            except Exception:
-                pass
-        raise
+    # Load sheet
+    sa_json = cfg.get("sa_json")
+    client = get_gsheet_client(sa_json=str(sa_json) if sa_json else None)
+    df_ids, ws = load_identifications_df(
+        spreadsheet_id=str(cfg["spreadsheet_id"]),
+        worksheet_name=str(cfg["worksheet_name"]),
+        client=client,
+    )
 
     df_alerts = find_ids_to_alert(df_ids, today)
 
+    # Minimal run logs (safe)
     print("TODAY:", today)
     print("TOTAL ROWS:", len(df_ids))
     print("ALERT ROWS:", len(df_alerts))
-    
+
     if not df_alerts.empty:
         print("RECIPIENTS:", df_alerts["PersonEmail"].unique().tolist())
         print(
@@ -300,42 +312,55 @@ def main():
                 ]
             ].to_string(index=False)
         )
-    
+
     if df_alerts.empty:
         print("NO ALERTS TODAY — exiting")
         return
 
+    # Group by person and send one email per person
+    sent_rows: List[pd.DataFrame] = []
+    failures: List[str] = []
 
-    # 사람별로 묶어서 한 사람당 1통
-    grouped = df_alerts.groupby(["PersonName", "PersonEmail"])
+    grouped = df_alerts.groupby(["PersonName", "PersonEmail"], dropna=False)
+
     for (person_name, person_email), df_person in grouped:
-        html_body = build_personal_alert_html(person_name, df_person, today)
+        person_name = str(person_name) if person_name not in (None, "", "nan") else "there"
+        person_email = str(person_email)
+
         subject = "[ID Expiry Notice] Identification expiry approaching"
+        html_body = build_personal_alert_html(person_name, df_person, today)
 
         try:
             send_html_email(smtp_conf, person_email, subject, html_body)
             sent_rows.append(df_person)
+            print(f"[SENT] {person_email} ({len(df_person)} item(s))")
         except Exception as e:
-            # 특정 수신자에게 실패한 경우 admin_email로 통지 가능
-            if config.get("admin_email"):
-                err_html = (
-                    f"<p>Failed to send ID expiry email to {person_email}:</p>"
-                    f"<pre>{e}</pre>"
-                )
+            msg = f"Failed to send to {person_email}: {e}"
+            print("[ERROR]", msg)
+            failures.append(msg)
+
+            # Optionally notify admin (best-effort)
+            admin = cfg.get("admin_email")
+            if admin:
                 try:
                     send_html_email(
                         smtp_conf,
-                        config["admin_email"],
+                        str(admin),
                         "[ID Expiry Notifier] Send Error",
-                        err_html,
+                        f"<p>{msg}</p>",
                     )
                 except Exception:
                     pass
 
-    # 실제로 발송 성공한 row들에 대해서만 LastAlertDate 업데이트
+    # Update LastAlertDate only for successes
     if sent_rows:
         df_sent = pd.concat(sent_rows, ignore_index=True)
         update_last_alert_dates(ws, df_sent, today)
+        print(f"[UPDATED] LastAlertDate updated for {len(df_sent)} row(s)")
+
+    # If any failures occurred, raise so GitHub Actions shows a failure
+    if failures:
+        raise RuntimeError("Email send failures:\n" + "\n".join(failures))
 
 
 if __name__ == "__main__":
