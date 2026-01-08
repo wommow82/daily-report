@@ -81,14 +81,11 @@ EXPECTED_COLUMNS = [
     "PersonName",
     "PersonEmail",
     "IDType",
-    "IDNumber",
     "Country",
-    "Issuer",
     "ExpiryDate",
     "AlertDaysBefore",
     "Active",
     "LastAlertDate",
-    "Notes",
 ]
 
 
@@ -179,7 +176,13 @@ def find_ids_to_alert(df_ids: pd.DataFrame, today: dt.date) -> pd.DataFrame:
 # 5) Email
 # ======================
 
-def build_personal_alert_html(person_name: str, df_person: pd.DataFrame, today: dt.date) -> str:
+def build_personal_alert_html(df_person: pd.DataFrame, today: dt.date) -> str:
+    """
+    Korean template per request.
+    Output columns: IDType, Country, ExpiryDate, DaysToExpiry
+    """
+    today_str = today.strftime("%Y-%m-%d")
+
     rows_html = []
     for _, r in df_person.iterrows():
         expiry = r.get("ExpiryDate")
@@ -188,30 +191,24 @@ def build_personal_alert_html(person_name: str, df_person: pd.DataFrame, today: 
             f"""
             <tr>
               <td>{r.get("IDType","")}</td>
-              <td>{r.get("IDNumber","")}</td>
               <td>{r.get("Country","")}</td>
-              <td>{r.get("Issuer","")}</td>
               <td>{expiry_str}</td>
               <td>{r.get("DaysToExpiry","")}</td>
-              <td>{r.get("Notes","")}</td>
             </tr>
             """
         )
 
     html = f"""
     <p>알려드립니다.</p>
-    <p>다음 신분증이 <b>{today.strftime('%Y-%m-%d')}</b> 기준으로 만료일이 임박했습니다:</p>
+    <p>다음 신분증이 <b>{today_str}</b> 기준으로 만료일이 임박했습니다:</p>
 
     <table border="1" cellspacing="0" cellpadding="6">
       <thead>
         <tr>
-          <th>ID Type</th>
-          <th>ID Number</th>
-          <th>Country</th>
-          <th>Issuer</th>
-          <th>Expiry Date</th>
-          <th>Days to Expiry</th>
-          <th>Notes</th>
+          <th>신분증 종류</th>
+          <th>국가</th>
+          <th>만료일</th>
+          <th>만료까지(일)</th>
         </tr>
       </thead>
       <tbody>
@@ -222,6 +219,7 @@ def build_personal_alert_html(person_name: str, df_person: pd.DataFrame, today: 
     <p>확인후 RENEW 하시기 바랍니다.</p>
     """
     return html
+
 
 
 def send_html_email(smtp_conf: Dict[str, object], to_email: str, subject: str, html_body: str) -> None:
@@ -327,7 +325,7 @@ def main() -> None:
         person_name = str(person_name) if person_name not in (None, "", "nan") else "there"
         person_email = str(person_email)
 
-        subject = "[ID Expiry Notice] Identification expiry approaching"
+        subject = "[신분증 만료 임박 알림]"
         html_body = build_personal_alert_html(person_name, df_person, today)
 
         try:
