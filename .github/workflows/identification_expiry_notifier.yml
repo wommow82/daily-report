@@ -1,46 +1,60 @@
 name: Identification Expiry Notifier
 
 on:
-  workflow_dispatch: {}
-  # 필요하면 schedule도 추가
+  # 수동 실행
+  workflow_dispatch:
+
+  # (선택) 매일 자동 실행 – 필요 없으면 이 블록 전체 삭제 가능
+  schedule:
+    - cron: "0 14 * * *"   # UTC 기준 14:00 → 캐나다 산지 기준 오전 7시(서머타임 고려)
 
 jobs:
-  notify-id-expiry:
+  notify:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout
+      # 1) 저장소 체크아웃
+      - name: Checkout repository
         uses: actions/checkout@v4
 
+      # 2) Python 세팅
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
+      # 3) 의존성 설치
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          pip install \
+            pandas \
+            gspread \
+            oauth2client \
+            python-dotenv
 
-      # 🔹 여기에 새로 추가하는 단계
-      - name: Setup gspread service account
-        env:
-          GSPREAD_SERVICE_ACCOUNT_JSON: ${{ secrets.GSPREAD_SERVICE_ACCOUNT_JSON }}
-        run: |
-          mkdir -p ~/.config/gspread
-          echo "$GSPREAD_SERVICE_ACCOUNT_JSON" > ~/.config/gspread/service_account.json
-
+      # 4) ID 만료 알림 스크립트 실행
       - name: Run identification expiry notifier
         env:
+          # ===== Google Sheet =====
           IDENT_SHEET_ID: ${{ secrets.IDENT_SHEET_ID }}
           IDENT_WORKSHEET_NAME: IDs
 
+          # ===== Timezone (선택) =====
+          IDENT_TIMEZONE: America/Edmonton
+
+          # ===== Google Service Account JSON =====
+          GSPREAD_SERVICE_ACCOUNT_JSON: ${{ secrets.GSPREAD_SERVICE_ACCOUNT_JSON }}
+
+          # ===== SMTP / Email =====
           SMTP_HOST: ${{ secrets.SMTP_HOST }}
           SMTP_PORT: ${{ secrets.SMTP_PORT }}
           SMTP_USER: ${{ secrets.SMTP_USER }}
           SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
-
           IDENT_SENDER_EMAIL: ${{ secrets.IDENT_SENDER_EMAIL }}
+
+          # (선택) 관리자 알림 메일
           IDENT_ADMIN_EMAIL: ${{ secrets.IDENT_ADMIN_EMAIL }}
+
         run: |
           python identification_expiry_notifier.py
