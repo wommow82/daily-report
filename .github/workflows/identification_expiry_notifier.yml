@@ -55,6 +55,8 @@ jobs:
 
           # (선택) 관리자 알림 메일
           IDENT_ADMIN_EMAIL: ${{ secrets.IDENT_ADMIN_EMAIL }}
+          # 복수 관리자 알림 메일
+          IDENT_ALERT_RECIPIENTS: ${{ secrets.IDENT_ALERT_RECIPIENTS }}
 
         run: |
           python identification_expiry_notifier.py
