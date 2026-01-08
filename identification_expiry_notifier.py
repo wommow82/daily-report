@@ -22,71 +22,27 @@ except Exception:  # pragma: no cover
 # 1) Environment
 # ======================
 
-def load_env() -> dict:
-    """
-    Load and validate environment variables for Identification Expiry Notifier.
-    """
-
-    from dotenv import load_dotenv
-    import os
-
+def load_env() -> Dict[str, object]:
+    """Load env vars (supports local .env via python-dotenv)."""
     load_dotenv()
 
-    cfg = {
-        # Google Sheet
+    cfg: Dict[str, object] = {
         "spreadsheet_id": os.getenv("IDENT_SHEET_ID"),
         "worksheet_name": os.getenv("IDENT_WORKSHEET_NAME", "IDs"),
-
-        # Timezone (Calgary default)
         "timezone": os.getenv("IDENT_TIMEZONE", "America/Edmonton"),
-
-        # Google Service Account
-        "sa_json": os.getenv("GSPREAD_SERVICE_ACCOUNT_JSON"),
-
-        # SMTP / Email
         "smtp_host": os.getenv("SMTP_HOST"),
         "smtp_port": int(os.getenv("SMTP_PORT", "587")),
         "smtp_user": os.getenv("SMTP_USER"),
         "smtp_password": os.getenv("SMTP_PASSWORD"),
         "sender_email": os.getenv("IDENT_SENDER_EMAIL"),
-
-        # Alert recipients (comma-separated)
-        "alert_recipients": os.getenv("IDENT_ALERT_RECIPIENTS", ""),
-
-        # Optional admin email (error reporting)
-        "admin_email": os.getenv("IDENT_ADMIN_EMAIL"),
+        "admin_email": os.getenv("IDENT_ADMIN_EMAIL"),  # optional
+        "sa_json": os.getenv("GSPREAD_SERVICE_ACCOUNT_JSON"),  # recommended
     }
 
-    # Required checks
-    required_keys = [
-        "spreadsheet_id",
-        "smtp_host",
-        "smtp_user",
-        "smtp_password",
-        "sender_email",
-        "alert_recipients",
-    ]
-
-    missing = [k for k in required_keys if not cfg.get(k)]
+    required = ["spreadsheet_id", "smtp_host", "smtp_user", "smtp_password", "sender_email"]
+    missing = [k for k in required if not cfg.get(k)]
     if missing:
-        raise RuntimeError(
-            f"Missing required environment variables: {missing}"
-        )
-
-    # Normalize alert recipients → list[str]
-    recipients = [
-        e.strip()
-        for e in cfg["alert_recipients"].split(",")
-        if e.strip()
-    ]
-
-    if not recipients:
-        raise RuntimeError(
-            "IDENT_ALERT_RECIPIENTS is empty. "
-            "Example: a@gmail.com,b@gmail.com"
-        )
-
-    cfg["alert_recipients"] = recipients
+        raise RuntimeError(f"Missing required environment variables: {missing}")
 
     return cfg
 
@@ -125,11 +81,14 @@ EXPECTED_COLUMNS = [
     "PersonName",
     "PersonEmail",
     "IDType",
+    "IDNumber",
     "Country",
+    "Issuer",
     "ExpiryDate",
     "AlertDaysBefore",
     "Active",
     "LastAlertDate",
+    "Notes",
 ]
 
 
@@ -221,17 +180,67 @@ def find_ids_to_alert(df_ids: pd.DataFrame, today: dt.date) -> pd.DataFrame:
 # ======================
 
 def build_personal_alert_html(person_name: str, df_person: pd.DataFrame, today: dt.date) -> str:
+    rows_html = []
+    for _, r in df_person.iterrows():
+        expiry = r.get("ExpiryDate")
+        expiry_str = expiry.strftime("%Y-%m-%d") if isinstance(expiry, dt.date) else ""
+        rows_html.append(
+            f"""
+            <tr>
+              <td>{r.get("IDType","")}</td>
+              <td>{r.get("IDNumber","")}</td>
+              <td>{r.get("Country","")}</td>
+              <td>{r.get("Issuer","")}</td>
+              <td>{expiry_str}</td>
+              <td>{r.get("DaysToExpiry","")}</td>
+              <td>{r.get("Notes","")}</td>
+            </tr>
+            """
+        )
+
+    html = f"""
+    <p>Hi {person_name},</p>
+    <p>The following identification(s) are approaching their expiry date as of <b>{today.strftime('%Y-%m-%d')}</b>:</p>
+
+    <table border="1" cellspacing="0" cellpadding="6">
+      <thead>
+        <tr>
+          <th>ID Type</th>
+          <th>ID Number</th>
+          <th>Country</th>
+          <th>Issuer</th>
+          <th>Expiry Date</th>
+          <th>Days to Expiry</th>
+          <th>Notes</th>
+        </tr>
+      </thead>
+      <tbody>
+        {''.join(rows_html)}
+      </tbody>
+    </table>
+
+    <p>Please review and renew them if necessary.</p>
+    """
+    return html
+
+
+def build_all_alerts_html(df_alerts: pd.DataFrame, today: dt.date) -> str:
+    """
+    Build a single Korean alert email for all rows in df_alerts, including PersonName per row.
+    Intended for sending the same consolidated alert to fixed recipient list(s),
+    independent of PersonEmail in the sheet.
+    """
     today_str = today.strftime("%Y-%m-%d")
 
     rows_html = []
-    for _, r in df_person.iterrows():
+    for _, r in df_alerts.iterrows():
         expiry = r.get("ExpiryDate")
         expiry_str = expiry.strftime("%Y-%m-%d") if isinstance(expiry, dt.date) else ""
 
         rows_html.append(
             f"""
             <tr>
-              <td>{person_name}</td>
+              <td>{r.get("PersonName","")}</td>
               <td>{r.get("IDType","")}</td>
               <td>{r.get("Country","")}</td>
               <td>{expiry_str}</td>
@@ -241,7 +250,6 @@ def build_personal_alert_html(person_name: str, df_person: pd.DataFrame, today: 
         )
 
     html = f"""
-    <p><b>{person_name}</b>님,</p>
     <p>알려드립니다.</p>
     <p>다음 신분증이 <b>{today_str}</b> 기준으로 만료일이 임박했습니다:</p>
 
@@ -263,8 +271,6 @@ def build_personal_alert_html(person_name: str, df_person: pd.DataFrame, today: 
     <p>확인후 RENEW 하시기 바랍니다.</p>
     """
     return html
-
-
 
 def send_html_email(smtp_conf: Dict[str, object], to_email: str, subject: str, html_body: str) -> None:
     msg = MIMEMultipart("alternative")
@@ -363,40 +369,13 @@ def main() -> None:
     sent_rows: List[pd.DataFrame] = []
     failures: List[str] = []
 
-    # 1) 고정 수신자 2명(또는 N명) 파싱
-    recipients = [e.strip() for e in str(cfg.get("alert_recipients", "")).split(",") if e.strip()]
-    if not recipients:
-        raise RuntimeError("IDENT_ALERT_RECIPIENTS is empty. Set it like: a@a.com,b@b.com")
-    
-    # 2) 전체 알림 대상 테이블(이름 포함) HTML 생성
-    subject = "[신분증 만료 임박 알림]"
-    html_body = build_all_alerts_html(df_alerts, today)  # 아래 함수 추가 필요
-    
-    # 3) recipients 모두에게 발송
-    sent_to = []
-    failures = []
-    
-    for to_email in recipients:
-        try:
-            send_html_email(smtp_conf, to_email, subject, html_body)
-            sent_to.append(to_email)
-            print(f"[SENT] {to_email} ({len(df_alerts)} item(s))")
-        except Exception as e:
-            msg = f"Failed to send to {to_email}: {e}"
-            print("[ERROR]", msg)
-            failures.append(msg)
-    
-    # 4) 발송이 1명 이상 성공하면 LastAlertDate 업데이트(권장 정책)
-    if sent_to:
-        update_last_alert_dates(ws, df_alerts, today)
-        print(f"[UPDATED] LastAlertDate updated for {len(df_alerts)} row(s)")
-    
-    # 5) 모두 실패하면 실패로 처리
-    if len(sent_to) == 0 and failures:
-        raise RuntimeError("All recipient sends failed:\n" + "\n".join(failures))
+    grouped = df_alerts.groupby(["PersonName", "PersonEmail"], dropna=False)
 
+    for (person_name, person_email), df_person in grouped:
+        person_name = str(person_name) if person_name not in (None, "", "nan") else "there"
+        person_email = str(person_email)
 
-        subject = "[신분증 만료 임박 알림]"
+        subject = "[ID Expiry Notice] Identification expiry approaching"
         html_body = build_personal_alert_html(person_name, df_person, today)
 
         try:
