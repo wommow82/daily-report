@@ -177,19 +177,17 @@ def find_ids_to_alert(df_ids: pd.DataFrame, today: dt.date) -> pd.DataFrame:
 # ======================
 
 def build_personal_alert_html(person_name: str, df_person: pd.DataFrame, today: dt.date) -> str:
-    """
-    Korean template per request.
-    Output columns: IDType, Country, ExpiryDate, DaysToExpiry
-    """
     today_str = today.strftime("%Y-%m-%d")
 
     rows_html = []
     for _, r in df_person.iterrows():
         expiry = r.get("ExpiryDate")
         expiry_str = expiry.strftime("%Y-%m-%d") if isinstance(expiry, dt.date) else ""
+
         rows_html.append(
             f"""
             <tr>
+              <td>{person_name}</td>
               <td>{r.get("IDType","")}</td>
               <td>{r.get("Country","")}</td>
               <td>{expiry_str}</td>
@@ -199,12 +197,14 @@ def build_personal_alert_html(person_name: str, df_person: pd.DataFrame, today: 
         )
 
     html = f"""
+    <p><b>{person_name}</b>님,</p>
     <p>알려드립니다.</p>
     <p>다음 신분증이 <b>{today_str}</b> 기준으로 만료일이 임박했습니다:</p>
 
     <table border="1" cellspacing="0" cellpadding="6">
       <thead>
         <tr>
+          <th>이름</th>
           <th>신분증 종류</th>
           <th>국가</th>
           <th>만료일</th>
