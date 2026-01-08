@@ -199,8 +199,8 @@ def build_personal_alert_html(person_name: str, df_person: pd.DataFrame, today: 
         )
 
     html = f"""
-    <p>Hi {person_name},</p>
-    <p>The following identification(s) are approaching their expiry date as of <b>{today.strftime('%Y-%m-%d')}</b>:</p>
+    <p>알려드립니다.</p>
+    <p>다음 신분증이 <b>{today.strftime('%Y-%m-%d')}</b> 기준으로 만료일이 임박했습니다:</p>
 
     <table border="1" cellspacing="0" cellpadding="6">
       <thead>
@@ -219,7 +219,7 @@ def build_personal_alert_html(person_name: str, df_person: pd.DataFrame, today: 
       </tbody>
     </table>
 
-    <p>Please review and renew them if necessary.</p>
+    <p>확인후 RENEW 하시기 바랍니다.</p>
     """
     return html
 
