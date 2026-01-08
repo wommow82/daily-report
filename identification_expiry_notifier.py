@@ -280,11 +280,31 @@ def main():
         raise
 
     df_alerts = find_ids_to_alert(df_ids, today)
+
+    print("TODAY:", today)
+    print("TOTAL ROWS:", len(df_ids))
+    print("ALERT ROWS:", len(df_alerts))
+    
+    if not df_alerts.empty:
+        print("RECIPIENTS:", df_alerts["PersonEmail"].unique().tolist())
+        print(
+            df_alerts[
+                [
+                    "PersonName",
+                    "PersonEmail",
+                    "IDType",
+                    "ExpiryDate",
+                    "AlertDaysBefore",
+                    "DaysToExpiry",
+                    "LastAlertDate",
+                ]
+            ].to_string(index=False)
+        )
+    
     if df_alerts.empty:
-        # 오늘은 보낼 알림 없음
+        print("NO ALERTS TODAY — exiting")
         return
 
-    sent_rows = []
 
     # 사람별로 묶어서 한 사람당 1통
     grouped = df_alerts.groupby(["PersonName", "PersonEmail"])
