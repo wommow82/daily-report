@@ -5,8 +5,8 @@ on:
   workflow_dispatch:
 
   # (선택) 매일 자동 실행 – 필요 없으면 이 블록 전체 삭제 가능
-  schedule:
-    - cron: "0 14 * * *"   # UTC 기준 14:00 → 캐나다 산지 기준 오전 7시(서머타임 고려)
+  # schedule:
+  #   - cron: "0 14 * * *"   # UTC 기준 14:00 → 캐나다 산지 기준 오전 7시(서머타임 고려)
 
 jobs:
   notify:
