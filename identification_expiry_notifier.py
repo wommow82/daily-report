@@ -280,8 +280,8 @@ def build_personal_alert_html(df_person: pd.DataFrame, today: dt.date) -> str:
             """
         )
     html = f"""
-    <p>알려드립니다.</p>
-    <p>다음 신분증이 <b>{today_str}</b> 기준으로 만료일이 임박했습니다:</p>
+    <p>다음 신분증이 <b>{today_str}</b> 기준으로 만료일이 임박했습니다</p>
+    <p>확인후 RENEW 하시기 바랍니다.</p>
     <table border="1" cellspacing="0" cellpadding="6">
       <thead>
         <tr>
@@ -295,7 +295,6 @@ def build_personal_alert_html(df_person: pd.DataFrame, today: dt.date) -> str:
         {''.join(rows_html)}
       </tbody>
     </table>
-    <p>확인후 RENEW 하시기 바랍니다.</p>
     """
     return html
 def send_html_email(smtp_conf: Dict[str, object], to_email: str, subject: str, html_body: str) -> None:
