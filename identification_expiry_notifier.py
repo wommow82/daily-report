@@ -226,8 +226,8 @@ def build_all_alerts_html(df_alerts: pd.DataFrame, today: dt.date) -> str:
 
     html = f"""
     <div style="font-family: Arial, Helvetica, sans-serif; font-size: 14px; line-height: 1.6;">
-      <p>알려드립니다.</p>
       <p>다음 신분증이 <b>{today_str}</b> 기준으로 만료일이 임박했습니다:</p>
+      <p style="margin-top: 14px;">확인후 RENEW 하시기 바랍니다.</p>
 
       <table border="1" cellspacing="0" cellpadding="8" style="border-collapse: collapse; margin-top: 10px;">
         <thead>
@@ -244,7 +244,6 @@ def build_all_alerts_html(df_alerts: pd.DataFrame, today: dt.date) -> str:
         </tbody>
       </table>
 
-      <p style="margin-top: 14px;">확인후 RENEW 하시기 바랍니다.</p>
     </div>
     """
     return html
