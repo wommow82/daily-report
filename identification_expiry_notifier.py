@@ -196,57 +196,123 @@ def parse_emails(raw: str) -> List[str]:
 
 
 def build_all_alerts_html(df_alerts: pd.DataFrame, today: dt.date) -> str:
-    """Build ONE combined HTML email body for all alerts (Korean template)."""
+    """Build ONE combined, readable HTML email body for all alerts (Korean template)."""
     today_str = today.strftime("%Y-%m-%d")
 
     df = df_alerts.copy()
     if "DaysToExpiry" not in df.columns:
         df["DaysToExpiry"] = (df["ExpiryDate"] - today).apply(lambda x: x.days)
 
-    # Stable column order for the table (include name)
-    cols = ["PersonName", "IDType", "Country", "ExpiryDate", "DaysToExpiry"]
-    for c in cols:
+    # Ensure columns exist
+    for c in ["PersonName", "IDType", "Country", "ExpiryDate", "DaysToExpiry"]:
         if c not in df.columns:
             df[c] = ""
 
-    # Build rows
-    rows_html = []
+    # Sort by urgency, then name/type
+    try:
+        df = df.sort_values(by=["DaysToExpiry", "PersonName", "IDType"], ascending=[True, True, True])
+    except Exception:
+        pass
+
+    def esc(s: object) -> str:
+        # Minimal HTML escaping
+        t = "" if s is None else str(s)
+        return (t.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+                 .replace('"', "&quot;").replace("'", "&#39;"))
+
+    def urgency_badge(days: int) -> str:
+        # Inline badges (email-safe)
+        if days <= 7:
+            return '<span style="display:inline-block;padding:2px 8px;border-radius:999px;background:#fdecea;color:#b42318;font-weight:700;">⛔ 임박</span>'
+        if days <= 30:
+            return '<span style="display:inline-block;padding:2px 8px;border-radius:999px;background:#fff7e6;color:#b54708;font-weight:700;">⚠️ 주의</span>'
+        return '<span style="display:inline-block;padding:2px 8px;border-radius:999px;background:#ecfdf3;color:#027a48;font-weight:700;">✅ 여유</span>'
+
+    rows_html: List[str] = []
     for _, r in df.iterrows():
         expiry = r.get("ExpiryDate")
-        expiry_str = expiry.strftime("%Y-%m-%d") if hasattr(expiry, "strftime") else str(expiry or "")
+        expiry_str = expiry.strftime("%Y-%m-%d") if isinstance(expiry, dt.date) else esc(expiry or "")
+        days = r.get("DaysToExpiry")
+        try:
+            days_int = int(days)
+        except Exception:
+            days_int = 0
+
+        # Row highlight for urgent items
+        if days_int <= 7:
+            row_bg = "#fff1f2"  # light red
+        elif days_int <= 30:
+            row_bg = "#fffbeb"  # light amber
+        else:
+            row_bg = "#ffffff"
+
         rows_html.append(
-            "<tr>"
-            f"<td>{r.get('PersonName','')}</td>"
-            f"<td>{r.get('IDType','')}</td>"
-            f"<td>{r.get('Country','')}</td>"
-            f"<td>{expiry_str}</td>"
-            f"<td>{r.get('DaysToExpiry','')}</td>"
-            "</tr>"
+            f"""
+            <tr style="background:{row_bg};">
+              <td style="padding:10px 12px;border-bottom:1px solid #e5e7eb;font-weight:700;color:#111827;">{esc(r.get('PersonName',''))}</td>
+              <td style="padding:10px 12px;border-bottom:1px solid #e5e7eb;color:#111827;">{esc(r.get('IDType',''))}</td>
+              <td style="padding:10px 12px;border-bottom:1px solid #e5e7eb;color:#111827;">{esc(r.get('Country',''))}</td>
+              <td style="padding:10px 12px;border-bottom:1px solid #e5e7eb;color:#111827;">{esc(expiry_str)}</td>
+              <td style="padding:10px 12px;border-bottom:1px solid #e5e7eb;text-align:right;color:#111827;font-weight:700;">{esc(days_int)}</td>
+              <td style="padding:10px 12px;border-bottom:1px solid #e5e7eb;">{urgency_badge(days_int)}</td>
+            </tr>
+            """
         )
 
+    total = len(df)
+
     html = f"""
-    <div style="font-family: Arial, Helvetica, sans-serif; font-size: 14px; line-height: 1.6;">
-      <p>다음 신분증이 <b>{today_str}</b> 기준으로 만료일이 임박했습니다:</p>
-      <p style="margin-top: 14px;">확인후 RENEW 하시기 바랍니다.</p>
+    <div style="font-family: Arial, Helvetica, sans-serif; background:#f6f7fb; padding:24px;">
+      <div style="max-width:740px; margin:0 auto; background:#ffffff; border:1px solid #e5e7eb; border-radius:14px; overflow:hidden;">
+        <div style="padding:18px 20px; background:#111827; color:#ffffff;">
+          <div style="font-size:18px; font-weight:800;">🪪 [신분증 만료 임박 알림]</div>
+          <div style="margin-top:6px; font-size:13px; opacity:0.9;">기준일: <b>{today_str}</b></div>
+        </div>
 
-      <table border="1" cellspacing="0" cellpadding="8" style="border-collapse: collapse; margin-top: 10px;">
-        <thead>
-          <tr>
-            <th>이름</th>
-            <th>신분증 종류</th>
-            <th>국가</th>
-            <th>만료일</th>
-            <th>만료까지(일)</th>
-          </tr>
-        </thead>
-        <tbody>
-          {''.join(rows_html)}
-        </tbody>
-      </table>
+        <div style="padding:18px 20px; color:#111827;">
+          <p style="margin:0 0 10px 0; font-size:15px; font-weight:700;">알려드립니다.</p>
+          <p style="margin:0 0 12px 0; font-size:14px;">
+            다음 신분증이 <b style="color:#1d4ed8;">{today_str}</b> 기준으로 만료일이 임박했습니다.
+          </p>
+          <p style="margin:0 0 16px 0; font-size:14px;">
+            확인 후 <b style="color:#b42318;">RENEW</b> 하시기 바랍니다.
+          </p>
 
+          <div style="margin:14px 0 10px 0; font-size:13px; color:#374151;">
+            총 <b>{total}</b>건
+            <span style="margin-left:10px;">⛔ 임박(≤7일)</span>
+            <span style="margin-left:10px;">⚠️ 주의(≤30일)</span>
+            <span style="margin-left:10px;">✅ 여유(>30일)</span>
+          </div>
+
+          <div style="border:1px solid #e5e7eb; border-radius:12px; overflow:hidden;">
+            <table role="presentation" style="width:100%; border-collapse:collapse;">
+              <thead>
+                <tr style="background:#f3f4f6;">
+                  <th style="text-align:left;padding:10px 12px;font-size:13px;border-bottom:1px solid #e5e7eb;">이름</th>
+                  <th style="text-align:left;padding:10px 12px;font-size:13px;border-bottom:1px solid #e5e7eb;">신분증 종류</th>
+                  <th style="text-align:left;padding:10px 12px;font-size:13px;border-bottom:1px solid #e5e7eb;">국가</th>
+                  <th style="text-align:left;padding:10px 12px;font-size:13px;border-bottom:1px solid #e5e7eb;">만료일</th>
+                  <th style="text-align:right;padding:10px 12px;font-size:13px;border-bottom:1px solid #e5e7eb;">만료까지(일)</th>
+                  <th style="text-align:left;padding:10px 12px;font-size:13px;border-bottom:1px solid #e5e7eb;">상태</th>
+                </tr>
+              </thead>
+              <tbody>
+                {''.join(rows_html)}
+              </tbody>
+            </table>
+          </div>
+
+          <div style="margin-top:16px; font-size:12px; color:#6b7280;">
+            • 본 메일은 자동 발송입니다. 시트의 <b>ExpiryDate</b>, <b>AlertDaysBefore</b>, <b>Active</b> 값에 따라 결정됩니다.<br/>
+            • 동일 기준일에 중복 발송을 방지하기 위해 <b>LastAlertDate</b>가 자동 갱신됩니다.
+          </div>
+        </div>
+      </div>
     </div>
     """
     return html
+
 
 def build_personal_alert_html(df_person: pd.DataFrame, today: dt.date) -> str:
     """
@@ -374,7 +440,7 @@ def main() -> None:
         return
 
     # One combined email to fixed recipients (not per PersonEmail)
-    subject = "[신분증 만료 임박 알림]"
+    subject = "🪪 [신분증 만료 임박 알림]"
     html_body = build_all_alerts_html(df_alerts, today)
 
     recipients = parse_emails(str(cfg["alert_recipients"]))
