@@ -103,7 +103,6 @@ def get_gsheet_client(sa_json: Optional[str] = None) -> gspread.client.Client:
 # ======================
 EXPECTED_COLUMNS = [
     "PersonName",
-    "PersonEmail",
     "IDType",
     "Country",
     "ExpiryDate",
@@ -160,7 +159,6 @@ def find_ids_to_alert(df_ids: pd.DataFrame, today: dt.date) -> pd.DataFrame:
       - ExpiryDate exists
       - 0 <= DaysToExpiry <= AlertDaysBefore
       - LastAlertDate is empty OR LastAlertDate < today
-      - PersonEmail contains '@'
     """
     df = df_ids.copy()
     # Active + has expiry date
@@ -220,41 +218,80 @@ def build_all_alerts_html(df_alerts: pd.DataFrame, today: dt.date) -> str:
         return (t.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
                  .replace('"', "&quot;").replace("'", "&#39;"))
 
-    def urgency_badge(days: int) -> str:
-        # Inline badges (email-safe)
-        if days <= 7:
-            return '<span style="display:inline-block;padding:2px 8px;border-radius:999px;background:#fdecea;color:#b42318;font-weight:700;">⛔ 임박</span>'
-        if days <= 30:
-            return '<span style="display:inline-block;padding:2px 8px;border-radius:999px;background:#fff7e6;color:#b54708;font-weight:700;">⚠️ 주의</span>'
-        return '<span style="display:inline-block;padding:2px 8px;border-radius:999px;background:#ecfdf3;color:#027a48;font-weight:700;">✅ 여유</span>'
+
+    def classify_urgency(days: int, alert_before: int) -> str:
+        """Return one of: 'imminent', 'caution', 'ok'.
+
+        Uses the sheet's AlertDaysBefore (lead time) as the denominator.
+        - If alert_before <= 0: falls back to absolute thresholds (≤7 / ≤30).
+        - Otherwise: ratio = days / alert_before.
+          * imminent: ratio <= 0.25
+          * caution : ratio <= 0.60
+          * ok      : ratio > 0.60
+        """
+        if days <= 0:
+            return "imminent"
+        if alert_before is None or alert_before <= 0:
+            if days <= 7:
+                return "imminent"
+            if days <= 30:
+                return "caution"
+            return "ok"
+
+        ratio = days / float(alert_before)
+        if ratio <= 0.25:
+            return "imminent"
+        if ratio <= 0.60:
+            return "caution"
+        return "ok"
+
+    def urgency_badge(days: int, alert_before: int) -> str:
+        cat = classify_urgency(days, alert_before)
+        if cat == "imminent":
+            return "<span style='display:inline-block;padding:4px 8px;border-radius:999px;background:#fee2e2;color:#991b1b;font-weight:800;'>⛔ 임박</span>"
+        if cat == "caution":
+            return "<span style='display:inline-block;padding:4px 8px;border-radius:999px;background:#ffedd5;color:#9a3412;font-weight:800;'>⚠️ 주의</span>"
+        return "<span style='display:inline-block;padding:4px 8px;border-radius:999px;background:#dcfce7;color:#166534;font-weight:800;'>✅ 여유</span>"
+
+    # category counts for the summary line
+    cnt_imminent = 0
+    cnt_caution = 0
+    cnt_ok = 0
 
     rows_html: List[str] = []
     for _, r in df.iterrows():
-        expiry = r.get("ExpiryDate")
-        expiry_str = expiry.strftime("%Y-%m-%d") if isinstance(expiry, dt.date) else esc(expiry or "")
-        days = r.get("DaysToExpiry")
-        try:
-            days_int = int(days)
-        except Exception:
-            days_int = 0
+        name = str(r.get("PersonName", "")).strip() or "-"
+        idtype = str(r.get("IDType", "")).strip() or "-"
+        country = str(r.get("Country", "")).strip() or "-"
+        expiry_str = str(r.get("ExpiryDate", "")).strip() or "-"
+        days_int = int(r.get("DaysToExpiry", 0))
 
-        # Row highlight for urgent items
-        if days_int <= 7:
-            row_bg = "#fff1f2"  # light red
-        elif days_int <= 30:
-            row_bg = "#fffbeb"  # light amber
+        alert_before_raw = r.get("AlertDaysBefore", 0)
+        try:
+            alert_before = int(alert_before_raw)
+        except Exception:
+            alert_before = 0
+
+        cat = classify_urgency(days_int, alert_before)
+        if cat == "imminent":
+            cnt_imminent += 1
+            row_bg = "background:#fff1f2;"
+        elif cat == "caution":
+            cnt_caution += 1
+            row_bg = "background:#fffbeb;"
         else:
-            row_bg = "#ffffff"
+            cnt_ok += 1
+            row_bg = ""
 
         rows_html.append(
             f"""
-            <tr style="background:{row_bg};">
-              <td style="padding:10px 12px;border-bottom:1px solid #e5e7eb;font-weight:700;color:#111827;">{esc(r.get('PersonName',''))}</td>
-              <td style="padding:10px 12px;border-bottom:1px solid #e5e7eb;color:#111827;">{esc(r.get('IDType',''))}</td>
-              <td style="padding:10px 12px;border-bottom:1px solid #e5e7eb;color:#111827;">{esc(r.get('Country',''))}</td>
+            <tr style="{row_bg}">
+              <td style="padding:10px 12px;border-bottom:1px solid #e5e7eb;color:#111827;font-weight:700;">{esc(name)}</td>
+              <td style="padding:10px 12px;border-bottom:1px solid #e5e7eb;color:#111827;">{esc(idtype)}</td>
+              <td style="padding:10px 12px;border-bottom:1px solid #e5e7eb;color:#111827;">{esc(country)}</td>
               <td style="padding:10px 12px;border-bottom:1px solid #e5e7eb;color:#111827;">{esc(expiry_str)}</td>
               <td style="padding:10px 12px;border-bottom:1px solid #e5e7eb;text-align:right;color:#111827;font-weight:700;">{esc(days_int)}</td>
-              <td style="padding:10px 12px;border-bottom:1px solid #e5e7eb;">{urgency_badge(days_int)}</td>
+              <td style="padding:10px 12px;border-bottom:1px solid #e5e7eb;">{urgency_badge(days_int, alert_before)}</td>
             </tr>
             """
         )
@@ -280,9 +317,12 @@ def build_all_alerts_html(df_alerts: pd.DataFrame, today: dt.date) -> str:
 
           <div style="margin:14px 0 10px 0; font-size:13px; color:#374151;">
             총 <b>{total}</b>건
-            <span style="margin-left:10px;">⛔ 임박(≤7일)</span>
-            <span style="margin-left:10px;">⚠️ 주의(≤30일)</span>
-            <span style="margin-left:10px;">✅ 여유(>30일)</span>
+            <span style="margin-left:10px;">⛔ 임박 <b>{cnt_imminent}</b></span>
+            <span style="margin-left:10px;">⚠️ 주의 <b>{cnt_caution}</b></span>
+            <span style="margin-left:10px;">✅ 여유 <b>{cnt_ok}</b></span>
+            <div style="margin-top:6px; font-size:12px; color:#6b7280;">
+              상태 기준은 각 행의 <b>AlertDaysBefore</b> 대비 남은 기간 비율로 분류합니다: ⛔ ≤25% · ⚠️ ≤60% · ✅ &gt;60%
+            </div>
           </div>
 
           <div style="border:1px solid #e5e7eb; border-radius:12px; overflow:hidden;">
@@ -313,56 +353,6 @@ def build_all_alerts_html(df_alerts: pd.DataFrame, today: dt.date) -> str:
     """
     return html
 
-
-def build_personal_alert_html(df_person: pd.DataFrame, today: dt.date) -> str:
-    """
-    Korean template per request.
-    Output columns: IDType, Country, ExpiryDate, DaysToExpiry
-
-    
-          
-            
-    
-
-          
-          Expand Down
-    
-    
-  
-    """
-    today_str = today.strftime("%Y-%m-%d")
-    rows_html = []
-    for _, r in df_person.iterrows():
-        expiry = r.get("ExpiryDate")
-        expiry_str = expiry.strftime("%Y-%m-%d") if isinstance(expiry, dt.date) else ""
-        rows_html.append(
-            f"""
-            <tr>
-              <td>{r.get("IDType","")}</td>
-              <td>{r.get("Country","")}</td>
-              <td>{expiry_str}</td>
-              <td>{r.get("DaysToExpiry","")}</td>
-            </tr>
-            """
-        )
-    html = f"""
-    <p>다음 신분증이 <b>{today_str}</b> 기준으로 만료일이 임박했습니다</p>
-    <p>확인후 RENEW 하시기 바랍니다.</p>
-    <table border="1" cellspacing="0" cellpadding="6">
-      <thead>
-        <tr>
-          <th>신분증 종류</th>
-          <th>국가</th>
-          <th>만료일</th>
-          <th>만료까지(일)</th>
-        </tr>
-      </thead>
-      <tbody>
-        {''.join(rows_html)}
-      </tbody>
-    </table>
-    """
-    return html
 def send_html_email(smtp_conf: Dict[str, object], to_email: str, subject: str, html_body: str) -> None:
     msg = MIMEMultipart("alternative")
     msg["Subject"] = subject
@@ -429,7 +419,7 @@ def main() -> None:
     print("ALERT ROWS:", len(df_alerts))
     if not df_alerts.empty:
         # Debug view (no sensitive IDs)
-        debug_cols = [c for c in ["PersonName", "PersonEmail", "IDType", "ExpiryDate", "AlertDaysBefore", "DaysToExpiry", "LastAlertDate"] if c in df_alerts.columns]
+        debug_cols = [c for c in ["PersonName", "IDType", "Country", "ExpiryDate", "AlertDaysBefore", "DaysToExpiry", "LastAlertDate"] if c in df_alerts.columns]
         try:
             print(df_alerts[debug_cols].to_string(index=False))
         except Exception:
@@ -444,6 +434,7 @@ def main() -> None:
     html_body = build_all_alerts_html(df_alerts, today)
 
     recipients = parse_emails(str(cfg["alert_recipients"]))
+    print("RECIPIENTS:", recipients)
     if not recipients:
         raise RuntimeError("IDENT_ALERT_RECIPIENTS (or EMAIL_RECEIVER) is empty or invalid.")
 
