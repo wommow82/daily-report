@@ -1971,7 +1971,7 @@ def build_html_report(df_enriched, account_summary):
     df_summary = pd.DataFrame(summary_rows)
 
     # ---------- 2) 상세 보유 종목 테이블 (TFSA: USD, RESP: CAD) ----------
-    def make_holdings_table(acc_type, tickers_include=None):
+    def make_holdings_table(acc_type, tickers_include=None, add_summary_row=False):
         sub = df_enriched[df_enriched["Type"].str.upper() == acc_type].copy()
 
         # (NEW) 전략/그룹 분리를 위한 티커 필터
@@ -2011,7 +2011,11 @@ def build_html_report(df_enriched, account_summary):
         )
 
         # Profit/Loss native + 색상
-        raw_pl_native = sub["ProfitLossNative"].tolist()
+        sub_raw_pl_native = sub["ProfitLossNative"].copy()
+        sub_raw_avg_price = sub["AvgPrice"].copy()
+        sub_raw_shares = sub["Shares"].copy()
+
+        raw_pl_native = sub_raw_pl_native.tolist()
         raw_pl_pct = sub["ProfitLossPct"].tolist()
 
         pl_native_fmt = []
@@ -2049,6 +2053,46 @@ def build_html_report(df_enriched, account_summary):
         }
 
         sub = sub[cols].rename(columns=rename_map)
+
+        # =========================
+        # (옵션) 그룹 합계(SUM) 행 추가
+        # - Profit/Loss: 합계
+        # - Profit/Loss %: (합계 P/L) / (합계 Cost Basis)  ← 가중 평균 수익률
+        # - Today's P/L: 합계
+        # =========================
+        if add_summary_row and (tickers_include is not None) and (len(sub) > 0):
+            try:
+                total_today_pl = float(today_pl_native.sum())
+            except Exception:
+                total_today_pl = 0.0
+
+            try:
+                pl_native_num = pd.to_numeric(sub_raw_pl_native, errors="coerce").fillna(0.0)
+                total_pl = float(pl_native_num.sum())
+            except Exception:
+                total_pl = 0.0
+
+            try:
+                avg_num = pd.to_numeric(sub_raw_avg_price, errors="coerce").fillna(0.0)
+                sh_num = pd.to_numeric(sub_raw_shares, errors="coerce").fillna(0.0)
+                total_cost = float((avg_num * sh_num).sum())
+            except Exception:
+                total_cost = 0.0
+
+            total_pl_pct = (total_pl / total_cost) if total_cost != 0 else 0.0
+
+            sum_row = {
+                "Ticker": "<strong>SUM</strong>",
+                "Shares": "—",
+                "AvgPrice": "—",
+                "LastPrice": "—",
+                "PositionValue": "—",
+                "Today's P/L": colorize_value_html(fmt_money(total_today_pl, ccy_symbol), total_today_pl),
+                "Profit/Loss": colorize_value_html(fmt_money(total_pl, ccy_symbol), total_pl),
+                "Profit/Loss %": colorize_value_html(fmt_pct(total_pl_pct), total_pl_pct),
+            }
+            sub = pd.concat([sub, pd.DataFrame([sum_row])], ignore_index=True)
+
         return sub.to_html(index=False, escape=False)
 
     # TFSA 전략 분리: SCHD(배당/인컴) vs 나머지(성장/모멘텀)
@@ -2066,7 +2110,7 @@ def build_html_report(df_enriched, account_summary):
         growth_tickers = [t for t in tfsa_tickers if t not in dividend_set]
 
         tfsa_dividend_table = make_holdings_table("TFSA", tickers_include=dividend_tickers)
-        tfsa_growth_table = make_holdings_table("TFSA", tickers_include=growth_tickers)
+        tfsa_growth_table = make_holdings_table("TFSA", tickers_include=growth_tickers, add_summary_row=True)
 
     resp_table = make_holdings_table("RESP")
 
