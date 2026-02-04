@@ -1971,8 +1971,16 @@ def build_html_report(df_enriched, account_summary):
     df_summary = pd.DataFrame(summary_rows)
 
     # ---------- 2) 상세 보유 종목 테이블 (TFSA: USD, RESP: CAD) ----------
-    def make_holdings_table(acc_type):
+    def make_holdings_table(acc_type, tickers_include=None):
         sub = df_enriched[df_enriched["Type"].str.upper() == acc_type].copy()
+
+        # (NEW) 전략/그룹 분리를 위한 티커 필터
+        if tickers_include is not None:
+            inc = set([str(t).strip().upper() for t in tickers_include])
+            sub = sub[sub["Ticker"].astype(str).str.upper().isin(inc)].copy()
+            if sub.empty:
+                return "<p>해당 그룹에 포함된 종목이 없습니다.</p>"
+
         if sub.empty:
             return f"<p>No holdings for {acc_type}.</p>"
 
@@ -2043,7 +2051,23 @@ def build_html_report(df_enriched, account_summary):
         sub = sub[cols].rename(columns=rename_map)
         return sub.to_html(index=False, escape=False)
 
-    tfsa_table = make_holdings_table("TFSA")
+    # TFSA 전략 분리: SCHD(배당/인컴) vs 나머지(성장/모멘텀)
+    tfsa_all = df_enriched[df_enriched["Type"].astype(str).str.upper() == "TFSA"].copy()
+
+    if tfsa_all.empty:
+        tfsa_dividend_table = "<p>No holdings for TFSA.</p>"
+        tfsa_growth_table = "<p>No holdings for TFSA.</p>"
+    else:
+        tfsa_tickers = (
+            tfsa_all["Ticker"].astype(str).str.upper().str.strip().replace("", np.nan).dropna().unique().tolist()
+        )
+        dividend_tickers = ["SCHD"]
+        dividend_set = set(dividend_tickers)
+        growth_tickers = [t for t in tfsa_tickers if t not in dividend_set]
+
+        tfsa_dividend_table = make_holdings_table("TFSA", tickers_include=dividend_tickers)
+        tfsa_growth_table = make_holdings_table("TFSA", tickers_include=growth_tickers)
+
     resp_table = make_holdings_table("RESP")
 
     # ---------- 3) 중단기 투자 분석 (전체 보유 종목) ----------
@@ -2097,7 +2121,12 @@ def build_html_report(df_enriched, account_summary):
 
         <div class="section">
           <h2>📂 TFSA Holdings (in USD)</h2>
-          {tfsa_table}
+
+          <h3>💰 배당(인컴) 전략</h3>
+          {tfsa_dividend_table}
+
+          <h3>🚀 성장/모멘텀(중단기) 전략</h3>
+          {tfsa_growth_table}
         </div>
 
         <div class="section">
