@@ -387,16 +387,27 @@ def _summarize_news_bundle_ko_price_focus(ticker, articles):
     [Ver 3.0] OpenAI → Anthropic Claude API
     """
     api_key = os.environ.get("ANTHROPIC_API_KEY")
-    if not api_key:
-        return "긍정 뉴스 0건, 부정 뉴스 0건"
 
     if not articles:
-        return "긍정 뉴스 0건, 부정 뉴스 0건"
+        return "수집된 뉴스 없음"
+
+    # API 키 없으면 원문 제목 그대로 표시 (AI 요약 없이)
+    if not api_key:
+        lines = ["⚠️ ANTHROPIC_API_KEY 미설정 — 뉴스 원문 제목 표시"]
+        for a in articles[:5]:
+            title = (a.get("title") or "제목 없음").strip()
+            src   = (a.get("source") or "").strip()
+            date  = (a.get("published") or "")[:10]
+            lines.append(f"· [{date}] {src} — {title}")
+        return "\n".join(lines)
 
     try:
         import anthropic
     except ImportError:
-        return "긍정 뉴스 0건, 부정 뉴스 0건"
+        lines = ["⚠️ anthropic 패키지 미설치 — pip install anthropic 필요"]
+        for a in articles[:5]:
+            lines.append(f"· {(a.get('title') or '').strip()}")
+        return "\n".join(lines)
 
     client = anthropic.Anthropic(api_key=api_key)
 
@@ -2122,22 +2133,29 @@ def build_combined_milestone_html(df_enriched):
 
     # ── SCHD 연 배당/주 ──
     try:
-        schd_divs = yf.Ticker("SCHD").dividends.dropna()
+        schd_divs = _to_div_series(yf.Ticker("SCHD").dividends)
         current_year = datetime.today().year
         div_by_year = schd_divs.groupby(schd_divs.index.year).sum()
         years_done = sorted([int(y) for y in div_by_year.index if int(y) < current_year])
-        schd_div_ps = float(div_by_year.get(years_done[-1], 0.0)) if years_done else 0.0
+        if years_done:
+            raw = div_by_year.get(years_done[-1], 0.0)
+            schd_div_ps = float(raw) if not hasattr(raw, '__len__') else float(np.nansum(raw))
+        else:
+            schd_div_ps = 0.0
         # SCHD CAGR (5년)
         use_years = years_done[-5:] if len(years_done) >= 5 else years_done
         if len(use_years) >= 2:
-            d0 = float(div_by_year.get(use_years[0], 0.0))
-            dN = float(div_by_year.get(use_years[-1], 0.0))
+            raw0 = div_by_year.get(use_years[0], 0.0)
+            rawN = div_by_year.get(use_years[-1], 0.0)
+            d0 = float(raw0) if not hasattr(raw0, '__len__') else float(np.nansum(raw0))
+            dN = float(rawN) if not hasattr(rawN, '__len__') else float(np.nansum(rawN))
             n = use_years[-1] - use_years[0]
             schd_g = ((dN / d0) ** (1.0 / n) - 1.0) if d0 > 0 and n > 0 else 0.11
         else:
             schd_g = 0.11
         schd_g = max(-0.10, min(0.15, schd_g))
-    except Exception:
+    except Exception as e:
+        print(f"[WARN] build_combined_milestone SCHD 오류: {e}")
         schd_div_ps = 0.0
         schd_g = 0.11
 
@@ -2159,34 +2177,41 @@ def build_combined_milestone_html(df_enriched):
     combined_annual_net_cad = schd_annual_net_cad + jepq_annual_net_cad
     combined_monthly_net_cad = combined_annual_net_cad / 12.0
 
-    # SCHD yield
+    # SCHD yield (세전)
     try:
         schd_px = float(yf.Ticker("SCHD").history(period="5d")["Close"].dropna().iloc[-1])
         schd_y = schd_div_ps / schd_px if schd_px > 0 else 0.035
     except Exception:
         schd_y = 0.035
 
-    # JEPQ yield
+    # JEPQ yield (세전)
     try:
         jepq_px = float(yf.Ticker("JEPQ").history(period="5d")["Close"].dropna().iloc[-1])
         jepq_y = jepq_dist_ps / jepq_px if jepq_px > 0 else 0.11
     except Exception:
         jepq_y = 0.11
 
-    # ── 월 기여금 가정: SCHD $200 + JEPQ $200 = $400/월 ──
-    monthly_contrib_usd = 400.0
+    # ── 월 기여금: JEPQ 없으면 SCHD $200만, 있으면 둘 다 $200씩 ──
+    has_jepq = jepq_shares > 0
+    monthly_contrib_usd = 400.0 if has_jepq else 200.0
     annual_contrib_cad = monthly_contrib_usd * 12.0 * usd_to_cad
 
-    # combined weighted yield and growth
-    total_annual_cad = schd_annual_net_cad + jepq_annual_net_cad
-    if total_annual_cad > 0:
+    # ── combined weighted yield & growth ──
+    # JEPQ가 0주면 SCHD만으로 계산
+    if schd_annual_net_cad <= 0 and jepq_annual_net_cad <= 0:
+        # 둘 다 0 — fallback
+        combined_g = schd_g
+        combined_y = schd_y * (1.0 - wht)
+    elif jepq_annual_net_cad <= 0:
+        # JEPQ 없음 → SCHD만
+        combined_g = schd_g
+        combined_y = schd_y * (1.0 - wht)
+    else:
+        total_annual_cad = schd_annual_net_cad + jepq_annual_net_cad
         w_schd = schd_annual_net_cad / total_annual_cad
         w_jepq = jepq_annual_net_cad / total_annual_cad
         combined_g = w_schd * schd_g + w_jepq * jepq_g
         combined_y = w_schd * (schd_y * (1.0 - wht)) + w_jepq * (jepq_y * (1.0 - wht))
-    else:
-        combined_g = (schd_g + jepq_g) / 2.0
-        combined_y = 0.05
 
     # ── 마일스톤 계산 ──
     def _calc_ms(target_monthly, annual_start, g_rate, y_rate, annual_contrib):
@@ -2215,34 +2240,39 @@ def build_combined_milestone_html(df_enriched):
     ms2 = _calc_ms(2000.0, combined_annual_net_cad, combined_g, combined_y, annual_contrib_cad)
     ms3 = _calc_ms(3000.0, combined_annual_net_cad, combined_g, combined_y, annual_contrib_cad)
 
-    # ── 현재 진행률 (목표 $3,000 대비) ──
-    pct_of_3k = min(100.0, combined_monthly_net_cad / 3000.0 * 100.0)
-    pct_of_2k = min(100.0, combined_monthly_net_cad / 2000.0 * 100.0)
-    pct_of_1k = min(100.0, combined_monthly_net_cad / 1000.0 * 100.0)
+    # ── 현재 진행률 ──
+    pct_of_3k = min(100.0, combined_monthly_net_cad / 3000.0 * 100.0) if combined_monthly_net_cad > 0 else 0.0
+    pct_of_2k = min(100.0, combined_monthly_net_cad / 2000.0 * 100.0) if combined_monthly_net_cad > 0 else 0.0
+    pct_of_1k = min(100.0, combined_monthly_net_cad / 1000.0 * 100.0) if combined_monthly_net_cad > 0 else 0.0
 
     schd_monthly_str = fmt_money(schd_annual_net_cad / 12.0, "C$")
-    jepq_monthly_str = fmt_money(jepq_annual_net_cad / 12.0, "C$")
+    jepq_monthly_str = fmt_money(jepq_annual_net_cad / 12.0, "C$") if has_jepq else "C$0.00 (미보유)"
     combined_monthly_str = fmt_money(combined_monthly_net_cad, "C$")
+    contrib_note = f"DRIP + 월 ${int(monthly_contrib_usd)} USD 기여"
 
     def _bar(pct, color="#1976d2"):
-        filled = int(pct)
+        filled = max(0, min(100, int(pct)))
         return (
             f"<div style='background:#e0e0e0; border-radius:4px; height:8px; width:200px; display:inline-block; vertical-align:middle;'>"
             f"<div style='background:{color}; width:{filled}%; height:8px; border-radius:4px;'></div></div>"
             f" <span style='font-size:11px; color:#666;'>{pct:.1f}%</span>"
         )
 
+    # JEPQ 미보유 안내 문구
+    jepq_note = "" if has_jepq else "<p style='color:#888; font-size:11px; margin:4px 0;'>ℹ️ JEPQ 미보유 — SCHD 단독 기준 계산. JEPQ 추가 시 달성 시기 앞당겨질 수 있음.</p>"
+
     html = (
         "<div>"
-        "<table style='width:100%; border-collapse:collapse; margin-bottom:12px;'>"
+        + jepq_note
+        + "<table style='width:100%; border-collapse:collapse; margin-bottom:12px;'>"
         "<tr>"
         f"<td style='padding:8px; text-align:center; background:#f3f4ff; border-radius:6px;'>"
         f"<div style='font-size:11px; color:#666;'>SCHD 월 배당 (세후)</div>"
         f"<div style='font-size:18px; font-weight:bold; color:#1a237e;'>{schd_monthly_str}</div></td>"
         f"<td style='padding:8px; text-align:center; font-size:20px; color:#999;'>+</td>"
-        f"<td style='padding:8px; text-align:center; background:#f3f4ff; border-radius:6px;'>"
+        f"<td style='padding:8px; text-align:center; background:{'#f3f4ff' if has_jepq else '#f5f5f5'}; border-radius:6px;'>"
         f"<div style='font-size:11px; color:#666;'>JEPQ 월 분배금 (세후)</div>"
-        f"<div style='font-size:18px; font-weight:bold; color:#1a237e;'>{jepq_monthly_str}</div></td>"
+        f"<div style='font-size:18px; font-weight:bold; color:{'#1a237e' if has_jepq else '#aaa'};'>{jepq_monthly_str}</div></td>"
         f"<td style='padding:8px; text-align:center; font-size:20px; color:#999;'>=</td>"
         f"<td style='padding:8px; text-align:center; background:#e8f5e9; border-radius:6px;'>"
         f"<div style='font-size:11px; color:#666;'>합산 월 인컴 (세후, CAD)</div>"
@@ -2253,7 +2283,7 @@ def build_combined_milestone_html(df_enriched):
         "<tr>"
         "<th style='background:#e3f2fd; padding:7px 12px; border:1px solid #ccc; text-align:left;'>목표 월 인컴</th>"
         "<th style='background:#e3f2fd; padding:7px 12px; border:1px solid #ccc; text-align:left;'>현재 진행률</th>"
-        "<th style='background:#e3f2fd; padding:7px 12px; border:1px solid #ccc; text-align:left;'>달성 예상 (DRIP + 월 $400 기여)</th>"
+        f"<th style='background:#e3f2fd; padding:7px 12px; border:1px solid #ccc; text-align:left;'>달성 예상 ({contrib_note})</th>"
         "</tr>"
         f"<tr><td style='padding:6px 12px; border:1px solid #ddd;'><strong>C$1,000 / 월</strong></td>"
         f"<td style='padding:6px 12px; border:1px solid #ddd;'>{_bar(pct_of_1k, '#43a047')}</td>"
@@ -2267,7 +2297,7 @@ def build_combined_milestone_html(df_enriched):
         "</table>"
 
         f"<p class='muted' style='margin-top:8px;'>※ 환율 USD/CAD: {usd_to_cad:.4f} (실시간) / "
-        f"SCHD 배당 성장률 CAGR {fmt_pct(schd_g*100)} / JEPQ 성장률 3% / 원천징수 15% / DRIP + 월 $400 USD 기여 가정</p>"
+        f"SCHD 배당 성장률 CAGR {fmt_pct(schd_g*100)} / JEPQ 성장률 3% / 원천징수 15% / {contrib_note}</p>"
         "</div>"
     )
     return html
