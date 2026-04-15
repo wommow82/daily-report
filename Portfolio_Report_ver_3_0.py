@@ -411,31 +411,34 @@ def _summarize_news_bundle_ko_price_focus(ticker, articles):
 
     client = anthropic.Anthropic(api_key=api_key)
 
-    # 1) 기사 묶음을 번호 붙여 하나의 텍스트로 만든다.
+    # 2) 모든 기사 → 한국어 번역 헤드라인 + 감성 태그 요청
     items = []
     for i, a in enumerate(articles, start=1):
         title = (a.get("title") or "").strip()
-        desc = (a.get("description") or "").strip()
-        src = (a.get("source") or "").strip()
-        date = a.get("published") or ""
-        item = f"[{i}] {date} {src} - {title}"
+        desc  = (a.get("description") or "").strip()
+        src   = (a.get("source") or "").strip()
+        date  = (a.get("published") or "")[:10]
+        item  = f"[{i}] {date} {src} - {title}"
         if desc:
             item += f"\n{desc}"
         items.append(item)
 
     bundle_text = "\n\n".join(items)
 
-    # 2) 각 기사별 감성 + 한국어 요약을 JSON으로 요청
-    prompt = f"""너는 미국 주식 애널리스트이다.
-아래는 {ticker} 관련 뉴스 목록이다.
+    prompt = f"""너는 미국 주식 전문 애널리스트이자 번역가이다.
+아래는 {ticker} 관련 영문 뉴스 목록이다.
 
-각 뉴스에 대해 다음 정보를 추출하라:
-- sentiment: "긍정", "부정", "중립" 중 하나
-- summary_ko: 주가에 중요한 내용을 담은 한국어 한 문장 요약 (20~30자 내외)
+각 뉴스에 대해 다음 3가지를 추출하라:
+1. sentiment: "긍정" / "부정" / "중립" 중 하나 (주가에 미치는 영향 기준)
+2. title_ko: 뉴스 헤드라인을 자연스러운 한국어로 번역 (원문 제목 완전 번역, 40자 이내)
+3. summary_ko: 핵심 내용 한 줄 요약 (20자 이내, 투자 관점)
 
 반드시 순수 JSON만 응답하라. 마크다운 코드블록(```), 설명 텍스트 없이 JSON만 출력하라.
-형식 예시:
-{{"items": [{{"index": 1, "sentiment": "긍정", "summary_ko": "테슬라 유럽 판매 회복으로 수요 기대"}}, {{"index": 2, "sentiment": "부정", "summary_ko": "유럽 보조금 축소로 전기차 성장 둔화 우려"}}]}}
+형식:
+{{"items": [
+  {{"index": 1, "sentiment": "긍정", "title_ko": "테슬라, 유럽 판매 2분기 반등 전망", "summary_ko": "수요 회복 기대"}},
+  {{"index": 2, "sentiment": "부정", "title_ko": "엔비디아, 중국 수출 규제 추가 강화", "summary_ko": "매출 타격 우려"}}
+]}}
 
 뉴스 목록:
 {bundle_text}"""
@@ -443,11 +446,10 @@ def _summarize_news_bundle_ko_price_focus(ticker, articles):
     try:
         resp = client.messages.create(
             model="claude-sonnet-4-20250514",
-            max_tokens=900,
+            max_tokens=1200,
             messages=[{"role": "user", "content": prompt}],
         )
         raw = resp.content[0].text.strip()
-        # 마크다운 코드블록 제거 (방어)
         if raw.startswith("```"):
             raw = raw.split("```")[1]
             if raw.startswith("json"):
@@ -455,58 +457,60 @@ def _summarize_news_bundle_ko_price_focus(ticker, articles):
         data = json.loads(raw)
         items_data = data.get("items", [])
     except Exception as e:
-        print(f"[WARN] _summarize_news_bundle_ko_price_focus JSON 파싱 오류: {e}")
-        return "긍정 뉴스 0건, 부정 뉴스 0건"
+        print(f"[WARN] 뉴스 분석 오류: {e}")
+        # 파싱 실패 시 원문 제목 그대로 표시
+        lines = [f"[분석 오류 — 원문 표시]"]
+        for a in articles[:5]:
+            lines.append(f"· {(a.get('title') or '').strip()}")
+        return "\n".join(lines)
 
-    # 3) 긍정/부정 리스트로 분리 (기사 순서 유지)
-    pos_summaries = []
-    neg_summaries = []
+    # 3) 감성별 분류 + 한국어 번역 헤드라인 목록 구성
+    pos_items = []   # (title_ko, summary_ko)
+    neg_items = []
+    neu_items = []
 
     for x in items_data:
         try:
-            idx = int(x.get("index"))
+            idx = int(x.get("index", 0))
         except Exception:
             continue
         if not (1 <= idx <= len(articles)):
             continue
 
-        sent = (x.get("sentiment") or "").strip()
-        summary_ko = (x.get("summary_ko") or "").strip()
-        if not summary_ko:
+        sent     = (x.get("sentiment") or "중립").strip()
+        title_ko = (x.get("title_ko") or "").strip()
+        sum_ko   = (x.get("summary_ko") or "").strip()
+        if not title_ko:
             continue
 
-        # 너무 길면 살짝 자르기
-        if len(summary_ko) > 40:
-            summary_ko = summary_ko[:40]
-
+        entry = (title_ko, sum_ko)
         if sent == "긍정":
-            pos_summaries.append(summary_ko)
+            pos_items.append(entry)
         elif sent == "부정":
-            neg_summaries.append(summary_ko)
+            neg_items.append(entry)
         else:
-            # 중립은 여기서는 사용하지 않음
-            pass
+            neu_items.append(entry)
 
-    pos_count = len(pos_summaries)
-    neg_count = len(neg_summaries)
+    pos_count = len(pos_items)
+    neg_count = len(neg_items)
+    neu_count = len(neu_items)
 
-    lines = []
-    lines.append(f"긍정 뉴스 {pos_count}건, 부정 뉴스 {neg_count}건")
+    lines = [f"📰 긍정 {pos_count}건 · 부정 {neg_count}건 · 중립 {neu_count}건"]
 
-    # 4) 긍정 대표 줄 1개 (최대 2개 기사 요약 사용)
-    if pos_count > 0:
-        left = pos_summaries[0]
-        right = pos_summaries[1] if pos_count > 1 else pos_summaries[0]
-        lines.append(f"· 대표 긍정: {left} | {right}")
+    # 긍정 뉴스 (최대 3건)
+    for title_ko, sum_ko in pos_items[:3]:
+        tag = "🟢"
+        lines.append(f"{tag} {title_ko}" + (f" ({sum_ko})" if sum_ko else ""))
 
-    # 5) 부정 대표 줄 1개 (최대 2개 기사 요약 사용)
-    if neg_count > 0:
-        left = neg_summaries[0]
-        right = neg_summaries[1] if neg_count > 1 else neg_summaries[0]
-        lines.append(f"· 대표 부정: {left} | {right}")
+    # 부정 뉴스 (최대 3건)
+    for title_ko, sum_ko in neg_items[:3]:
+        tag = "🔴"
+        lines.append(f"{tag} {title_ko}" + (f" ({sum_ko})" if sum_ko else ""))
 
-    # 총 줄 수 제한 (예외 안전)
-    lines = lines[:5]
+    # 중립 뉴스 (최대 2건)
+    for title_ko, sum_ko in neu_items[:2]:
+        tag = "⚪"
+        lines.append(f"{tag} {title_ko}" + (f" ({sum_ko})" if sum_ko else ""))
 
     return "\n".join(lines)
 
@@ -814,26 +818,30 @@ def build_midterm_news_comment_from_apis_combined(ticker, max_items=10, days=14)
 
     use_articles = sorted(use_articles, key=_parse_dt, reverse=True)
 
-    # 4) 여러 기사 → 텍스트 요약 (긍정/부정 + 대표 2개씩)
+    # 4) 한글 번역 헤드라인 + 감성 태그 생성
     summary_ko = _summarize_news_bundle_ko_price_focus(ticker, use_articles)
 
-    # 5) 줄 단위로 나눠 색 입히기
+    # 5) 줄 단위로 색 입히기 (새 포맷: 🟢/🔴/⚪ 이모지 기반)
     raw_lines = [ln.strip() for ln in summary_ko.splitlines() if ln.strip()]
     colored_lines = []
 
     for ln in raw_lines:
-        if ln.startswith("· 대표 긍정:"):
-            colored_lines.append(f"<span style='color:green;'>{_html_escape(ln)}</span>")
-        elif ln.startswith("· 대표 부정:"):
-            colored_lines.append(f"<span style='color:red;'>{_html_escape(ln)}</span>")
+        if ln.startswith("🟢"):
+            colored_lines.append(f"<span style='color:#1b7a3e; font-weight:500;'>{_html_escape(ln)}</span>")
+        elif ln.startswith("🔴"):
+            colored_lines.append(f"<span style='color:#c0392b; font-weight:500;'>{_html_escape(ln)}</span>")
+        elif ln.startswith("⚪"):
+            colored_lines.append(f"<span style='color:#555;'>{_html_escape(ln)}</span>")
+        elif ln.startswith("📰"):
+            colored_lines.append(f"<span style='color:#555; font-size:11px;'>{_html_escape(ln)}</span>")
         else:
             colored_lines.append(_html_escape(ln))
 
     html_body = "<br>".join(colored_lines) if colored_lines else "관련 뉴스를 요약할 수 없습니다."
 
     news_html = (
-        "<p style='text-align:left;'>"
-        "<strong>뉴스 요약 (최근 2주, 주가 영향 이슈):</strong><br>"
+        "<p style='text-align:left; line-height:1.7;'>"
+        "<strong>📰 뉴스 (한글 번역, 최근 2주):</strong><br>"
         f"{html_body}"
         "</p>"
     )
@@ -1472,7 +1480,7 @@ def build_schd_dividend_html():
     tk = yf.Ticker("SCHD")
     try:
         hist = tk.history(period="12y")
-        divs = tk.dividends.dropna()
+        divs = _to_div_series(tk.dividends)
     except Exception:
         return "<p>SCHD 배당 데이터를 불러오지 못했습니다.</p>"
 
@@ -1500,7 +1508,8 @@ def build_schd_dividend_html():
     records = []
     prev_div = None
     for y in years:
-        div_ps = float(div_by_year.get(y, 0.0))
+        raw = div_by_year.get(y, 0.0)
+        div_ps = float(raw) if not hasattr(raw, '__len__') else float(np.nansum(raw))
         price_end = float(close_by_year_end.get(y, np.nan))
         yield_pct = div_ps / price_end * 100.0 if price_end > 0 else np.nan
         if prev_div is not None and prev_div > 0:
@@ -1525,8 +1534,8 @@ def build_schd_dividend_html():
     # 배당 CAGR (최근 최대 5년)
     recent_div = df_hist.tail(min(5, len(df_hist)))
     if len(recent_div) >= 2:
-        d0 = recent_div["Dividend / Share"].iloc[0]
-        dN = recent_div["Dividend / Share"].iloc[-1]
+        d0 = float(recent_div["Dividend / Share"].iloc[0])
+        dN = float(recent_div["Dividend / Share"].iloc[-1])
         n = recent_div["Year"].iloc[-1] - recent_div["Year"].iloc[0]
         if d0 > 0 and n > 0:
             div_cagr = (dN / d0) ** (1.0 / n) - 1.0
@@ -1734,7 +1743,7 @@ def build_schd_dividend_summary_text(df_enriched):
 
     try:
         tk = yf.Ticker("SCHD")
-        divs = tk.dividends.dropna()
+        divs = _to_div_series(tk.dividends)
     except Exception:
         divs = pd.Series(dtype=float)
 
@@ -1758,7 +1767,8 @@ def build_schd_dividend_summary_text(df_enriched):
     else:
         last_done_year = years_done[-1]
 
-    last_div_ps_usd = safe_float(div_by_year.get(last_done_year, 0.0), 0.0)
+    raw_last = div_by_year.get(last_done_year, 0.0)
+    last_div_ps_usd = float(raw_last) if not hasattr(raw_last, '__len__') else float(np.nansum(raw_last))
     if last_div_ps_usd <= 0:
         return (
             "<p><strong>현재 예상 연 배당금(CAD):</strong> 완료 연도 연배당/주(USD) 계산 실패</p>"
