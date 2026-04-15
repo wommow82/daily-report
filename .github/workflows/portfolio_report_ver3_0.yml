@@ -43,7 +43,7 @@ jobs:
           SMTP_PORT: ${{ secrets.SMTP_PORT }}
           FMP_API_KEY: ${{ secrets.FMP_API_KEY }}
         run: |
-          python Portfolio_Report_ver_3.0.py
+          python Portfolio_Report_ver_3_0.py
 
       - name: Upload HTML artifact
         uses: actions/upload-artifact@v4
