@@ -1,0 +1,9 @@
+# Ver 3.0 requirements (OpenAI 제거, Anthropic 추가)
+anthropic>=0.25.0
+yfinance>=0.2.36
+gspread>=5.12.0
+oauth2client>=4.1.3
+pandas>=2.0.0
+numpy>=1.24.0
+requests>=2.31.0
+feedparser>=6.0.10
