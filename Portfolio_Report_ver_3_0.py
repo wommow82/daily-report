@@ -1900,6 +1900,33 @@ def build_schd_dividend_summary_text(df_enriched):
 # [Ver 3.0] JEPQ 배당 분석 함수들
 # =========================
 
+def _safe_div_sum(s):
+    """
+    yfinance dividends는 버전에 따라 Series 또는 DataFrame으로 올 수 있음.
+    항상 float 스칼라를 반환하는 방어 함수.
+    """
+    try:
+        val = s.sum()
+        if hasattr(val, '__len__'):          # Series/DataFrame
+            val = float(np.nansum(s.values))
+        return float(val)
+    except Exception:
+        return 0.0
+
+
+def _to_div_series(raw):
+    """
+    yfinance .dividends 결과를 항상 1-D Series로 정규화.
+    DataFrame이면 첫 번째 숫자 컬럼만 추출.
+    """
+    if isinstance(raw, pd.DataFrame):
+        num_cols = raw.select_dtypes(include=[np.number]).columns
+        if len(num_cols) > 0:
+            return raw[num_cols[0]].dropna()
+        return pd.Series(dtype=float)
+    return raw.dropna()
+
+
 def build_jepq_dividend_html():
     """
     JEPQ 최근 2년 월별 분배금 내역 + 연간 요약 테이블.
@@ -1908,7 +1935,7 @@ def build_jepq_dividend_html():
     tk = yf.Ticker("JEPQ")
     try:
         hist = tk.history(period="3y")
-        divs = tk.dividends.dropna()
+        divs = _to_div_series(tk.dividends)
     except Exception:
         return "<p>JEPQ 배당 데이터를 불러오지 못했습니다.</p>"
 
@@ -1932,7 +1959,8 @@ def build_jepq_dividend_html():
     records = []
     prev_div = None
     for y in years:
-        div_ps = float(div_by_year.get(y, 0.0))
+        raw_val = div_by_year.get(y, 0.0)
+        div_ps = float(raw_val) if not hasattr(raw_val, '__len__') else float(np.nansum(raw_val))
         price_end = float(close_by_year_end.get(y, np.nan))
         yield_pct = div_ps / price_end * 100.0 if price_end > 0 else np.nan
         if prev_div is not None and prev_div > 0:
@@ -1957,7 +1985,7 @@ def build_jepq_dividend_html():
     _tz = divs.index.tz if divs.index.tz is not None else None
     _cutoff_12m = pd.Timestamp.now(tz=_tz) - pd.Timedelta(days=365)
     recent_12m = divs[divs.index >= _cutoff_12m]
-    projected_annual = float(recent_12m.sum()) * 1.03 if not recent_12m.empty else 0.0
+    projected_annual = _safe_div_sum(recent_12m) * 1.03 if not recent_12m.empty else 0.0
 
     try:
         last_px = float(close.iloc[-1])
@@ -2017,11 +2045,11 @@ def build_jepq_dividend_summary_text(df_enriched):
     # 최근 12개월 분배금 합계
     try:
         tk = yf.Ticker("JEPQ")
-        divs = tk.dividends.dropna()
+        divs = _to_div_series(tk.dividends)
         _tz = divs.index.tz if divs.index.tz is not None else None
         _cutoff = pd.Timestamp.now(tz=_tz) - pd.Timedelta(days=365)
         recent_12m = divs[divs.index >= _cutoff]
-        annual_dist_ps = float(recent_12m.sum()) if not recent_12m.empty else 0.0
+        annual_dist_ps = _safe_div_sum(recent_12m) if not recent_12m.empty else 0.0
     except Exception:
         annual_dist_ps = 0.0
 
@@ -2115,11 +2143,11 @@ def build_combined_milestone_html(df_enriched):
 
     # ── JEPQ 연 분배금/주 ──
     try:
-        jepq_divs = yf.Ticker("JEPQ").dividends.dropna()
+        jepq_divs = _to_div_series(yf.Ticker("JEPQ").dividends)
         _tz = jepq_divs.index.tz if jepq_divs.index.tz is not None else None
         _cutoff = pd.Timestamp.now(tz=_tz) - pd.Timedelta(days=365)
         recent_12m = jepq_divs[jepq_divs.index >= _cutoff]
-        jepq_dist_ps = float(recent_12m.sum()) if not recent_12m.empty else 0.0
+        jepq_dist_ps = _safe_div_sum(recent_12m) if not recent_12m.empty else 0.0
     except Exception:
         jepq_dist_ps = 0.0
     jepq_g = 0.03
