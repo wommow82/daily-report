@@ -2466,11 +2466,11 @@ def build_html_report(df_enriched, account_summary):
             .unique()
             .tolist()
         )
-        dividend_tickers = ["SCHD"]
+        dividend_tickers = ["SCHD", "JEPQ"]   # 인컴(연금) 전략
         dividend_set = set(dividend_tickers)
         growth_tickers = [t for t in tfsa_tickers if t not in dividend_set]
 
-        tfsa_dividend_table = make_holdings_table("TFSA", tickers_include=dividend_tickers)
+        tfsa_dividend_table = make_holdings_table("TFSA", tickers_include=dividend_tickers, add_summary_row=True)
         tfsa_growth_table = make_holdings_table("TFSA", tickers_include=growth_tickers, add_summary_row=True)
 
     resp_table = make_holdings_table("RESP")
@@ -2542,7 +2542,7 @@ def build_html_report(df_enriched, account_summary):
             <div class="card-header">
               <h2>📂 TFSA Holdings (USD)</h2>
             </div>
-            <h3><span class="tag tag-income">💰 인컴 전략</span> &nbsp;SCHD</h3>
+            <h3><span class="tag tag-income">💰 인컴 전략 (연금)</span> &nbsp;SCHD · JEPQ</h3>
             {tfsa_dividend_table}
             <hr class="divider"/>
             <h3><span class="tag tag-growth">🚀 성장/모멘텀</span></h3>
@@ -2559,7 +2559,7 @@ def build_html_report(df_enriched, account_summary):
           <div class="card">
             <div class="card-header">
               <h2>📈 중단기 통합 분석 (Claude AI 뉴스 분석)</h2>
-              <span class="tag tag-new">Claude Haiku</span>
+              <span class="tag tag-new">Claude Sonnet</span>
             </div>
             <p class="muted">※ 가격 모멘텀·변동성·뉴스 기반 휴리스틱 지표. 실제 투자 판단은 별도 리스크 검토 필요.</p>
             {midterm_html}
