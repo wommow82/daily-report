@@ -1835,35 +1835,6 @@ def build_schd_dividend_summary_text(df_enriched):
     annual_contrib_cad = monthly_schd_cad * 12.0 + annual_lump_schd_cad  # = 3,400 CAD/yr
     target_annual_cad = 12_000.0
 
-    # -----------------------------
-    # 9) 마일스톤 계산 헬퍼 함수 (Ver 3.0: $1K/$2K/$3K 모두 계산)
-    # -----------------------------
-    def _calc_milestone(target_monthly_cad, annual_div_start, g_rate, y_rate, annual_contrib):
-        """
-        복리 성장 모델로 목표 월 배당 달성까지 걸리는 기간을 계산한다.
-        target_monthly_cad: 목표 월 배당(CAD)
-        """
-        target_annual = target_monthly_cad * 12.0
-        if g_rate <= 0:
-            return None  # 불안정
-        A = annual_contrib * (y_rate / g_rate)
-        numerator = target_annual + A
-        denominator = annual_div_start + A
-        if numerator <= denominator:
-            return 0.0
-        n = np.log(numerator / denominator) / np.log(1.0 + g_rate)
-        return max(0.0, float(n))
-
-    def _fmt_years(n_years):
-        if n_years is None:
-            return "추정 불안정"
-        yi = int(n_years)
-        mi = int(round((n_years - yi) * 12.0))
-        if mi == 12:
-            yi += 1
-            mi = 0
-        return f"약 {yi}년 {mi}개월"
-
     g_str = fmt_pct(g * 100.0)
     yg_str = fmt_pct(y_gross * 100.0)
     yn_str = fmt_pct(y_net * 100.0)
@@ -1872,45 +1843,14 @@ def build_schd_dividend_summary_text(df_enriched):
     annual_cad_str = fmt_money(annual_div_cad_net, "C$")
     monthly_cad_str = fmt_money(annual_div_cad_net / 12.0, "C$")
 
-    ms1 = _calc_milestone(1000.0, annual_div_cad_net, g, y_net, annual_contrib_cad)
-    ms2 = _calc_milestone(2000.0, annual_div_cad_net, g, y_net, annual_contrib_cad)
-    ms3 = _calc_milestone(3000.0, annual_div_cad_net, g, y_net, annual_contrib_cad)
-
-    ms1_str = _fmt_years(ms1)
-    ms2_str = _fmt_years(ms2)
-    ms3_str = _fmt_years(ms3)
-
-    # 달성 예상 연도 계산
-    from datetime import datetime as _dt
-    cur_year = _dt.now().year
-
-    def _target_year(n_years):
-        if n_years is None:
-            return "—"
-        return f"({cur_year + int(n_years + 0.5)}년경)"
-
+    # ── SCHD 단독 현황만 표시 (마일스톤은 합산 트래커에서 통합 표시) ──
     return (
         "<div style='text-align:left;'>"
         f"<p><strong>현재 예상 월 배당금(CAD, SCHD):</strong> {monthly_cad_str} "
         f"&nbsp;|&nbsp; 연 {annual_cad_str} (보유 {schd_shares_total:,.0f}주 기준)</p>"
-        "<table style='border-collapse:collapse; width:auto; margin:8px 0;'>"
-        "<tr>"
-        "<th style='background:#e8f5e9; padding:6px 14px; border:1px solid #ccc; text-align:center;'>목표</th>"
-        "<th style='background:#e8f5e9; padding:6px 14px; border:1px solid #ccc; text-align:center;'>달성 예상</th>"
-        "<th style='background:#e8f5e9; padding:6px 14px; border:1px solid #ccc; text-align:center;'>예상 시기</th>"
-        "</tr>"
-        f"<tr><td style='padding:5px 14px; border:1px solid #ccc;'>월 C$1,000</td>"
-        f"<td style='padding:5px 14px; border:1px solid #ccc; color:#1565c0; font-weight:bold;'>{ms1_str}</td>"
-        f"<td style='padding:5px 14px; border:1px solid #ccc; color:#666;'>{_target_year(ms1)}</td></tr>"
-        f"<tr><td style='padding:5px 14px; border:1px solid #ccc;'>월 C$2,000</td>"
-        f"<td style='padding:5px 14px; border:1px solid #ccc; color:#1565c0; font-weight:bold;'>{ms2_str}</td>"
-        f"<td style='padding:5px 14px; border:1px solid #ccc; color:#666;'>{_target_year(ms2)}</td></tr>"
-        f"<tr><td style='padding:5px 14px; border:1px solid #ccc;'>월 C$3,000</td>"
-        f"<td style='padding:5px 14px; border:1px solid #ccc; color:#1565c0; font-weight:bold;'>{ms3_str}</td>"
-        f"<td style='padding:5px 14px; border:1px solid #ccc; color:#666;'>{_target_year(ms3)}</td></tr>"
-        "</table>"
-        f"<p class='muted'>원천징수 {wht_str} 반영 / DRIP + 매월 200 USD(환전 후 투자) / "
+        f"<p class='muted'>원천징수 {wht_str} 반영 / DRIP + 월 $200 CAD + 연 $1,000 CAD / "
         f"배당 성장률 CAGR {g_str} / 배당수익률 {yg_str}(세전) / {yn_str}(세후) / 투자원금 배당률: {yoc_str}(세후)</p>"
+        "<p class='muted'>※ 목표 달성 시기는 상단 <strong>🎯 배당 인컴 목표 달성 트래커</strong>를 참고하세요.</p>"
         "</div>"
     )
 
