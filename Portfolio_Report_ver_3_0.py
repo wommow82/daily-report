@@ -2559,7 +2559,7 @@ def build_html_report(df_enriched, account_summary):
           <div class="card">
             <div class="card-header">
               <h2>📈 중단기 통합 분석 (Claude AI 뉴스 분석)</h2>
-              <span class="tag tag-new">Claude Sonnet</span>
+              <span class="tag tag-new">Claude Haiku</span>
             </div>
             <p class="muted">※ 가격 모멘텀·변동성·뉴스 기반 휴리스틱 지표. 실제 투자 판단은 별도 리스크 검토 필요.</p>
             {midterm_html}
