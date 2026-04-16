@@ -1828,12 +1828,11 @@ def build_schd_dividend_summary_text(df_enriched):
     # -----------------------------
     # 8) 목표 도달 기간: 세후(Net) 배당 기준으로 추정
     # -----------------------------
-    # - 시작 연배당: annual_div_cad_net
-    # - 기여금: 매월 200 USD 환전 후 투자(가정)
-    # - 모델 내 yield도 세후 수익률(y_net) 사용 (목표는 '실수령 월 1,000 CAD'로 해석)
-    monthly_usd = 200.0
-    monthly_cad = monthly_usd * usd_to_cad
-    annual_contrib_cad = monthly_cad * 12.0
+    # - 기여금: SCHD 월 $200 CAD + 연 $1,000 CAD 추가 (lump sum)
+    # -----------------------------
+    monthly_schd_cad = 200.0          # 월 $200 CAD → SCHD
+    annual_lump_schd_cad = 1_000.0    # 연 1회 $1,000 CAD → SCHD
+    annual_contrib_cad = monthly_schd_cad * 12.0 + annual_lump_schd_cad  # = 3,400 CAD/yr
     target_annual_cad = 12_000.0
 
     # -----------------------------
@@ -2097,8 +2096,10 @@ def build_jepq_dividend_summary_text(df_enriched):
 
     yoc_net = annual_dist_cad_net / total_cost_cad if total_cost_cad > 0 else 0.0
 
-    monthly_contrib_usd = 200.0  # 기본값 (Settings 시트 확장 가능)
-    annual_contrib_cad = monthly_contrib_usd * 12.0 * usd_to_cad
+    # JEPQ 기여금: 월 $100 CAD + 연 $1,000 CAD lump sum
+    monthly_jepq_cad = 100.0
+    annual_lump_jepq_cad = 1_000.0
+    annual_contrib_cad = monthly_jepq_cad * 12.0 + annual_lump_jepq_cad  # = 2,200 CAD/yr
 
     monthly_str = fmt_money(monthly_dist_cad_net, "C$")
     annual_str = fmt_money(annual_dist_cad_net, "C$")
@@ -2201,10 +2202,14 @@ def build_combined_milestone_html(df_enriched):
     except Exception:
         jepq_y = 0.11
 
-    # ── 월 기여금: JEPQ 없으면 SCHD $200만, 있으면 둘 다 $200씩 ──
+    # ── 기여금: SCHD 월$200 CAD + JEPQ 월$100 CAD + 각 연$1,000 CAD lump sum ──
     has_jepq = jepq_shares > 0
-    monthly_contrib_usd = 400.0 if has_jepq else 200.0
-    annual_contrib_cad = monthly_contrib_usd * 12.0 * usd_to_cad
+    schd_monthly_cad  = 200.0
+    jepq_monthly_cad  = 100.0 if has_jepq else 0.0
+    schd_annual_lump  = 1_000.0
+    jepq_annual_lump  = 1_000.0 if has_jepq else 0.0
+    annual_contrib_cad = (schd_monthly_cad + jepq_monthly_cad) * 12.0 + schd_annual_lump + jepq_annual_lump
+    # SCHD 없을 때: 3,400 CAD/yr, JEPQ 있을 때: 5,600 CAD/yr
 
     # ── combined weighted yield & growth ──
     # JEPQ가 0주면 SCHD만으로 계산
@@ -2258,7 +2263,7 @@ def build_combined_milestone_html(df_enriched):
     schd_monthly_str = fmt_money(schd_annual_net_cad / 12.0, "C$")
     jepq_monthly_str = fmt_money(jepq_annual_net_cad / 12.0, "C$") if has_jepq else "C$0.00 (미보유)"
     combined_monthly_str = fmt_money(combined_monthly_net_cad, "C$")
-    contrib_note = f"DRIP + 월 ${int(monthly_contrib_usd)} USD 기여"
+    contrib_note = "DRIP + SCHD 월$200·연$1,000 / JEPQ 월$100·연$1,000 (CAD)"
 
     def _bar(pct, color="#1976d2"):
         filled = max(0, min(100, int(pct)))
