@@ -2660,7 +2660,7 @@ def main():
         f.write(html_doc)
     print(f"Report saved: {outname}")
 
-    subject = f"📊 Portfolio Daily Report - {datetime.now().strftime('%Y-%m-%d')}"
+    subject = f"📊 포트폴리오 일일 리포트 - {datetime.now().strftime('%Y-%m-%d')}"
     send_email_html(subject, html_doc)
 
 
