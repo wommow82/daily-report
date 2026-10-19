@@ -4694,7 +4694,7 @@ def build_html_report(df_enriched, account_summary, extras=None):
 
             <hr class="divider"/>
             <h3>📂 TFSA Holdings (USD)</h3>
-            <h3><span class="tag tag-income">💰 인컴 전략 (연금)</span> &nbsp;SCHD · JEPQ</h3>
+            <h3><span class="tag tag-income">💰 인컴 전략 (연금)</span></h3>
             {tfsa_dividend_table}
             <h3><span class="tag tag-growth">🚀 성장/모멘텀</span></h3>
             {tfsa_growth_table}
