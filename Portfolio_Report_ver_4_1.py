@@ -1416,17 +1416,20 @@ def _render(ov, ledger_info, compact=False):
             f"<div style='font-size:22px;margin:4px 0;'>{_col(_signed(t['pnl']), t['pnl'])} "
             f"<span style='font-size:15px;'>{_col(pct_txt, t['pnl'])}</span></div>"
             "<div class='muted' style='text-align:left;'>월 납입은 넣은 돈과 평가액에 같이 들어가므로 이 손익에는 섞이지 않습니다.</div>")
+        cell = "color:#0d1b2a;font-weight:700;font-size:12px;padding:6px 4px;text-align:center;white-space:nowrap;overflow:hidden;"
         if t["pnl"] >= 0:
             a = t["netdep"] / t["value"] * 100.0
             b = 100.0 - a
-            segs = f"<td style='width:{a:.1f}%;background:#90caf9;'>&nbsp;</td><td style='width:{b:.1f}%;background:#66bb6a;'>&nbsp;</td>"
+            segs = (f"<td style='width:{a:.1f}%;background:#90caf9;{cell}'>내가 넣은 돈 {_cad(t['netdep'])}</td>"
+                    f"<td style='width:{b:.1f}%;background:#66bb6a;{cell}'>불어난 금액 {_signed(t['pnl'])}</td>")
             legend = "파랑 = 내가 넣은 돈, 초록 = 불어난 금액"
         else:
             a = t["value"] / t["netdep"] * 100.0
             b = 100.0 - a
-            segs = f"<td style='width:{a:.1f}%;background:#90caf9;'>&nbsp;</td><td style='width:{b:.1f}%;background:#ef5350;'>&nbsp;</td>"
+            segs = (f"<td style='width:{a:.1f}%;background:#90caf9;{cell}'>남은 금액 {_cad(t['value'])}</td>"
+                    f"<td style='width:{b:.1f}%;background:#ef5350;{cell}'>줄어든 금액 {_signed(t['pnl'])}</td>")
             legend = "파랑 = 남아 있는 금액, 빨강 = 줄어든 금액 (전체 = 내가 넣은 돈)"
-        bar = (f"<table style='border:0;margin:6px 0;'><tr style='height:14px;'>{segs}</tr></table>"
+        bar = (f"<table style='border:0;margin:6px 0;'><tr>{segs}</tr></table>"
                f"<div class='muted' style='text-align:left;'>{legend}</div>")
 
     if compact:
