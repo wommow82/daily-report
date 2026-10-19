@@ -855,6 +855,7 @@ from simulation_module import (
 )
 
 MAX_SCENARIOS = 4
+SHOW_BASELINE = False   # True면 리포트에 '현재 보유 기준' 표도 보여준다 (기본: Run=Y 시나리오만 표시)
 DEFAULTS = {
     "target_monthly_cad": 2000.0, "retire_years": 10, "sim_years": 20,
     "drip": True, "price_growth": 0.0, "wht_usd": 0.15, "accounts": ("TFSA",),
@@ -1237,7 +1238,7 @@ def _build(open_sheet_fn, df_hold, usd_cad, fetch_fn, sheet_name):
         return _note("배당 데이터를 가져온 보유 종목이 없어 기준선을 만들 수 없습니다.") + sheet_msg, []
     base_agg = aggregate(base_results, years)
 
-    blocks = [_render_baseline(base_agg, years, cfg, base_assume, base_data, excluded)]
+    blocks = [_render_baseline(base_agg, years, cfg, base_assume, base_data, excluded)] if SHOW_BASELINE else []
     target = cfg["target_monthly_cad"]
     ry = min(cfg["retire_years"], years) - 1
     months = first_month_reaching(base_agg["series"], target)
@@ -1302,8 +1303,9 @@ def _build(open_sheet_fn, df_hold, usd_cad, fetch_fn, sheet_name):
             blocks.append(_note("Simulation 탭에 실행할 시나리오가 없습니다 (비었거나 Run이 모두 N)."))
 
     intro = _note(
-        "현재 보유(Holdings + Trades 반영) 위에 Simulation 탭의 <strong>가정 매수</strong>를 얹어 월 단위로 계산했습니다. "
-        "노란 줄은 은퇴 목표 시점입니다. 종목끼리 서로 영향을 주지 않고, 각 종목 안에서만 재투자한다고 가정합니다.")
+        "Simulation 탭에서 <strong>Run=Y</strong>인 가정 매수만 계산합니다. 현재 보유(Holdings + Trades 반영) 위에 얹어 월 단위로 계산하고, "
+        "표의 '기준'은 추가 매수가 없을 때의 값입니다. 노란 줄은 은퇴 목표 시점입니다. "
+        "종목끼리 서로 영향을 주지 않고, 각 종목 안에서만 재투자한다고 가정합니다.")
     tail = _note(
         "※ 예측이 아니라 가정에 따른 계산입니다. 환율 고정, 배당을 매달 1/12씩 받는 단순화, "
         "원천징수율(기본: 미국 상장 15%, 캐나다 상장 0%)은 확인되지 않은 가정입니다. 투자 판단의 단독 근거로 쓰지 마세요.")
@@ -4689,15 +4691,17 @@ def build_html_report(df_enriched, account_summary, extras=None):
             {pnl_html}
             <h3>계좌별 요약</h3>
             {df_summary.to_html(index=False, escape=False)}
-          </div>
 
-          <!-- ② 손익 추이 (History 탭) -->
-          <div class="card">
-            <div class="card-header">
-              <h2>📈 손익 추이 (History 탭)</h2>
-              <span class="tag tag-new">Ver 4.1 신규</span>
-            </div>
-            {history_html}
+            <hr class="divider"/>
+            <h3>📂 TFSA Holdings (USD)</h3>
+            <h3><span class="tag tag-income">💰 인컴 전략 (연금)</span> &nbsp;SCHD · JEPQ</h3>
+            {tfsa_dividend_table}
+            <h3><span class="tag tag-growth">🚀 성장/모멘텀</span></h3>
+            {tfsa_growth_table}
+
+            <hr class="divider"/>
+            <h3>🎓 RESP Holdings (CAD)</h3>
+            {resp_table}
           </div>
 
           <!-- ⓪-b AI 브리핑 -->
@@ -4707,24 +4711,6 @@ def build_html_report(df_enriched, account_summary, extras=None):
               <span class="tag tag-new">Claude</span>
             </div>
             {ai_html}
-          </div>
-
-          <!-- ③ TFSA 보유 종목 -->
-          <div class="card">
-            <div class="card-header">
-              <h2>📂 TFSA Holdings (USD)</h2>
-            </div>
-            <h3><span class="tag tag-income">💰 인컴 전략 (연금)</span> &nbsp;SCHD · JEPQ</h3>
-            {tfsa_dividend_table}
-            <hr class="divider"/>
-            <h3><span class="tag tag-growth">🚀 성장/모멘텀</span></h3>
-            {tfsa_growth_table}
-          </div>
-
-          <!-- ③ RESP 보유 종목 -->
-          <div class="card">
-            <h2>🎓 RESP Holdings (CAD)</h2>
-            {resp_table}
           </div>
 
           <!-- ⑤ 배당 인컴 목표 (합산 마일스톤) - 메인 섹션 -->
@@ -4739,7 +4725,7 @@ def build_html_report(df_enriched, account_summary, extras=None):
           <!-- ⑧ 20년 배당 시뮬레이터 (보유 + 가정 매수) -->
           <div class="card">
             <div class="card-header">
-              <h2>🧮 20년 배당 시뮬레이터 (현재 보유 + Simulation 탭 가정 매수)</h2>
+              <h2>🧮 20년 배당 시뮬레이터 (Simulation 탭 Run=Y 시나리오)</h2>
               <span class="tag tag-new">Ver 4.0 신규</span>
             </div>
             {simulation_html}
