@@ -1389,16 +1389,17 @@ def compute_overview(df_enriched, account_summary, usd_cad):
     return {"total": total, "accounts": accounts, "holdings": holdings, "zero_cost": zero_cost}
 
 
-def build_pnl_overview(df_enriched, account_summary, usd_cad, ledger_info=None):
-    """반환: (html, facts). 예외를 던지지 않는다."""
+def build_pnl_overview(df_enriched, account_summary, usd_cad, ledger_info=None, compact=False):
+    """반환: (html, facts). 예외를 던지지 않는다.
+    compact=True: 계좌/종목별 표는 빼고 '총 손익 한 줄 + 막대 + 경고'만 (리포트의 Account Summary 카드 위에 붙임)."""
     try:
         ov = compute_overview(df_enriched, account_summary, usd_cad)
-        return _render(ov, ledger_info), _facts(ov)
+        return _render(ov, ledger_info, compact), _facts(ov)
     except Exception as e:
         return f"<p class='muted'>손익 요약을 만들지 못했습니다: {_esc(e)}</p>", []
 
 
-def _render(ov, ledger_info):
+def _render(ov, ledger_info, compact=False):
     t = ov["total"]
     if t["netdep"] <= 0:
         head = ("<p>순투입금이 0이라 원금 대비 손익을 계산할 수 없습니다. Settings 탭의 "
@@ -1425,6 +1426,22 @@ def _render(ov, ledger_info):
             legend = "파랑 = 남아 있는 금액, 빨강 = 줄어든 금액 (전체 = 내가 넣은 돈)"
         bar = (f"<table style='border:0;margin:6px 0;'><tr style='height:14px;'>{segs}</tr></table>"
                f"<div class='muted' style='text-align:left;'>{legend}</div>")
+
+    if compact:
+        warn_c = ""
+        if ov["zero_cost"]:
+            warn_c = (f"<p class='muted' style='text-align:left;color:#c62828;'>평균단가가 0인 종목({_esc(', '.join(ov['zero_cost']))})은 "
+                      "평가손익이 실제보다 크게 나옵니다. Holdings의 AvgPrice를 확인하세요.</p>")
+        realized_c = ""
+        if ledger_info and ledger_info.get("realized"):
+            parts = []
+            for r in ledger_info["realized"]:
+                ccy = "US$" if r["account"] == "TFSA" else "C$"
+                parts.append(f"{_esc(r['ticker'])} {'+' if r['pl_native'] >= 0 else '-'}{ccy}{abs(r['pl_native']):,.2f}")
+            realized_c = ("<p class='muted' style='text-align:left;'>Trades 탭 기록상 실현 손익: " + ", ".join(parts) + "</p>")
+        note_c = ("<p class='muted' style='text-align:left;'>※ TFSA의 USD 자산은 오늘 환율로 CAD 환산하므로 환율 변동 효과가 들어 있습니다. "
+                  "계좌별·종목별 손익은 아래 표를 보세요.</p>")
+        return head + bar + warn_c + realized_c + note_c
 
     acc_rows = ""
     for acc, label in (("TFSA", "TFSA (USD 자산을 CAD로 환산)"), ("RESP", "RESP (CAD)")):
@@ -4608,16 +4625,9 @@ def build_html_report(df_enriched, account_summary, extras=None):
 
     resp_table = make_holdings_table("RESP")
 
-    # ---------- 3) 중단기 투자 분석 (전체 보유 종목) ----------
-    midterm_html = build_midterm_analysis_html(df_enriched)
-
-    # ---------- 4) SCHD 배당 분석 ----------
-    schd_div_html = build_schd_dividend_html()
-    schd_summary_text = build_schd_dividend_summary_text(df_enriched)
-
-    # ---------- 5) [Ver 3.0] JEPQ 분배금 분석 ----------
-    jepq_div_html = build_jepq_dividend_html()
-    jepq_summary_text = build_jepq_dividend_summary_text(df_enriched)
+    # (Ver 4.2) 중단기 통합 분석 / SCHD 배당 분석 / JEPQ 분배금 분석 카드는 제거했다.
+    #   - 중단기 분석 -> AI 브리핑이 대체
+    #   - SCHD/JEPQ 분석 -> 합산 트래커 + 20년 시뮬레이터가 대체
 
     # ---------- 6) [Ver 3.0] SCHD + JEPQ 합산 마일스톤 ----------
     combined_milestone_html = build_combined_milestone_html(df_enriched)
@@ -4669,16 +4679,19 @@ def build_html_report(df_enriched, account_summary, extras=None):
           <h1>📊 Daily Portfolio Report</h1>
           <p class="subtitle">Generated at {now_str} &nbsp;|&nbsp; BaseCurrency: {base_ccy} &nbsp;|&nbsp; Powered by Claude AI</p>
 
-          <!-- ⓪-a 한눈에 보는 손익 (월 납입 제외) -->
+          <!-- ① 계좌 요약 + 월 납입 제외 총 손익 -->
           <div class="card" style="border:2px solid #2e7d32;">
             <div class="card-header">
-              <h2>📌 한눈에 보는 손익 (월 납입 제외)</h2>
-              <span class="tag tag-new">Ver 4.0 신규</span>
+              <h2>🏦 Account Summary (TFSA / RESP)</h2>
             </div>
+            <div class="summary-bar">{total_assets_line}</div>
+            <h3>📌 월 납입 제외 총 손익</h3>
             {pnl_html}
+            <h3>계좌별 요약</h3>
+            {df_summary.to_html(index=False, escape=False)}
           </div>
 
-          <!-- ⓪-a2 손익 추이 (History 탭) -->
+          <!-- ② 손익 추이 (History 탭) -->
           <div class="card">
             <div class="card-header">
               <h2>📈 손익 추이 (History 탭)</h2>
@@ -4696,16 +4709,7 @@ def build_html_report(df_enriched, account_summary, extras=None):
             {ai_html}
           </div>
 
-          <!-- ① 계좌 요약 -->
-          <div class="card">
-            <div class="card-header">
-              <h2>🏦 Account Summary (TFSA / RESP)</h2>
-            </div>
-            <div class="summary-bar">{total_assets_line}</div>
-            {df_summary.to_html(index=False, escape=False)}
-          </div>
-
-          <!-- ② TFSA 보유 종목 -->
+          <!-- ③ TFSA 보유 종목 -->
           <div class="card">
             <div class="card-header">
               <h2>📂 TFSA Holdings (USD)</h2>
@@ -4723,16 +4727,6 @@ def build_html_report(df_enriched, account_summary, extras=None):
             {resp_table}
           </div>
 
-          <!-- ④ 중단기 분석 -->
-          <div class="card">
-            <div class="card-header">
-              <h2>📈 중단기 통합 분석 (Claude AI 뉴스 분석)</h2>
-              <span class="tag tag-new">Claude Haiku</span>
-            </div>
-            <p class="muted">※ 가격 모멘텀·변동성·뉴스 기반 휴리스틱 지표. 실제 투자 판단은 별도 리스크 검토 필요.</p>
-            {midterm_html}
-          </div>
-
           <!-- ⑤ 배당 인컴 목표 (합산 마일스톤) - 메인 섹션 -->
           <div class="card" style="border:2px solid #1976d2;">
             <div class="card-header">
@@ -4740,25 +4734,6 @@ def build_html_report(df_enriched, account_summary, extras=None):
               <span class="tag tag-new">Ver 3.0 신규</span>
             </div>
             {combined_milestone_html}
-          </div>
-
-          <!-- ⑥ SCHD 배당 상세 -->
-          <div class="card">
-            <h2>💰 SCHD 배당 분석 (장기 인컴 전략)</h2>
-            {schd_summary_text}
-            <p class="muted">※ 10년 배당 데이터 기반 단순 추정 / DRIP + 매월 200 USD 기여 가정</p>
-            {schd_div_html}
-          </div>
-
-          <!-- ⑦ JEPQ 분배금 상세 -->
-          <div class="card">
-            <div class="card-header">
-              <h2>📦 JEPQ 분배금 분석 (Nasdaq 100 커버드콜 ETF)</h2>
-              <span class="tag tag-new">Ver 3.0 신규</span>
-            </div>
-            {jepq_summary_text}
-            <p class="muted">※ 커버드콜 특성상 월별 분배금 변동 있음. 성장률 3%/yr 보수적 가정.</p>
-            {jepq_div_html}
           </div>
 
           <!-- ⑧ 20년 배당 시뮬레이터 (보유 + 가정 매수) -->
@@ -4866,7 +4841,7 @@ def main():
     extras = {}
 
     try:
-        extras["pnl_html"], pnl_facts = build_pnl_overview(df_enriched, acc_summary, usd_cad, ledger_info)
+        extras["pnl_html"], pnl_facts = build_pnl_overview(df_enriched, acc_summary, usd_cad, ledger_info, compact=True)
     except Exception as e:
         extras["pnl_html"], pnl_facts = f"<p class='muted'>손익 요약 실패: {_html_escape(e)}</p>", []
 
