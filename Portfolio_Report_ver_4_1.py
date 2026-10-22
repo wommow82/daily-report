@@ -3,7 +3,7 @@
 # Portfolio_Report ver 4.1  (단일 파일 버전)
 #   - 이 파일 하나만 저장소에 올리면 됩니다 (+ 워크플로 yml, requirements_ver4.txt).
 #   - 아래 EMBEDDED_* 블록은 별도 모듈 파일(simulation_module.py, ledger.py, combined_sim.py,
-#     pnl_overview.py, history_log.py, ai_briefing.py)의 내용을 그대로 담은 것입니다.
+#     pnl_overview.py, history_log.py, dividends_log.py, ai_briefing.py)의 내용을 그대로 담은 것입니다.
 # =====================================================================
 import sys as _sys
 import types as _types
@@ -1770,6 +1770,254 @@ def run_history(open_sheet_fn, ov, usd_cad, write=None, today=None):
 '''
 _register_embedded('history_log', EMBEDDED_HISTORY_LOG)
 
+# ---------- EMBEDDED_DIVIDENDS_LOG ----------
+EMBEDDED_DIVIDENDS_LOG = r'''# -*- coding: utf-8 -*-
+"""
+dividends_log.py  -  Dividends 탭: 받은 배당 기록 -> 월별/종목별/분기별 요약 + 월 목표 대비 진행률
+
+Dividends 탭 열 (첫 줄에 그대로 붙여 넣기)
+  Date, Ticker, Account, Amount, Currency, CashEffect, Note
+  - Amount    : 실제로 받은 금액(세금 뗀 후). 종목 통화 기준.
+  - Currency  : 비우면 계좌 기준 (TFSA=USD, RESP=CAD). 다르면 USD 또는 CAD로 적기.
+  - CashEffect: 기본 N = '기록만' (보유 주식/Cash/순투입금을 건드리지 않음).
+                Y = 이 배당을 그 계좌의 Cash에도 더함 (현금으로 받아 그대로 둔 배당용).
+  - DRIP(자동 재투자)로 받은 배당은 Amount만 여기 적고(CashEffect=N), 늘어난 주식 수는
+    Trades 탭에 BUY로 적거나 Original Holdings/Trades 수량으로 관리하세요.
+    (여기서 Cash에 더하면 주식 + 현금으로 이중 계산됩니다.)
+
+리포트에는 CAD로 환산해 보여준다. 환산은 '오늘 환율' 하나를 모든 기록에 쓰는 근사이다.
+시트는 읽기만 한다. 어떤 오류도 밖으로 던지지 않는다.
+"""
+import html as _html
+
+import pandas as pd
+
+from simulation_module import _flag, _num, read_simulation_rows
+
+ACCOUNTS = ("TFSA", "RESP")
+SHEET_NAME = "Dividends"
+
+
+def _esc(s):
+    return _html.escape(str(s), quote=True)
+
+
+def _cad(x, digits=0):
+    return f"C${x:,.{digits}f}"
+
+
+def _acc_currency(account):
+    return "USD" if account == "TFSA" else "CAD"
+
+
+# =========================
+# 읽기 / 해석
+# =========================
+
+def load_dividends(open_sheet_fn, sheet_name=SHEET_NAME):
+    """반환: (rows, warnings). 탭이 없으면 조용히 빈 결과."""
+    try:
+        return read_simulation_rows(open_sheet_fn(), sheet_name), []
+    except Exception as e:
+        if type(e).__name__ == "WorksheetNotFound":
+            return [], []
+        return [], [f"{sheet_name} 탭을 읽지 못했습니다: {e}"]
+
+
+def parse_dividend(rec, today):
+    """시트 한 줄 -> dict. 문제가 있으면 {'row', 'error'}. 미래 날짜는 {'row','future':True}."""
+    row = rec.get("_row")
+    date = pd.to_datetime(str(rec.get("date", "")).strip(), errors="coerce")
+    if pd.isna(date):
+        return {"row": row, "error": "Date를 읽을 수 없습니다 (예: 2026-10-14)"}
+    date = date.tz_localize(None) if getattr(date, "tzinfo", None) else date
+    date = date.normalize()
+    ticker = str(rec.get("ticker", "")).strip().upper()
+    if not ticker:
+        return {"row": row, "error": "Ticker가 비어 있습니다"}
+    account = str(rec.get("account", "")).strip().upper() or "TFSA"
+    if account not in ACCOUNTS:
+        return {"row": row, "error": f"Account는 TFSA 또는 RESP여야 합니다: '{account}'"}
+    amount = _num(rec.get("amount"))
+    if amount is None or amount <= 0:
+        return {"row": row, "error": "Amount(0보다 큰 값)가 필요합니다"}
+    cur = str(rec.get("currency", "")).strip().upper() or _acc_currency(account)
+    if cur not in ("USD", "CAD"):
+        return {"row": row, "error": f"Currency는 USD 또는 CAD여야 합니다: '{cur}'"}
+    if date > pd.Timestamp(today).normalize():
+        return {"row": row, "future": True}
+    return {"row": row, "date": date, "ticker": ticker, "account": account, "amount": float(amount),
+            "currency": cur, "cash_effect": _flag(rec.get("casheffect"), False),
+            "note": str(rec.get("note", "")).strip()}
+
+
+def parse_all(rows, today):
+    """반환: (good, warnings, future_count). 완전히 빈 줄은 read_simulation_rows가 이미 뺀다."""
+    good, warns, future = [], [], 0
+    for rec in rows:
+        p = parse_dividend(rec, today)
+        if p.get("error"):
+            warns.append(f"Dividends {p['row']}행: {p['error']} -> 건너뜀")
+        elif p.get("future"):
+            future += 1
+        else:
+            good.append(p)
+    return good, warns, future
+
+
+def cash_deltas(good, usd_cad):
+    """CashEffect=Y인 배당만 계좌 현금 변화로. 반환: ({TFSA: USD, RESP: CAD}, warnings)"""
+    delta, warns = {"TFSA": 0.0, "RESP": 0.0}, []
+    for d in good:
+        if not d["cash_effect"]:
+            continue
+        acc_cur = _acc_currency(d["account"])
+        if d["currency"] == acc_cur:
+            delta[d["account"]] += d["amount"]
+        elif usd_cad and usd_cad > 0:
+            amt = d["amount"] * usd_cad if d["currency"] == "USD" else d["amount"] / usd_cad   # 계좌 통화로 환산
+            delta[d["account"]] += amt
+        else:
+            warns.append(f"Dividends {d['row']}행: 환율을 몰라 Cash에 더하지 못했습니다.")
+    return delta, warns
+
+
+# =========================
+# 요약 계산
+# =========================
+
+def to_cad(d, usd_cad):
+    return d["amount"] * usd_cad if d["currency"] == "USD" else d["amount"]
+
+
+def summarize(good, usd_cad, today):
+    today = pd.Timestamp(today).normalize()
+    items = [dict(d, cad=to_cad(d, usd_cad), ym=d["date"].strftime("%Y-%m")) for d in good]
+
+    # 최근 12개월 (이번 달 포함)
+    months = []
+    for i in range(11, -1, -1):
+        m = (today.to_period("M") - i)
+        months.append(str(m))
+    by_month = {m: 0.0 for m in months}
+    for it in items:
+        if it["ym"] in by_month:
+            by_month[it["ym"]] += it["cad"]
+
+    # 올해 종목별
+    ytd = {}
+    for it in items:
+        if it["date"].year == today.year:
+            k = (it["ticker"], it["account"])
+            ytd[k] = ytd.get(k, 0.0) + it["cad"]
+
+    # 연도 x 분기
+    yq = {}
+    for it in items:
+        y, q = it["date"].year, (it["date"].month - 1) // 3 + 1
+        yq.setdefault(y, {1: 0.0, 2: 0.0, 3: 0.0, 4: 0.0})[q] += it["cad"]
+
+    # 최근 완료된 달 최대 3개 평균 (기록 시작 달 이후만)
+    avg3, avg_n = None, 0
+    if items:
+        first = min(it["date"] for it in items).to_period("M")
+        cur = today.to_period("M")
+        done = [cur - i for i in (1, 2, 3) if (cur - i) >= first]
+        if done:
+            tot = sum(it["cad"] for it in items if it["ym"] in {str(m) for m in done})
+            avg3, avg_n = tot / len(done), len(done)
+
+    total12 = sum(by_month.values())
+    return {"months": months, "by_month": by_month, "total12": total12, "ytd": ytd,
+            "ytd_total": sum(ytd.values()), "yq": yq, "avg3": avg3, "avg_n": avg_n,
+            "count": len(items), "today": today}
+
+
+def facts_from(sm, target):
+    if not sm["count"]:
+        return []
+    f = [f"Dividends 탭 기록(CAD 환산, 오늘 환율 근사): 올해 받은 배당 합계 {_cad(sm['ytd_total'])}, "
+         f"최근 12개월 합계 {_cad(sm['total12'])}"]
+    if sm["avg3"] is not None:
+        f.append(f"Dividends 탭 기록상 최근 {sm['avg_n']}개월(완료된 달) 평균 월 배당 {_cad(sm['avg3'])} "
+                 f"(월 목표 {_cad(target)}의 {sm['avg3'] / target * 100:.0f}%)")
+    return f
+
+
+# =========================
+# HTML
+# =========================
+
+def render_html(sm, target, warns, future, usd_cad):
+    if not sm["count"]:
+        msg = ("<p class='muted' style='text-align:left;'>아직 받은 배당 기록이 없습니다. Dividends 탭에 "
+               "<strong>Date, Ticker, Account, Amount</strong>를 적으면 여기에 월별·종목별로 정리됩니다.</p>")
+        return msg + _warn_html(warns, future)
+
+    if sm["avg3"] is not None:
+        pct = sm["avg3"] / target * 100.0
+        bar_w = max(0.0, min(100.0, pct))
+        prog = (f"<div style='margin:4px 0;'>최근 {sm['avg_n']}개월 평균 월 배당 <strong>{_cad(sm['avg3'])}</strong> / 목표 "
+                f"{_cad(target)} → <strong>{pct:.1f}%</strong></div>"
+                f"<div style='background:#eee;border-radius:4px;height:10px;'>"
+                f"<div style='width:{bar_w:.1f}%;background:#1976d2;height:10px;border-radius:4px;'></div></div>")
+    else:
+        prog = ("<div class='muted' style='text-align:left;'>완료된 달의 기록이 아직 없어 월 평균·목표 진행률은 "
+                "다음 달부터 계산됩니다.</div>")
+    head = (f"<div style='margin:4px 0;'>올해 받은 배당 <strong>{_cad(sm['ytd_total'])}</strong> · "
+            f"최근 12개월 <strong>{_cad(sm['total12'])}</strong></div>{prog}")
+
+    cur_m = str(sm["today"].to_period("M"))
+    mrows = ""
+    for m in sm["months"]:
+        v = sm["by_month"][m]
+        mark = " (이번 달, 진행 중)" if m == cur_m else ""
+        mrows += f"<tr><td>{m}{mark}</td><td>{_cad(v) if v else '—'}</td></tr>"
+    mtbl = "<h3>월별 받은 배당 (최근 12개월, CAD 환산)</h3><table><tr><th>월</th><th>받은 배당</th></tr>" + mrows + "</table>"
+
+    yrows = ""
+    for (t, acc), v in sorted(sm["ytd"].items(), key=lambda kv: -kv[1]):
+        yrows += f"<tr><td>{_esc(t)}</td><td>{acc}</td><td>{_cad(v)}</td></tr>"
+    ytbl = (f"<h3>종목별 올해 누적 배당 ({sm['today'].year}년)</h3><table><tr><th>종목</th><th>계좌</th><th>누적(CAD)</th></tr>"
+            + (yrows or "<tr><td colspan='3'>올해 기록 없음</td></tr>") + "</table>")
+
+    qrows = ""
+    for y in sorted(sm["yq"]):
+        q = sm["yq"][y]
+        label = f"{y}{' (진행 중)' if y == sm['today'].year else ''}"
+        qrows += (f"<tr><td>{label}</td>" + "".join(f"<td>{_cad(q[i]) if q[i] else '—'}</td>" for i in (1, 2, 3, 4))
+                  + f"<td><strong>{_cad(sum(q.values()))}</strong></td></tr>")
+    qtbl = "<h3>연도·분기별 비교 (CAD 환산)</h3><table><tr><th>연도</th><th>1분기</th><th>2분기</th><th>3분기</th><th>4분기</th><th>합계</th></tr>" + qrows + "</table>"
+
+    note = (f"<p class='muted' style='text-align:left;'>※ USD 배당은 오늘 환율({usd_cad:.4f})로 CAD 환산한 근사값입니다. "
+            "Amount는 세금을 뗀 후 실제로 받은 금액을 적어야 정확합니다.</p>")
+    return head + mtbl + ytbl + qtbl + note + _warn_html(warns, future)
+
+
+def _warn_html(warns, future):
+    out = ""
+    if future:
+        out += f"<p class='muted' style='text-align:left;'>오늘 이후 날짜 {future}건은 아직 반영하지 않았습니다.</p>"
+    if warns:
+        out += ("<p class='muted' style='text-align:left;color:#c62828;'>확인이 필요한 줄: " +
+                " / ".join(_esc(w) for w in warns[:8]) + "</p>")
+    return out
+
+
+# =========================
+# 리포트에서 부르는 함수
+# =========================
+
+def build_dividend_report(good, warns, future, usd_cad, target, today):
+    """반환: (html, facts). 예외를 던지지 않는다."""
+    try:
+        sm = summarize(good, usd_cad, today)
+        return render_html(sm, target, warns, future, usd_cad), facts_from(sm, target)
+    except Exception as e:
+        return f"<p class='muted'>배당 기록 요약 중 오류: {_esc(e)}</p>", []
+'''
+_register_embedded('dividends_log', EMBEDDED_DIVIDENDS_LOG)
+
 # ---------- EMBEDDED_AI_BRIEFING ----------
 EMBEDDED_AI_BRIEFING = r'''# -*- coding: utf-8 -*-
 """
@@ -2165,6 +2413,8 @@ from email.mime.multipart import MIMEMultipart
 from ledger import load_trades, apply_trades, render_ledger_html          # Trades 탭 -> 현재 보유
 from combined_sim import build_combined_simulation                        # 보유 + 가정 매수 20년 배당
 from pnl_overview import build_pnl_overview, compute_overview             # 월 납입 제외 전체 손익
+from dividends_log import load_dividends, parse_all, cash_deltas, build_dividend_report   # Dividends 탭 (받은 배당 기록)
+from combined_sim import read_sim_settings
 from history_log import run_history                                       # History 탭 (하루 한 줄 기록, 쓰는 곳은 여기뿐)
 from ai_briefing import build_ai_briefing                                 # 거시경제 + 뉴스 AI 브리핑(한국어)
 
@@ -4655,6 +4905,7 @@ def build_html_report(df_enriched, account_summary, extras=None):
     pnl_html = extras.get("pnl_html") or _none
     history_html = extras.get("history_html") or _none
     ai_html = extras.get("ai_html") or _none
+    dividends_html = extras.get("dividends_html") or _none
     simulation_html = extras.get("simulation_html") or _none
     ledger_html = extras.get("ledger_html") or _none
 
@@ -4736,6 +4987,15 @@ def build_html_report(df_enriched, account_summary, extras=None):
               <span class="tag tag-new">Ver 3.0 신규</span>
             </div>
             {combined_milestone_html}
+          </div>
+
+          <!-- ⑤-b 받은 배당 (Dividends 탭) -->
+          <div class="card">
+            <div class="card-header">
+              <h2>💵 받은 배당 (Dividends 탭)</h2>
+              <span class="tag tag-new">Ver 4.2 신규</span>
+            </div>
+            {dividends_html}
           </div>
 
           <!-- ⑧ 20년 배당 시뮬레이터 (보유 + 가정 매수) -->
@@ -4829,6 +5089,20 @@ def main():
         print(f"⚠️ Trades 반영 실패(기준 Holdings로 계속): {e}")
         ledger_info = None
 
+    # ---------- Dividends 탭: 받은 배당 기록 (CashEffect=Y인 줄만 현금에 더함) ----------
+    div_good, div_warn, div_future = [], [], 0
+    try:
+        _today = pd.Timestamp.now().normalize()
+        div_rows, w0 = load_dividends(_open_sheet)
+        div_good, w1, div_future = parse_all(div_rows, _today)
+        _dcash, w2 = cash_deltas(div_good, get_usd_cad_rate())
+        tfsa_cash_usd += _dcash["TFSA"]
+        resp_cash_cad += _dcash["RESP"]
+        div_warn = w0 + w1 + w2
+    except Exception as e:
+        print(f"⚠️ Dividends 처리 실패(배당 기록 없이 계속): {e}")
+        div_warn = [f"Dividends 처리 중 오류: {e}"]
+
     df_enriched, acc_summary = enrich_holdings_with_prices(
         df_hold,
         base_currency=base_currency,
@@ -4846,6 +5120,17 @@ def main():
         extras["pnl_html"], pnl_facts = build_pnl_overview(df_enriched, acc_summary, usd_cad, ledger_info, compact=True)
     except Exception as e:
         extras["pnl_html"], pnl_facts = f"<p class='muted'>손익 요약 실패: {_html_escape(e)}</p>", []
+
+    try:
+        try:
+            _target = read_sim_settings(_open_sheet())["target_monthly_cad"]
+        except Exception:
+            _target = 2000.0
+        extras["dividends_html"], div_facts = build_dividend_report(
+            div_good, div_warn, div_future, usd_cad, _target, pd.Timestamp.now().normalize())
+        pnl_facts = list(pnl_facts) + div_facts
+    except Exception as e:
+        extras["dividends_html"] = f"<p class='muted'>배당 기록 요약 실패: {_html_escape(e)}</p>"
 
     # History: 오늘 스냅샷 1줄 기록(History 탭만 씀) + 추이/수익률 계산
     try:
