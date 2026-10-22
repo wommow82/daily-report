@@ -505,7 +505,8 @@ ledger.py  -  Trades 탭(거래 기록) -> 현재 보유 종목 계산
 Trades 탭 열 (첫 줄에 그대로 붙여 넣기)
   Date, Ticker, Side, Shares, Price, Fee, Account, Currency, Amount, Apply, CashEffect, Note
   Side  : BUY / SELL / DEPOSIT / WITHDRAW   (한글 매수/매도/입금/출금도 인식)
-  DEPOSIT/WITHDRAW: Amount(CAD)만 쓰고, 그 계좌의 '순투입금'에 더하거나 뺀다.
+  DEPOSIT/WITHDRAW: Amount(CAD)만 쓰고, 그 계좌의 '순투입금'에 더하거나 빼고, 현금(Cash)도 같이 늘리거나 줄인다
+                    (TFSA는 오늘 환율로 USD 환산). 현금에 반영하기 싫으면 CashEffect=N.
 """
 import html as _html
 
@@ -584,6 +585,7 @@ def parse_trade(rec, today=None):
         if amt is None or amt <= 0:
             return {"row": row, "error": "Amount(CAD, 0보다 큰 값)가 필요합니다"}
         out["amount_cad"] = float(amt)
+        out["cash_effect"] = _flag(rec.get("casheffect"), True)   # 입출금은 기본으로 현금에 반영
         return out
 
     ticker = str(rec.get("ticker", "")).strip().upper()
@@ -632,7 +634,7 @@ def _positions_from_holdings(df_hold):
     return order, pos
 
 
-def apply_trades(df_hold, trade_rows, today=None):
+def apply_trades(df_hold, trade_rows, today=None, usd_cad=None):
     """
     df_hold  : Holdings 탭 DataFrame (Ticker, Shares, AvgPrice, Type ...)
     trade_rows: load_trades()가 돌려준 줄들
@@ -681,6 +683,13 @@ def apply_trades(df_hold, trade_rows, today=None):
         if t["side"] in ("DEPOSIT", "WITHDRAW"):
             sign = 1.0 if t["side"] == "DEPOSIT" else -1.0
             info["netdep_delta"][acc] += sign * t["amount_cad"]
+            if t["cash_effect"]:   # 입출금은 CashEffect가 비어 있으면 현금에도 반영 (N으로 끌 수 있음)
+                if acc == "RESP":
+                    info["cash_delta"]["RESP"] += sign * t["amount_cad"]
+                elif usd_cad and usd_cad > 0:
+                    info["cash_delta"]["TFSA"] += sign * t["amount_cad"] / float(usd_cad)   # TFSA 현금은 USD
+                else:
+                    info["warnings"].append(f"Trades {t['row']}행: 환율을 몰라 TFSA 입출금을 현금에 반영하지 못했습니다.")
             info["trades"].append(t)
             info["applied"] += 1
             continue
@@ -4453,6 +4462,8 @@ def build_html_report(df_enriched, account_summary, extras=None):
         s = account_summary[acc]
 
         acc_label = "TFSA (USD)" if acc == "TFSA" else "RESP (CAD)"
+        acc_sym = "US$" if acc == "TFSA" else "C$"   # 표의 금액은 계좌 통화 기준
+        net_dep_cad = s.get("net_deposit_cad", 0.0)
 
         total_today = s["total_today_native"]
         total_diff = s["total_diff_native"]
@@ -4462,13 +4473,14 @@ def build_html_report(df_enriched, account_summary, extras=None):
         pl_vs_dep_pct_native = s.get("pl_vs_deposit_pct_native", 0.0)
         cash_native = s.get("cash_native", 0.0)
 
-        total_today_str_acc = fmt_money(total_today, ccy_symbol)
-        diff_str = fmt_money(total_diff, ccy_symbol)
+        total_today_str_acc = fmt_money(total_today, acc_sym)
+        diff_str = fmt_money(total_diff, acc_sym)
         diff_pct_str = fmt_pct(total_diff_pct)
-        net_dep_str = fmt_money(net_dep_native, ccy_symbol)
-        pl_vs_dep_str = fmt_money(pl_vs_dep_native, ccy_symbol)
+        net_dep_str = fmt_money(net_dep_native, acc_sym)
+        net_dep_cad_str = fmt_money(net_dep_cad, "C$")
+        pl_vs_dep_str = fmt_money(pl_vs_dep_native, acc_sym)
         pl_vs_dep_pct_str = fmt_pct(pl_vs_dep_pct_native)
-        cash_str = fmt_money(cash_native, ccy_symbol)
+        cash_str = fmt_money(cash_native, acc_sym)
 
         diff_str_colored = colorize_value_html(diff_str, total_diff)
         diff_pct_str_colored = colorize_value_html(diff_pct_str, total_diff_pct)
@@ -4478,13 +4490,14 @@ def build_html_report(df_enriched, account_summary, extras=None):
         summary_rows.append(
             {
                 "Account": acc_label,
-                "Net Deposit (Base)": net_dep_str,
-                "Total (Today, Base)": total_today_str_acc,
-                "Δ vs Yesterday (Base)": diff_str_colored,
+                "Net Deposit (계좌 통화)": net_dep_str,
+                "Net Deposit (CAD)": net_dep_cad_str,
+                "Total (Today)": total_today_str_acc,
+                "Δ vs Yesterday": diff_str_colored,
                 "Δ %": diff_pct_str_colored,
-                "P/L vs Deposit (Base)": pl_vs_dep_str_colored,
+                "P/L vs Deposit": pl_vs_dep_str_colored,
                 "P/L vs Deposit %": pl_vs_dep_pct_str_colored,
-                "Cash (Base)": cash_str,
+                "Cash": cash_str,
             }
         )
 
@@ -4806,7 +4819,7 @@ def main():
     ledger_info = None
     try:
         trade_rows, trade_warn = load_trades(_open_sheet)
-        df_hold, ledger_info = apply_trades(df_hold, trade_rows)
+        df_hold, ledger_info = apply_trades(df_hold, trade_rows, usd_cad=get_usd_cad_rate())
         ledger_info["warnings"] = trade_warn + ledger_info["warnings"]
         tfsa_netdep_cad += ledger_info["netdep_delta"]["TFSA"]
         resp_netdep_cad += ledger_info["netdep_delta"]["RESP"]
