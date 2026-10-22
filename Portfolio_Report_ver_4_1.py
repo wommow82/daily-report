@@ -1134,19 +1134,22 @@ def _scenario_title(rows, datas, usd_cad):
 
 def _render_scenario(name, rows, years, base, scen, cfg, datas, assumptions, usd_cad):
     target = cfg["target_monthly_cad"]
+    last_s0 = scen["rows"][-1]
+    order = sorted(last_s0["by_ticker"], key=lambda t: -last_s0["by_ticker"][t]["monthly_div_cad"])
+    shown, rest = order[:6], order[6:]
+    thead = "".join(f"<th>{_esc(t)}</th>" for t in shown) + ("<th>기타</th>" if rest else "")
     body = []
-    for b, s in zip(base["rows"], scen["rows"]):
-        d = s["monthly_div_cad"] - b["monthly_div_cad"]
-        color = "#2e7d32" if d > 0 else ("#c62828" if d < 0 else "#555")
+    for s in scen["rows"]:
+        cells = "".join(f"<td>{_fmt_cad(s['by_ticker'].get(t, {'monthly_div_cad': 0.0})['monthly_div_cad'])}</td>" for t in shown)
+        if rest:
+            cells += f"<td>{_fmt_cad(sum(s['by_ticker'][t]['monthly_div_cad'] for t in rest))}</td>"
         hl = " style='background:#fffde7;'" if s["year"] == cfg["retire_years"] else ""
         body.append(
-            f"<tr{hl}><td>{s['year']}년</td><td>{_fmt_cad(b['monthly_div_cad'])}</td>"
-            f"<td><strong>{_fmt_cad(s['monthly_div_cad'])}</strong></td>"
-            f"<td style='color:{color};'>{'+' if d >= 0 else '-'}{_fmt_cad(abs(d))}</td>"
+            f"<tr{hl}><td>{s['year']}년</td><td><strong>{_fmt_cad(s['monthly_div_cad'])}</strong></td>"
             f"<td>{_fmt_cad(s['annual_div_cad'])}</td>"
-            f"<td>{_fmt_cad(s['invested_cad'])}</td><td>{_fmt_cad(s['value_cad'])}</td></tr>")
-    table = ("<table><tr><th>연차</th><th>기준 월배당</th><th>시나리오 월배당</th><th>증가분</th>"
-             "<th>시나리오 연배당</th><th>신규 투입 누계</th><th>평가액(가정)</th></tr>" + "".join(body) + "</table>")
+            f"<td>{s['monthly_div_cad'] / target * 100:,.0f}%</td>{cells}</tr>")
+    table = ("<table><tr><th>연차</th><th>월 배당(세후, 합계)</th><th>연 배당(세후)</th><th>목표 대비</th>"
+             f"{thead}</tr>" + "".join(body) + "</table>")
 
     ry = min(cfg["retire_years"], years) - 1
     last_b, last_s = base["rows"][-1], scen["rows"][-1]
@@ -1167,12 +1170,12 @@ def _render_scenario(name, rows, years, base, scen, cfg, datas, assumptions, usd
         "<div style='margin:12px 0;padding:10px 12px;border:1px solid #e0e0e0;border-radius:8px;text-align:left;'>"
         f"<div><strong>{_esc(name)}</strong></div>"
         f"<div style='margin:4px 0;'>{_scenario_title(rows, datas, usd_cad)}</div>"
-        f"<div style='margin:6px 0;'>{cfg['retire_years']}년 후 월 배당: 기준 {_fmt_cad(base['rows'][ry]['monthly_div_cad'])}"
-        f" → 시나리오 <strong style='color:#2e7d32;'>{_fmt_cad(scen['rows'][ry]['monthly_div_cad'])}</strong>"
+        f"<div style='margin:6px 0;'>{cfg['retire_years']}년 후 월 배당: 추가 매수 없음 {_fmt_cad(base['rows'][ry]['monthly_div_cad'])}"
+        f" → 이 시나리오 <strong style='color:#2e7d32;'>{_fmt_cad(scen['rows'][ry]['monthly_div_cad'])}</strong>"
         f" (목표 대비 {scen['rows'][ry]['monthly_div_cad'] / target * 100:,.0f}%)<br>"
-        f"{years}년 후: 기준 {_fmt_cad(last_b['monthly_div_cad'])} → 시나리오 <strong>{_fmt_cad(last_s['monthly_div_cad'])}</strong>"
+        f"{years}년 후: 추가 매수 없음 {_fmt_cad(last_b['monthly_div_cad'])} → 이 시나리오 <strong>{_fmt_cad(last_s['monthly_div_cad'])}</strong>"
         f" · 신규 투입 누계 {_fmt_cad(last_s['invested_cad'])}<br>"
-        f"기준: {_target_text(mb, target, years)}<br>시나리오: {_target_text(ms, target, years)}</div>"
+        f"추가 매수 없음: {_target_text(mb, target, years)}<br>이 시나리오: {_target_text(ms, target, years)}</div>"
         f"{table}{brk_tbl}<div class='muted'>{lines}{note}</div></div>")
 
 
@@ -1313,7 +1316,7 @@ def _build(open_sheet_fn, df_hold, usd_cad, fetch_fn, sheet_name):
 
     intro = _note(
         "Simulation 탭에서 <strong>Run=Y</strong>인 가정 매수만 계산합니다. 현재 보유(Holdings + Trades 반영) 위에 얹어 월 단위로 계산하고, "
-        "표의 '기준'은 추가 매수가 없을 때의 값입니다. 노란 줄은 은퇴 목표 시점입니다. "
+        "표는 현재 보유와 가정 매수를 합친 종목별 월 배당입니다. 노란 줄은 은퇴 목표 시점입니다. "
         "종목끼리 서로 영향을 주지 않고, 각 종목 안에서만 재투자한다고 가정합니다.")
     tail = _note(
         "※ 예측이 아니라 가정에 따른 계산입니다. 환율 고정, 배당을 매달 1/12씩 받는 단순화, "
@@ -4713,7 +4716,6 @@ def build_html_report(df_enriched, account_summary, extras=None):
 
         acc_label = "TFSA (USD)" if acc == "TFSA" else "RESP (CAD)"
         acc_sym = "US$" if acc == "TFSA" else "C$"   # 표의 금액은 계좌 통화 기준
-        net_dep_cad = s.get("net_deposit_cad", 0.0)
 
         total_today = s["total_today_native"]
         total_diff = s["total_diff_native"]
@@ -4727,7 +4729,6 @@ def build_html_report(df_enriched, account_summary, extras=None):
         diff_str = fmt_money(total_diff, acc_sym)
         diff_pct_str = fmt_pct(total_diff_pct)
         net_dep_str = fmt_money(net_dep_native, acc_sym)
-        net_dep_cad_str = fmt_money(net_dep_cad, "C$")
         pl_vs_dep_str = fmt_money(pl_vs_dep_native, acc_sym)
         pl_vs_dep_pct_str = fmt_pct(pl_vs_dep_pct_native)
         cash_str = fmt_money(cash_native, acc_sym)
@@ -4740,8 +4741,7 @@ def build_html_report(df_enriched, account_summary, extras=None):
         summary_rows.append(
             {
                 "Account": acc_label,
-                "Net Deposit (계좌 통화)": net_dep_str,
-                "Net Deposit (CAD)": net_dep_cad_str,
+                "Net Deposit": net_dep_str,
                 "Total (Today)": total_today_str_acc,
                 "Δ vs Yesterday": diff_str_colored,
                 "Δ %": diff_pct_str_colored,
