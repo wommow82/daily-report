@@ -4725,13 +4725,17 @@ def build_html_report(df_enriched, account_summary, extras=None):
         pl_vs_dep_pct_native = s.get("pl_vs_deposit_pct_native", 0.0)
         cash_native = s.get("cash_native", 0.0)
 
-        total_today_str_acc = fmt_money(total_today, acc_sym)
-        diff_str = fmt_money(total_diff, acc_sym)
+        def _m0(v, sym=acc_sym):   # 계좌별 요약은 표가 넓어서 센트를 빼고 부호는 앞에 붙인다
+            v = safe_float(v, 0.0)
+            return f"{'-' if v < 0 else ''}{sym}{abs(v):,.0f}"
+
+        total_today_str_acc = _m0(total_today)
+        diff_str = _m0(total_diff)
         diff_pct_str = fmt_pct(total_diff_pct)
-        net_dep_str = fmt_money(net_dep_native, acc_sym)
-        pl_vs_dep_str = fmt_money(pl_vs_dep_native, acc_sym)
+        net_dep_str = _m0(net_dep_native)
+        pl_vs_dep_str = _m0(pl_vs_dep_native)
         pl_vs_dep_pct_str = fmt_pct(pl_vs_dep_pct_native)
-        cash_str = fmt_money(cash_native, acc_sym)
+        cash_str = _m0(cash_native)
 
         diff_str_colored = colorize_value_html(diff_str, total_diff)
         diff_pct_str_colored = colorize_value_html(diff_pct_str, total_diff_pct)
@@ -4930,6 +4934,8 @@ def build_html_report(df_enriched, account_summary, extras=None):
     .tag-income { background:#e8f5e9; color:#2e7d32; }
     .tag-growth { background:#fff3e0; color:#e65100; }
     .tag-new { background:#e3f2fd; color:#1565c0; }
+    table.compact th, table.compact td { padding:4px 5px; font-size:11px; }
+    table.compact th { white-space:normal; }
     .summary-bar { background:#f5f7ff; border-radius:8px; padding:10px 14px; margin-bottom:10px; font-size:13px; }
     .divider { border:none; border-top:1px solid #eee; margin:10px 0; }
     </style>
@@ -4957,7 +4963,7 @@ def build_html_report(df_enriched, account_summary, extras=None):
             <h3>📌 월 납입 제외 총 손익</h3>
             {pnl_html}
             <h3>계좌별 요약</h3>
-            {df_summary.to_html(index=False, escape=False)}
+            <div style="overflow-x:auto;">{df_summary.to_html(index=False, escape=False, classes="compact", border=0)}</div>
 
             <hr class="divider"/>
             <h3>📂 TFSA Holdings (USD)</h3>
