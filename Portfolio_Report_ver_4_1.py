@@ -1936,6 +1936,55 @@ def summarize(good, usd_cad, today):
             "count": len(items), "today": today}
 
 
+def _norm(t):
+    t = str(t).strip().upper()
+    return t[:-3] if t.endswith(".TO") else t
+
+
+def yearly(good, usd_cad, today, held=None):
+    """연도별 막대용 데이터. 반환: [{year, actual, est, kind}] (kind: 'actual' | 'partial' | 'forecast').
+    - 지난 해: 실제 합계.
+    - 올해: 지금까지 실제 + 남은 기간 추정 (작년 같은 기간에 받은 금액, 아직 보유 중인 종목만).
+    - 내년: 최근 12개월 실제 (아직 보유 중인 종목만).
+    성장(배당 인상·DRIP으로 늘어난 주식)은 반영하지 않는 보수적 추정이다.
+    held: 지금 보유 중인 티커 집합. None이면 모든 기록을 대상으로 한다."""
+    today = pd.Timestamp(today).normalize()
+    items = [dict(d, cad=to_cad(d, usd_cad)) for d in good]
+    if not items:
+        return []
+    hs = None if held is None else {_norm(h) for h in held}
+    ok = (lambda it: True) if hs is None else (lambda it: _norm(it["ticker"]) in hs)
+    one_year_ago = today - pd.DateOffset(years=1)
+    by_year = {}
+    for it in items:
+        by_year[it["date"].year] = by_year.get(it["date"].year, 0.0) + it["cad"]
+    out = []
+    for y in range(min(by_year), today.year + 1):
+        a = by_year.get(y, 0.0)
+        if y < today.year:
+            out.append({"year": y, "actual": a, "est": 0.0, "kind": "actual"})
+        else:
+            rest = sum(it["cad"] for it in items
+                       if ok(it) and one_year_ago < it["date"] <= pd.Timestamp(year=today.year - 1, month=12, day=31))
+            out.append({"year": y, "actual": a, "est": rest, "kind": "partial"})
+    ttm = sum(it["cad"] for it in items if ok(it) and one_year_ago < it["date"] <= today)
+    out.append({"year": today.year + 1, "actual": 0.0, "est": ttm, "kind": "forecast"})
+    return out
+
+
+def yearly_facts(yr):
+    f = []
+    for r in yr:
+        if r["kind"] == "actual":
+            f.append(f"Dividends 탭 기록: {r['year']}년 받은 배당 합계 {_cad(r['actual'])} (CAD 환산 근사)")
+        elif r["kind"] == "partial":
+            f.append(f"Dividends 탭 기록: {r['year']}년 지금까지 {_cad(r['actual'])}, 남은 기간 추정 +{_cad(r['est'])} "
+                     f"(작년 같은 기간 실제 금액 기준 추정, 성장 미반영) → 연말 추정 {_cad(r['actual'] + r['est'])}")
+        else:
+            f.append(f"{r['year']}년 배당 추정 {_cad(r['est'])} (최근 12개월 실제 합계, 성장 미반영)")
+    return f
+
+
 def facts_from(sm, target):
     if not sm["count"]:
         return []
@@ -1951,7 +2000,7 @@ def facts_from(sm, target):
 # HTML
 # =========================
 
-def render_html(sm, target, warns, future, usd_cad):
+def render_html(sm, target, warns, future, usd_cad, yr=None):
     if not sm["count"]:
         msg = ("<p class='muted' style='text-align:left;'>아직 받은 배당 기록이 없습니다. Dividends 탭에 "
                "<strong>Date, Ticker, Account, Amount</strong>를 적으면 여기에 월별·종목별로 정리됩니다.</p>")
@@ -1994,7 +2043,55 @@ def render_html(sm, target, warns, future, usd_cad):
 
     note = (f"<p class='muted' style='text-align:left;'>※ USD 배당은 오늘 환율({usd_cad:.4f})로 CAD 환산한 근사값입니다. "
             "Amount는 세금을 뗀 후 실제로 받은 금액을 적어야 정확합니다.</p>")
-    return head + mtbl + ytbl + qtbl + note + _warn_html(warns, future)
+    return head + render_yearly_chart(yr or [], target) + mtbl + ytbl + qtbl + note + _warn_html(warns, future)
+
+
+def render_yearly_chart(yr, target):
+    """이메일용 세로 막대그래프 (표 + div 높이만 사용 — JS/SVG 없이 메일 앱에서 보이게)."""
+    if not yr:
+        return ""
+    H = 130
+    mx = max([r["actual"] + r["est"] for r in yr] + [1.0])
+    cols = ""
+    for r in yr:
+        ha = r["actual"] / mx * H
+        he = r["est"] / mx * H
+        total = r["actual"] + r["est"]
+        if r["kind"] == "forecast":
+            label = f"{_cad(total)}<br><span style='color:#777;font-weight:400;'>추정</span>"
+        elif r["kind"] == "partial":
+            label = f"{_cad(total)}<br><span style='color:#777;font-weight:400;'>연말 추정</span>"
+        else:
+            label = _cad(total)
+        est = (f"<div style='height:{max(he, 2):.0f}px;background:#e3f2fd;border:1px dashed #1976d2;border-bottom:0;'></div>"
+               if r["est"] > 0 else "")
+        act = (f"<div style='height:{max(ha, 2):.0f}px;background:#1976d2;'></div>" if r["actual"] > 0 else "")
+        yname = f"{r['year']}" + (" (진행 중)" if r["kind"] == "partial" else (" (추정)" if r["kind"] == "forecast" else ""))
+        cols += (f"<td valign='bottom' align='center' style='padding:0 4px;vertical-align:bottom;border:0;'>"
+                 f"<div style='font-size:11px;font-weight:700;margin-bottom:2px;'>{label}</div>{est}{act}"
+                 f"<div style='font-size:11px;margin-top:3px;border-top:1px solid #999;padding-top:2px;'>{yname}</div></td>")
+    rows = ""
+    prev = None
+    for r in yr:
+        total = r["actual"] + r["est"]
+        yoy = "—" if (not prev or prev < 100) else f"{(total / prev - 1) * 100:+.0f}%"   # 금액이 너무 작은 해와의 비교는 의미 없어 생략
+        kind = {"actual": "실제", "partial": "실제 + 추정", "forecast": "추정"}[r["kind"]]
+        rows += (f"<tr><td>{r['year']}</td><td>{_cad(r['actual']) if r['actual'] else '—'}</td>"
+                 f"<td>{_cad(r['est']) if r['est'] else '—'}</td><td><strong>{_cad(total)}</strong></td>"
+                 f"<td>{yoy}</td><td>{kind}</td></tr>")
+        prev = total if total > 0 else prev
+    goal = ""
+    last = yr[-1]
+    if target and last["est"] > 0:
+        goal = (f"<p class='muted' style='text-align:left;'>연 목표 {_cad(target * 12)}(월 {_cad(target)} × 12) 대비 "
+                f"{last['year']}년 추정 {last['est'] / (target * 12) * 100:.1f}%</p>")
+    return ("<h3>연도별 받은 배당 (CAD 환산, 추정 포함)</h3>"
+            f"<table style='border:0;width:100%;table-layout:fixed;'><tr style='height:{H + 50}px;'>{cols}</tr></table>"
+            "<div class='muted' style='text-align:left;'>진한 파랑 = 실제로 받은 금액, 연한 파랑(점선) = 추정. "
+            "추정은 올해는 '작년 같은 기간에 받은 금액', 내년은 '최근 12개월 실제 합계'이며 아직 보유 중인 종목만 "
+            "포함하고 배당 인상·DRIP으로 늘어난 주식은 반영하지 않은 보수적 값입니다.</div>"
+            "<table><tr><th>연도</th><th>실제</th><th>추정(추가)</th><th>합계</th><th>전년 대비</th><th>구분</th></tr>"
+            + rows + "</table>" + goal)
 
 
 def _warn_html(warns, future):
@@ -2011,11 +2108,12 @@ def _warn_html(warns, future):
 # 리포트에서 부르는 함수
 # =========================
 
-def build_dividend_report(good, warns, future, usd_cad, target, today):
-    """반환: (html, facts). 예외를 던지지 않는다."""
+def build_dividend_report(good, warns, future, usd_cad, target, today, held=None):
+    """반환: (html, facts). 예외를 던지지 않는다. held: 지금 보유 중인 티커들(추정에 사용)."""
     try:
         sm = summarize(good, usd_cad, today)
-        return render_html(sm, target, warns, future, usd_cad), facts_from(sm, target)
+        yr = yearly(good, usd_cad, today, held)
+        return render_html(sm, target, warns, future, usd_cad, yr), facts_from(sm, target) + yearly_facts(yr)
     except Exception as e:
         return f"<p class='muted'>배당 기록 요약 중 오류: {_esc(e)}</p>", []
 '''
@@ -5133,7 +5231,9 @@ def main():
         except Exception:
             _target = 2000.0
         extras["dividends_html"], div_facts = build_dividend_report(
-            div_good, div_warn, div_future, usd_cad, _target, pd.Timestamp.now().normalize())
+            div_good, div_warn, div_future, usd_cad, _target, pd.Timestamp.now().normalize(),
+            held={str(r["Ticker"]) for _, r in df_enriched.iterrows()
+                  if (pd.to_numeric(r.get("Shares"), errors="coerce") or 0) > 0})
         pnl_facts = list(pnl_facts) + div_facts
     except Exception as e:
         extras["dividends_html"] = f"<p class='muted'>배당 기록 요약 실패: {_html_escape(e)}</p>"
