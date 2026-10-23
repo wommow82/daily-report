@@ -1797,6 +1797,10 @@ import pandas as pd
 
 from simulation_module import _flag, _num, read_simulation_rows
 
+SHOW_DETAILS = False   # True: 월별/종목별/분기별 표와 목표 진행률도 메일에 표시 (기본은 연도별 막대그래프+표만)
+# 배당 카드는 ETF 배당만 보여준다. 아래 개인 종목(주식)은 제외한다. 새 개인 종목을 사면 여기에 티커를 추가하세요.
+INDIVIDUAL_STOCKS = {"AAPL", "MSFT", "NVDA", "META", "TSLA", "AMZN", "GOOG", "GOOGL", "AMD", "INTC", "PLTR", "SOFI",
+                     "CRCL", "SPCX", "IONQ", "RGTI", "MARA", "BB", "NIU", "PLBY", "WISH", "GTX", "AVGO", "NFLX", "COST"}
 ACCOUNTS = ("TFSA", "RESP")
 SHEET_NAME = "Dividends"
 
@@ -2043,7 +2047,10 @@ def render_html(sm, target, warns, future, usd_cad, yr=None):
 
     note = (f"<p class='muted' style='text-align:left;'>※ USD 배당은 오늘 환율({usd_cad:.4f})로 CAD 환산한 근사값입니다. "
             "Amount는 세금을 뗀 후 실제로 받은 금액을 적어야 정확합니다.</p>")
-    return head + render_yearly_chart(yr or [], target) + mtbl + ytbl + qtbl + note + _warn_html(warns, future)
+    chart = render_yearly_chart(yr or [], target)
+    if not SHOW_DETAILS and chart:
+        return chart + note + _warn_html(warns, future)
+    return head + chart + mtbl + ytbl + qtbl + note + _warn_html(warns, future)
 
 
 def render_yearly_chart(yr, target):
@@ -2111,9 +2118,15 @@ def _warn_html(warns, future):
 def build_dividend_report(good, warns, future, usd_cad, target, today, held=None):
     """반환: (html, facts). 예외를 던지지 않는다. held: 지금 보유 중인 티커들(추정에 사용)."""
     try:
+        excluded = sorted({d["ticker"] for d in good if _norm(d["ticker"]) in INDIVIDUAL_STOCKS})
+        good = [d for d in good if _norm(d["ticker"]) not in INDIVIDUAL_STOCKS]
         sm = summarize(good, usd_cad, today)
         yr = yearly(good, usd_cad, today, held)
-        return render_html(sm, target, warns, future, usd_cad, yr), facts_from(sm, target) + yearly_facts(yr)
+        html = render_html(sm, target, warns, future, usd_cad, yr)
+        if excluded:
+            html += ("<p class='muted' style='text-align:left;'>※ ETF 배당만 집계했습니다. 개인 종목 배당("
+                     + _esc(", ".join(excluded)) + ")은 제외했습니다.</p>")
+        return html, facts_from(sm, target) + yearly_facts(yr)
     except Exception as e:
         return f"<p class='muted'>배당 기록 요약 중 오류: {_esc(e)}</p>", []
 '''
