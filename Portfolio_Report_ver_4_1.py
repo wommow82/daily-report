@@ -506,6 +506,10 @@ Trades 탭 열 (첫 줄에 그대로 붙여 넣기)
   Date, Ticker, Side, Shares, Price, Fee, Account, Currency, Amount, Apply, CashEffect, Note
   Side  : BUY / SELL / DEPOSIT / WITHDRAW   (한글 매수/매도/입금/출금도 인식)
           DRIP = 배당 자동 재투자로 늘어난 주식. 계산은 BUY와 같고, 연도별 배당 표의 주수 컬럼에서 '직접 매수'와 구분해 보여줌
+          DIV  = 받은 배당. Amount(세후, 종목 통화)만 쓰고 보유 수량은 그대로. CashEffect=Y면 그 계좌 Cash에 더함
+          SPLIT= 분할로 늘어난 주수(Shares). 총 원가는 그대로이고 평균단가만 내려감
+기준일(Settings의 HoldingsAsOf): 이 날짜 이하 거래는 이미 Holdings/Settings에 들어 있다고 보고 계산에서 빼고 '기록'으로만 쓴다
+  (연도별 배당·주수 표에는 쓰임). 비어 있으면 모든 거래를 반영한다.
   DEPOSIT/WITHDRAW: Amount(CAD)만 쓰고, 그 계좌의 '순투입금'에 더하거나 빼고, 현금(Cash)도 같이 늘리거나 줄인다
                     (TFSA는 오늘 환율로 USD 환산). 현금에 반영하기 싫으면 CashEffect=N.
 """
@@ -522,7 +526,10 @@ SIDE_ALIASES = {
     "SELL": "SELL", "S": "SELL", "매도": "SELL", "팔다": "SELL",
     "DEPOSIT": "DEPOSIT", "입금": "DEPOSIT", "납입": "DEPOSIT",
     "WITHDRAW": "WITHDRAW", "출금": "WITHDRAW",
+    "DIV": "DIV", "DIVIDEND": "DIV", "배당": "DIV",          # 받은 배당(세후 금액). 보유 수량은 바꾸지 않는다
+    "SPLIT": "SPLIT", "분할": "SPLIT",                       # 주식 분할로 새로 생긴 주수 (총 원가는 그대로, 평균단가 하락)
 }
+DRIP_WORDS = ("DRIP", "재투자")
 ACCOUNTS = ("TFSA", "RESP")
 _EPS = 1e-9
 
@@ -577,6 +584,7 @@ def parse_trade(rec, today=None):
 
     out = {
         "row": row, "date": date, "side": side, "account": account,
+        "kind": "DRIP" if side_raw.upper() in DRIP_WORDS or side_raw in DRIP_WORDS else side,
         "apply": _flag(rec.get("apply"), True),
         "cash_effect": _flag(rec.get("casheffect"), False),
         "note": str(rec.get("note", "")).strip(),
@@ -591,8 +599,26 @@ def parse_trade(rec, today=None):
         return out
 
     ticker = str(rec.get("ticker", "")).strip().upper()
+    if side == "DIV":
+        amt = _num(rec.get("amount"))
+        if not ticker:
+            return {"row": row, "error": "Ticker가 비어 있습니다"}
+        if amt is None or amt <= 0:
+            return {"row": row, "error": "Amount(세후 배당 금액, 0보다 큰 값)가 필요합니다"}
+        cur = str(rec.get("currency", "")).strip().upper() or _acc_currency(account)
+        if cur not in ("USD", "CAD"):
+            return {"row": row, "error": f"Currency는 USD 또는 CAD여야 합니다: '{cur}'"}
+        out.update({"ticker": ticker, "amount": float(amt), "currency": cur})
+        return out
     shares = _num(rec.get("shares"))
     price = _num(rec.get("price"))
+    if side == "SPLIT":
+        if not ticker:
+            return {"row": row, "error": "Ticker가 비어 있습니다"}
+        if shares is None or shares <= 0:
+            return {"row": row, "error": "Shares(분할로 새로 생긴 주수, 0보다 큰 수)가 필요합니다"}
+        out.update({"ticker": ticker, "shares": float(shares), "price": 0.0, "fee": 0.0, "currency": _guess_currency(ticker)})
+        return out
     fee = _num(rec.get("fee"), 0.0)
     if not ticker:
         return {"row": row, "error": "Ticker가 비어 있습니다"}
@@ -636,7 +662,7 @@ def _positions_from_holdings(df_hold):
     return order, pos
 
 
-def apply_trades(df_hold, trade_rows, today=None, usd_cad=None):
+def apply_trades(df_hold, trade_rows, today=None, usd_cad=None, asof=None):
     """
     df_hold  : Holdings 탭 DataFrame (Ticker, Shares, AvgPrice, Type ...)
     trade_rows: load_trades()가 돌려준 줄들
@@ -646,7 +672,8 @@ def apply_trades(df_hold, trade_rows, today=None, usd_cad=None):
               before/after(변경된 종목 비교), netdep_delta{TFSA,RESP}(CAD), cash_delta{TFSA(USD),RESP(CAD)}}
     """
     today = pd.Timestamp(today) if today is not None else pd.Timestamp.now().normalize()
-    info = {"warnings": [], "applied": 0, "skipped": 0, "future": 0, "trades": [],
+    asof = None if asof is None else pd.Timestamp(asof).normalize()
+    info = {"warnings": [], "applied": 0, "skipped": 0, "future": 0, "history": 0, "asof": asof, "trades": [],
             "realized": [], "changes": [],
             "netdep_delta": {"TFSA": 0.0, "RESP": 0.0},
             "cash_delta": {"TFSA": 0.0, "RESP": 0.0}}
@@ -670,6 +697,9 @@ def apply_trades(df_hold, trade_rows, today=None, usd_cad=None):
             continue
         if not t["apply"]:
             info["skipped"] += 1
+            continue
+        if asof is not None and t["date"].normalize() <= asof:
+            info["history"] += 1          # 기준일 이전 거래: 이미 Holdings/Settings에 들어 있음 (기록으로만 사용)
             continue
         if t["date"] > today + pd.Timedelta(days=1):
             info["future"] += 1
@@ -696,7 +726,32 @@ def apply_trades(df_hold, trade_rows, today=None, usd_cad=None):
             info["applied"] += 1
             continue
 
+        if t["side"] == "DIV":
+            if t["cash_effect"]:
+                acc_cur = _acc_currency(acc)
+                if t["currency"] == acc_cur:
+                    info["cash_delta"][acc] += t["amount"]
+                elif usd_cad and usd_cad > 0:
+                    info["cash_delta"][acc] += t["amount"] * usd_cad if t["currency"] == "USD" else t["amount"] / usd_cad
+                else:
+                    info["warnings"].append(f"Trades {t['row']}행: 환율을 몰라 배당을 Cash에 더하지 못했습니다.")
+            info["trades"].append(t)
+            info["applied"] += 1
+            continue
+
         key = (t["ticker"], acc)
+        if t["side"] == "SPLIT":
+            if key not in pos or pos[key]["shares"] <= _EPS:
+                info["skipped"] += 1
+                info["warnings"].append(f"Trades {t['row']}행 건너뜀: {t['ticker']} ({acc}) 보유 수량이 없는데 분할이 기록되어 있습니다.")
+                continue
+            p = pos[key]
+            total_cost = p["shares"] * p["avg"]
+            p["shares"] += t["shares"]
+            p["avg"] = total_cost / p["shares"]
+            info["trades"].append(t)
+            info["applied"] += 1
+            continue
         if key not in pos:
             pos[key] = {"shares": 0.0, "avg": 0.0, "extra": {"Ticker": t["ticker"], "Type": acc}}
             order.append(key)
@@ -781,10 +836,17 @@ def _colored(text, v):
 def render_ledger_html(info):
     """Trades 반영 내역 카드 내용. 거래도 경고도 없으면 짧은 안내만."""
     parts = []
+    hist = info.get("history", 0)
+    hist_note = ""
+    if hist:
+        asof = info.get("asof")
+        hist_note = (f"<p class='muted' style='text-align:left;'>기준일({asof:%Y-%m-%d}) 이전 거래 {hist}건은 이미 Holdings/Settings에 "
+                     "들어 있다고 보고 계산에서 뺐습니다(연도별 배당·주수 표에는 쓰입니다).</p>")
     if info["applied"] == 0 and not info["warnings"]:
-        return ("<p class='muted' style='text-align:left;'>Trades 탭에 반영된 거래가 없습니다. "
-                "거래를 적으면 Holdings(처음 기록) 위에 자동으로 얹혀 현재 보유가 계산됩니다.</p>")
+        return (hist_note + "<p class='muted' style='text-align:left;'>기준일 이후 새로 반영된 거래가 없습니다. "
+                "거래를 Trades 탭에 적으면 Holdings(처음 기록) 위에 자동으로 얹혀 현재 보유가 계산됩니다.</p>")
 
+    parts.append(hist_note)
     parts.append(
         f"<p class='muted' style='text-align:left;'>Holdings(처음 기록) 위에 Trades {info['applied']}건을 얹어 "
         f"현재 보유를 계산했습니다. 건너뜀 {info['skipped']}건, 미래 날짜 {info['future']}건. "
@@ -1835,7 +1897,8 @@ def events_from_trades(trade_rows, today):
     ev = []
     for rec in trade_rows:
         side = str(rec.get("side", "")).strip().upper()
-        typ = {"BUY": "BUY", "매수": "BUY", "DRIP": "DRIP", "재투자": "DRIP", "SELL": "SELL", "매도": "SELL"}.get(side)
+        typ = {"BUY": "BUY", "매수": "BUY", "DRIP": "DRIP", "재투자": "DRIP", "SELL": "SELL", "매도": "SELL",
+               "SPLIT": "SPLIT", "분할": "SPLIT"}.get(side)
         if typ is None or not _flag(rec.get("apply"), True):
             continue
         date = pd.to_datetime(str(rec.get("date", "")).strip(), errors="coerce")
@@ -2007,6 +2070,43 @@ def parse_all(rows, today):
     return good, warns, future
 
 
+def from_trades(trade_rows, today):
+    """Trades 탭의 Side=DIV 줄을 배당 기록으로. 반환: (good, warnings, future_count). Apply=N은 제외.
+    현금 반영은 ledger가 한다(기준일 이후 + CashEffect=Y)."""
+    rows = []
+    for rec in trade_rows:
+        if str(rec.get("side", "")).strip().upper() not in ("DIV", "DIVIDEND", "배당") and str(rec.get("side", "")).strip() != "배당":
+            continue
+        if not _flag(rec.get("apply"), True):
+            continue
+        rows.append({"_row": rec.get("_row"), "date": rec.get("date"), "ticker": rec.get("ticker"),
+                     "account": rec.get("account"), "amount": rec.get("amount"), "currency": rec.get("currency"),
+                     "casheffect": "N", "note": rec.get("note", "")})
+    good, warns, fut = parse_all(rows, today)
+    return good, [w.replace("Dividends ", "Trades ") for w in warns], fut
+
+
+def read_income_settings(sh, default_tickers=("SCHD",)):
+    """Settings 탭에서 IncomeTickers(쉼표로 구분, 기본 SCHD)와 HoldingsAsOf(기준일, 비우면 없음)를 읽는다.
+    반환: {'income_tickers': [..], 'asof': Timestamp|None}. 실패해도 기본값."""
+    out = {"income_tickers": list(default_tickers), "asof": None}
+    try:
+        values = sh.worksheet("Settings").get_all_values()
+    except Exception:
+        return out
+    kv = {}
+    for row in values[1:]:
+        if len(row) >= 2 and str(row[0]).strip():
+            kv[str(row[0]).strip().lower()] = str(row[1]).strip()
+    tk = [_norm(t) for t in kv.get("incometickers", "").replace(";", ",").split(",") if t.strip()]
+    if tk:
+        out["income_tickers"] = tk
+    asof = pd.to_datetime(kv.get("holdingsasof", ""), errors="coerce")
+    if not pd.isna(asof):
+        out["asof"] = asof.tz_localize(None).normalize() if getattr(asof, "tzinfo", None) else asof.normalize()
+    return out
+
+
 def cash_deltas(good, usd_cad):
     """CashEffect=Y인 배당만 계좌 현금 변화로. 반환: ({TFSA: USD, RESP: CAD}, warnings)"""
     delta, warns = {"TFSA": 0.0, "RESP": 0.0}, []
@@ -2115,9 +2215,9 @@ def yearly_facts(yr):
     f = []
     for r in yr:
         if r["kind"] == "actual":
-            f.append(f"Dividends 탭 기록: {r['year']}년 받은 배당 합계 {_cad(r['actual'])} (CAD 환산 근사)")
+            f.append(f"받은 배당 기록: {r['year']}년 받은 배당 합계 {_cad(r['actual'])} (CAD 환산 근사)")
         elif r["kind"] == "partial":
-            f.append(f"Dividends 탭 기록: {r['year']}년 지금까지 {_cad(r['actual'])}, 남은 기간 추정 +{_cad(r['est'])} "
+            f.append(f"받은 배당 기록: {r['year']}년 지금까지 {_cad(r['actual'])}, 남은 기간 추정 +{_cad(r['est'])} "
                      f"(작년 같은 기간 실제 금액 기준 추정, 성장 미반영) → 연말 추정 {_cad(r['actual'] + r['est'])}")
         else:
             f.append(f"{r['year']}년 배당 추정 {_cad(r['est'])} (최근 12개월 실제 합계, 성장 미반영)")
@@ -2127,10 +2227,10 @@ def yearly_facts(yr):
 def facts_from(sm, target):
     if not sm["count"]:
         return []
-    f = [f"Dividends 탭 기록(CAD 환산, 오늘 환율 근사): 올해 받은 배당 합계 {_cad(sm['ytd_total'])}, "
+    f = [f"받은 배당 기록(CAD 환산, 오늘 환율 근사): 올해 받은 배당 합계 {_cad(sm['ytd_total'])}, "
          f"최근 12개월 합계 {_cad(sm['total12'])}"]
     if sm["avg3"] is not None:
-        f.append(f"Dividends 탭 기록상 최근 {sm['avg_n']}개월(완료된 달) 평균 월 배당 {_cad(sm['avg3'])} "
+        f.append(f"받은 배당 기록상 최근 {sm['avg_n']}개월(완료된 달) 평균 월 배당 {_cad(sm['avg3'])} "
                  f"(월 목표 {_cad(target)}의 {sm['avg3'] / target * 100:.0f}%)")
     return f
 
@@ -2192,7 +2292,8 @@ def _fmt_sh(x):
     return f"{x:,.0f}" if abs(x - round(x)) < 0.05 else f"{x:,.1f}"
 
 
-def render_yearly_chart(yr, target, shares=None, share_ticker="SCHD"):
+def render_yearly_chart(yr, target, shares=None):
+    """shares: {티커: {연도: (직접 매수, DRIP)}} (없으면 주수 컬럼 없음)"""
     """이메일용 세로 막대그래프 (표 + div 높이만 사용 — JS/SVG 없이 메일 앱에서 보이게)."""
     if not yr:
         return ""
@@ -2223,12 +2324,12 @@ def render_yearly_chart(yr, target, shares=None, share_ticker="SCHD"):
         yoy = "—" if (not prev or prev < 100) else f"{(total / prev - 1) * 100:+.0f}%"   # 금액이 너무 작은 해와의 비교는 의미 없어 생략
         kind = {"actual": "실제", "partial": "실제 + 추정", "forecast": "추정"}[r["kind"]]
         sh_cells = ""
-        if shares:
-            v = shares.get(r["year"])
+        for _tk, _ys in (shares or {}).items():
+            v = _ys.get(r["year"])
             if v is None:
-                sh_cells = "<td>—</td><td>—</td><td>—</td>"
+                sh_cells += "<td>—</td><td>—</td><td>—</td>"
             else:
-                sh_cells = (f"<td>{_fmt_sh(v[0])}</td><td>{_fmt_sh(v[1])}</td><td><strong>{_fmt_sh(v[0] + v[1])}</strong></td>")
+                sh_cells += (f"<td>{_fmt_sh(v[0])}</td><td>{_fmt_sh(v[1])}</td><td><strong>{_fmt_sh(v[0] + v[1])}</strong></td>")
         rows += (f"<tr><td>{r['year']}</td><td>{_cad(r['actual']) if r['actual'] else '—'}</td>"
                  f"<td>{_cad(r['est']) if r['est'] else '—'}</td><td><strong>{_cad(total)}</strong></td>"
                  f"<td>{yoy}</td><td>{kind}</td>{sh_cells}</tr>")
@@ -2244,7 +2345,7 @@ def render_yearly_chart(yr, target, shares=None, share_ticker="SCHD"):
             "추정은 올해는 '작년 같은 기간에 받은 금액', 내년은 '최근 12개월 실제 합계'이며 아직 보유 중인 종목만 "
             "포함하고 배당 인상·DRIP으로 늘어난 주식은 반영하지 않은 보수적 값입니다.</div>"
             "<div style='overflow-x:auto;'><table class='compact'><tr><th>연도</th><th>실제</th><th>추정(추가)</th><th>합계</th><th>전년 대비</th><th>구분</th>"
-            + (f"<th>{_esc(share_ticker)} 직접 매수(주)</th><th>{_esc(share_ticker)} DRIP(주)</th><th>{_esc(share_ticker)} 합계(주)</th>" if shares else "")
+            + "".join(f"<th>{_esc(tk)} 직접 매수(주)</th><th>{_esc(tk)} DRIP(주)</th><th>{_esc(tk)} 합계(주)</th>" for tk in (shares or {}))
             + "</tr>" + rows + "</table></div>"
             + ("<p class='muted' style='text-align:left;'>주수는 해당 연도 말 누적 보유 수량입니다(올해는 오늘 기준). "
                "분할은 직접 매수·DRIP 수량에 같은 비율로 나눠 반영했습니다.</p>" if shares else "")
@@ -2265,28 +2366,40 @@ def _warn_html(warns, future):
 # 리포트에서 부르는 함수
 # =========================
 
-def build_dividend_report(good, warns, future, usd_cad, target, today, held=None, share_events=None, shares_now=None):
-    """반환: (html, facts). 예외를 던지지 않는다. held: 지금 보유 중인 티커들(추정에 사용)."""
+def build_dividend_report(good, warns, future, usd_cad, target, today, held=None, share_events=None, shares_now=None,
+                          income_tickers=None):
+    """반환: (html, facts). 예외를 던지지 않는다.
+    held: 지금 보유 중인 티커들(추정에 사용). income_tickers: 이 종목들만 집계(없으면 개인 종목만 제외).
+    share_events: 주수 변화 이벤트(shares_log 형식). shares_now: {티커: 현재 보유 주수} (검증용)."""
     try:
-        excluded = sorted({d["ticker"] for d in good if _norm(d["ticker"]) in INDIVIDUAL_STOCKS})
-        good = [d for d in good if _norm(d["ticker"]) not in INDIVIDUAL_STOCKS]
+        if income_tickers:
+            want = {_norm(t) for t in income_tickers}
+            skipped = sorted({d_["ticker"] for d_ in good if _norm(d_["ticker"]) not in want})
+            good = [d_ for d_ in good if _norm(d_["ticker"]) in want]
+            note_txt = ("※ 인컴 종목(" + _esc(", ".join(income_tickers)) + ")만 집계했습니다. Settings의 IncomeTickers에서 바꿀 수 있습니다.")
+        else:
+            skipped = sorted({d_["ticker"] for d_ in good if _norm(d_["ticker"]) in INDIVIDUAL_STOCKS})
+            good = [d_ for d_ in good if _norm(d_["ticker"]) not in INDIVIDUAL_STOCKS]
+            note_txt = ("※ ETF 배당만 집계했습니다. 개인 종목 배당(" + _esc(", ".join(skipped)) + ")은 제외했습니다.") if skipped else ""
         sm = summarize(good, usd_cad, today)
         yr = yearly(good, usd_cad, today, held)
-        shares, sh_warn, sh_facts = None, [], []
+        shares, sh_warn, sh_facts = {}, [], []
         if share_events:
             import shares_log as _sl
-            tk = _sl.SHARE_TICKERS[0]
-            shares = _sl.year_end_shares(share_events, tk, [r["year"] for r in yr], today) or None
-            if shares:
-                last = shares[max(shares)]
+            tks = [t for t in (income_tickers or _sl.SHARE_TICKERS)]
+            for tk in tks:
+                ys = _sl.year_end_shares(share_events, _norm(tk), [r["year"] for r in yr], today)
+                if not ys:
+                    continue
+                shares[_norm(tk)] = ys
+                last = ys[max(ys)]
                 cur = last[0] + last[1]
-                sh_facts.append(f"Shares 탭 기록: {tk} 현재 {cur:,.0f}주 (직접 매수 {last[0]:,.0f}주 + DRIP {last[1]:,.0f}주)")
-                if shares_now and tk in shares_now and abs(shares_now[tk] - cur) > 0.5:
-                    sh_warn.append(f"Shares 탭의 {tk} 합계 {cur:,.0f}주가 현재 보유 {shares_now[tk]:,.0f}주와 다릅니다 (기록 누락 확인)")
-        html = render_html(sm, target, warns + sh_warn, future, usd_cad, yr, shares)
-        if excluded:
-            html += ("<p class='muted' style='text-align:left;'>※ ETF 배당만 집계했습니다. 개인 종목 배당("
-                     + _esc(", ".join(excluded)) + ")은 제외했습니다.</p>")
+                sh_facts.append(f"주수 기록: {_norm(tk)} 현재 {cur:,.0f}주 (직접 매수 {last[0]:,.0f}주 + DRIP {last[1]:,.0f}주)")
+                if shares_now and _norm(tk) in shares_now and abs(shares_now[_norm(tk)] - cur) > 0.5:
+                    sh_warn.append(f"주수 기록의 {_norm(tk)} 합계 {cur:,.0f}주가 현재 보유 {shares_now[_norm(tk)]:,.0f}주와 다릅니다 (기록 누락 확인)")
+        html = render_html(sm, target, warns + sh_warn, future, usd_cad, yr, shares or None)
+        if note_txt:
+            html += f"<p class='muted' style='text-align:left;'>{note_txt}</p>"
         return html, facts_from(sm, target) + yearly_facts(yr) + sh_facts
     except Exception as e:
         return f"<p class='muted'>배당 기록 요약 중 오류: {_esc(e)}</p>", []
@@ -2688,7 +2801,8 @@ from email.mime.multipart import MIMEMultipart
 from ledger import load_trades, apply_trades, render_ledger_html          # Trades 탭 -> 현재 보유
 from combined_sim import build_combined_simulation                        # 보유 + 가정 매수 20년 배당
 from pnl_overview import build_pnl_overview, compute_overview             # 월 납입 제외 전체 손익
-from dividends_log import load_dividends, parse_all, cash_deltas, build_dividend_report   # Dividends 탭 (받은 배당 기록)
+from dividends_log import (load_dividends, parse_all, cash_deltas, build_dividend_report,   # 받은 배당 (Trades의 DIV 줄, 없으면 옛 Dividends 탭)
+                           from_trades as dividends_from_trades, read_income_settings)
 from shares_log import load_share_events, parse_events, events_from_trades, merge_events                    # Shares 탭 (연말 보유 주수: 직접 매수 vs DRIP, 표시 전용)
 from combined_sim import read_sim_settings
 from history_log import run_history                                       # History 탭 (하루 한 줄 기록, 쓰는 곳은 여기뿐)
@@ -5430,9 +5544,14 @@ def main():
     # ---------- Trades 탭 반영: Holdings(처음 기록) + 거래 = 현재 보유 ----------
     ledger_info = None
     trade_rows = []
+    inc_cfg = {"income_tickers": ["SCHD"], "asof": None}
+    try:
+        inc_cfg = read_income_settings(_open_sheet())      # IncomeTickers(배당 카드 대상), HoldingsAsOf(기준일)
+    except Exception as e:
+        print(f"⚠️ Settings(IncomeTickers/HoldingsAsOf) 읽기 실패(기본값 사용): {e}")
     try:
         trade_rows, trade_warn = load_trades(_open_sheet)
-        df_hold, ledger_info = apply_trades(df_hold, trade_rows, usd_cad=get_usd_cad_rate())
+        df_hold, ledger_info = apply_trades(df_hold, trade_rows, usd_cad=get_usd_cad_rate(), asof=inc_cfg["asof"])
         ledger_info["warnings"] = trade_warn + ledger_info["warnings"]
         tfsa_netdep_cad += ledger_info["netdep_delta"]["TFSA"]
         resp_netdep_cad += ledger_info["netdep_delta"]["RESP"]
@@ -5446,11 +5565,14 @@ def main():
     div_good, div_warn, div_future = [], [], 0
     try:
         _today = pd.Timestamp.now().normalize()
-        div_rows, w0 = load_dividends(_open_sheet)
-        div_good, w1, div_future = parse_all(div_rows, _today)
-        _dcash, w2 = cash_deltas(div_good, get_usd_cad_rate())
-        tfsa_cash_usd += _dcash["TFSA"]
-        resp_cash_cad += _dcash["RESP"]
+        div_good, w1, div_future = dividends_from_trades(trade_rows, _today)      # Trades 탭의 Side=DIV (현금 반영은 ledger가 처리)
+        w0, w2 = [], []
+        if not div_good:                                                          # 없으면 옛 방식: Dividends 탭
+            div_rows, w0 = load_dividends(_open_sheet)
+            div_good, w1, div_future = parse_all(div_rows, _today)
+            _dcash, w2 = cash_deltas(div_good, get_usd_cad_rate())
+            tfsa_cash_usd += _dcash["TFSA"]
+            resp_cash_cad += _dcash["RESP"]
         div_warn = w0 + w1 + w2
     except Exception as e:
         print(f"⚠️ Dividends 처리 실패(배당 기록 없이 계속): {e}")
@@ -5494,6 +5616,7 @@ def main():
             held={str(r["Ticker"]) for _, r in df_enriched.iterrows()
                   if (pd.to_numeric(r.get("Shares"), errors="coerce") or 0) > 0},
             share_events=share_events,
+            income_tickers=inc_cfg["income_tickers"],
             shares_now={str(r["Ticker"]).upper(): float(pd.to_numeric(r.get("Shares"), errors="coerce") or 0)
                         for _, r in df_enriched.iterrows() if str(r.get("Type", "TFSA")).upper() == "TFSA"})
         pnl_facts = list(pnl_facts) + div_facts
