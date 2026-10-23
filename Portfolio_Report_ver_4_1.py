@@ -2635,7 +2635,11 @@ BRIEFING_TOOL = {
 }
 
 
-def call_claude(system, user, model=None, max_tokens=3500, client=None, use_tool=True):
+class TruncatedError(RuntimeError):
+    pass
+
+
+def call_claude(system, user, model=None, max_tokens=8000, client=None, use_tool=True):
     """Claude Messages API 호출. 결과를 JSON 텍스트로 돌려준다.
     1순위: 도구 호출(submit_briefing)로 받아 문법 오류 없는 JSON을 얻는다.
     도구 호출이 거절되면 2순위로 일반 텍스트 응답을 쓴다."""
@@ -2654,10 +2658,14 @@ def call_claude(system, user, model=None, max_tokens=3500, client=None, use_tool
                 kw["tools"] = [BRIEFING_TOOL]
                 kw["tool_choice"] = {"type": "tool", "name": BRIEFING_TOOL["name"]}
             resp = client.messages.create(**kw)
+            if getattr(resp, "stop_reason", "") == "max_tokens":
+                raise TruncatedError(f"Claude 응답이 길이 제한(max_tokens={max_tokens})에서 잘렸습니다")
             for b in resp.content:
                 if getattr(b, "type", "") == "tool_use" and isinstance(getattr(b, "input", None), dict):
                     return _json.dumps(b.input, ensure_ascii=False)
             return "".join(getattr(b, "text", "") for b in resp.content if getattr(b, "type", "text") == "text")
+        except TruncatedError:
+            raise
         except Exception as e:
             last = e
     raise last
