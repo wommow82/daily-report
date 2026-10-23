@@ -2610,17 +2610,53 @@ def build_user_message(evidence, held_tickers):
             + "\n".join(lines) + "\n\n위 근거만 사용해 JSON으로 답하세요.")
 
 
-def call_claude(system, user, model=None, max_tokens=3500, client=None):
-    """Claude Messages API 호출. 텍스트만 돌려준다. 실패 시 한 번 재시도."""
+_CLAIM = {"type": "object", "properties": {"text": {"type": "string"},
+                                           "evidence": {"type": "array", "items": {"type": "string"}}},
+          "required": ["text", "evidence"]}
+BRIEFING_TOOL = {
+    "name": "submit_briefing",
+    "description": "근거 목록만 사용해 작성한 한국어 브리핑을 제출한다.",
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "headline": {"type": "array", "items": _CLAIM},
+            "macro": {"type": "array", "items": _CLAIM},
+            "holdings": {"type": "array", "items": {
+                "type": "object",
+                "properties": {"ticker": {"type": "string"}, "stance": {"type": "string"},
+                               "points": {"type": "array", "items": _CLAIM},
+                               "thesis_check": _CLAIM},
+                "required": ["ticker", "stance", "points"]}},
+            "dividend_goal": {"type": "array", "items": _CLAIM},
+            "unknowns": {"type": "array", "items": {"type": "string"}},
+        },
+        "required": ["headline", "macro", "holdings", "dividend_goal", "unknowns"],
+    },
+}
+
+
+def call_claude(system, user, model=None, max_tokens=3500, client=None, use_tool=True):
+    """Claude Messages API 호출. 결과를 JSON 텍스트로 돌려준다.
+    1순위: 도구 호출(submit_briefing)로 받아 문법 오류 없는 JSON을 얻는다.
+    도구 호출이 거절되면 2순위로 일반 텍스트 응답을 쓴다."""
+    import json as _json
     model = model or os.environ.get("BRIEFING_MODEL") or DEFAULT_MODEL
     if client is None:
         import anthropic
         client = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
     last = None
     for attempt in range(2):
+        tool_mode = use_tool and attempt == 0
         try:
-            resp = client.messages.create(model=model, max_tokens=max_tokens, system=system,
-                                          messages=[{"role": "user", "content": user}])
+            kw = dict(model=model, max_tokens=max_tokens, system=system,
+                      messages=[{"role": "user", "content": user}])
+            if tool_mode:
+                kw["tools"] = [BRIEFING_TOOL]
+                kw["tool_choice"] = {"type": "tool", "name": BRIEFING_TOOL["name"]}
+            resp = client.messages.create(**kw)
+            for b in resp.content:
+                if getattr(b, "type", "") == "tool_use" and isinstance(getattr(b, "input", None), dict):
+                    return _json.dumps(b.input, ensure_ascii=False)
             return "".join(getattr(b, "text", "") for b in resp.content if getattr(b, "type", "text") == "text")
         except Exception as e:
             last = e
@@ -2818,10 +2854,16 @@ def build_ai_briefing(held_tickers, portfolio_facts, sim_facts, open_sheet_fn, n
             parsed = parse_json_loose(raw)
         except Exception as pe:
             # 로그(Actions)에 앞부분만 남기고, 형식만 다시 지켜 달라고 한 번만 재요청한다.
-            print(f"⚠️ AI 응답 JSON 해석 실패({pe}). 응답 앞부분: {str(raw)[:300]!r}")
+            pos = getattr(pe, "pos", 0) or 0
+            print(f"⚠️ AI 응답 JSON 해석 실패({pe}). 오류 위치 주변: {str(raw)[max(0, pos - 150):pos + 150]!r}")
             raw = call_claude(SYSTEM_PROMPT, user + "\n\n(앞선 응답이 JSON 형식 오류였습니다. 문자열 안에 큰따옴표를 쓰지 말고 "
                               "스키마에 맞는 유효한 JSON만 다시 출력하세요.)", model=model_name, client=client)
-            parsed = parse_json_loose(raw)
+            try:
+                parsed = parse_json_loose(raw)
+            except Exception as pe2:
+                pos2 = getattr(pe2, "pos", 0) or 0
+                print(f"⚠️ 재시도 응답도 JSON 해석 실패({pe2}). 오류 위치 주변: {str(raw)[max(0, pos2 - 150):pos2 + 150]!r}")
+                raise
         html, kept, dropped = render_briefing(parsed, evidence, model_name)
 
         problems = p1 + p2 + p3
