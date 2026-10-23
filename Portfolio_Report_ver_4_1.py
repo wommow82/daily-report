@@ -3,7 +3,7 @@
 # Portfolio_Report ver 4.1  (단일 파일 버전)
 #   - 이 파일 하나만 저장소에 올리면 됩니다 (+ 워크플로 yml, requirements_ver4.txt).
 #   - 아래 EMBEDDED_* 블록은 별도 모듈 파일(simulation_module.py, ledger.py, combined_sim.py,
-#     pnl_overview.py, history_log.py, dividends_log.py, ai_briefing.py)의 내용을 그대로 담은 것입니다.
+#     pnl_overview.py, history_log.py, shares_log.py, dividends_log.py, ai_briefing.py)의 내용을 그대로 담은 것입니다.
 # =====================================================================
 import sys as _sys
 import types as _types
@@ -505,6 +505,7 @@ ledger.py  -  Trades 탭(거래 기록) -> 현재 보유 종목 계산
 Trades 탭 열 (첫 줄에 그대로 붙여 넣기)
   Date, Ticker, Side, Shares, Price, Fee, Account, Currency, Amount, Apply, CashEffect, Note
   Side  : BUY / SELL / DEPOSIT / WITHDRAW   (한글 매수/매도/입금/출금도 인식)
+          DRIP = 배당 자동 재투자로 늘어난 주식. 계산은 BUY와 같고, 연도별 배당 표의 주수 컬럼에서 '직접 매수'와 구분해 보여줌
   DEPOSIT/WITHDRAW: Amount(CAD)만 쓰고, 그 계좌의 '순투입금'에 더하거나 빼고, 현금(Cash)도 같이 늘리거나 줄인다
                     (TFSA는 오늘 환율로 USD 환산). 현금에 반영하기 싫으면 CashEffect=N.
 """
@@ -517,6 +518,7 @@ from simulation_module import CAD_SUFFIXES, _flag, _num, read_simulation_rows
 
 SIDE_ALIASES = {
     "BUY": "BUY", "B": "BUY", "매수": "BUY", "사다": "BUY",
+    "DRIP": "BUY", "재투자": "BUY",   # 배당 자동 재투자 = 매수와 같은 계산 (연말 주수 표에서만 따로 구분)
     "SELL": "SELL", "S": "SELL", "매도": "SELL", "팔다": "SELL",
     "DEPOSIT": "DEPOSIT", "입금": "DEPOSIT", "납입": "DEPOSIT",
     "WITHDRAW": "WITHDRAW", "출금": "WITHDRAW",
@@ -1773,6 +1775,139 @@ def run_history(open_sheet_fn, ov, usd_cad, write=None, today=None):
 '''
 _register_embedded('history_log', EMBEDDED_HISTORY_LOG)
 
+# ---------- EMBEDDED_SHARES_LOG ----------
+EMBEDDED_SHARES_LOG = r'''# -*- coding: utf-8 -*-
+"""
+shares_log.py  -  Shares 탭: 연말 보유 주수 (직접 매수 vs DRIP) 기록 -> 연도별 배당 표에 붙이는 컬럼
+
+Shares 탭 열: Date, Ticker, Account, Shares, Type, Note
+  Type : BUY(직접 매수) / DRIP(배당 자동 재투자로 늘어난 주식) / SELL(매도, 직접 매수분에서 먼저 뺌)
+         / SPLIT(주식 분할로 늘어난 주수. 직접 매수·DRIP 수량에 같은 비율로 나눠 반영)
+이 탭은 '연말 수량 표시'에만 쓴다. 현재 보유 수량(Original Holdings + Trades)에는 영향을 주지 않으므로
+Trades 탭과 이중 계산되지 않는다. 시트는 읽기만 하고, 어떤 오류도 밖으로 던지지 않는다.
+"""
+import pandas as pd
+
+from simulation_module import _num, read_simulation_rows
+
+SHEET_NAME = "Shares"
+SHARE_TICKERS = ("SCHD",)      # 연도별 표에 수량을 보여줄 종목
+TYPES = ("BUY", "DRIP", "SELL", "SPLIT")
+
+
+def load_share_events(open_sheet_fn, sheet_name=SHEET_NAME):
+    """반환: (rows, warnings). 탭이 없으면 조용히 빈 결과."""
+    try:
+        return read_simulation_rows(open_sheet_fn(), sheet_name), []
+    except Exception as e:
+        if type(e).__name__ == "WorksheetNotFound":
+            return [], []
+        return [], [f"{sheet_name} 탭을 읽지 못했습니다: {e}"]
+
+
+def parse_events(rows, today):
+    """반환: (events, warnings). events: [{date,ticker,account,shares,type}] 날짜순 (같은 날은 입력 순서 유지)."""
+    today = pd.Timestamp(today).normalize()
+    ev, warns = [], []
+    for rec in rows:
+        row = rec.get("_row")
+        date = pd.to_datetime(str(rec.get("date", "")).strip(), errors="coerce")
+        if pd.isna(date):
+            warns.append(f"Shares {row}행: Date를 읽을 수 없어 건너뜀"); continue
+        date = (date.tz_localize(None) if getattr(date, "tzinfo", None) else date).normalize()
+        if date > today:
+            continue
+        ticker = str(rec.get("ticker", "")).strip().upper().removesuffix(".TO")
+        typ = str(rec.get("type", "")).strip().upper()
+        n = _num(rec.get("shares"))
+        acc = str(rec.get("account", "")).strip().upper() or "TFSA"
+        if not ticker or typ not in TYPES or n is None or n <= 0:
+            warns.append(f"Shares {row}행: Ticker/Type(BUY·DRIP·SELL·SPLIT)/Shares(0보다 큼)를 확인하세요 -> 건너뜀"); continue
+        ev.append({"date": date, "ticker": ticker, "account": acc, "shares": float(n), "type": typ})
+    ev.sort(key=lambda e: e["date"])      # 안정 정렬
+    return ev, warns
+
+
+def events_from_trades(trade_rows, today):
+    """Trades 탭 줄에서 주수 변화(BUY/DRIP/SELL)만 뽑는다. Apply=N, 미래 날짜, 읽을 수 없는 줄은 건너뛴다."""
+    from simulation_module import _flag
+    today = pd.Timestamp(today).normalize()
+    ev = []
+    for rec in trade_rows:
+        side = str(rec.get("side", "")).strip().upper()
+        typ = {"BUY": "BUY", "매수": "BUY", "DRIP": "DRIP", "재투자": "DRIP", "SELL": "SELL", "매도": "SELL"}.get(side)
+        if typ is None or not _flag(rec.get("apply"), True):
+            continue
+        date = pd.to_datetime(str(rec.get("date", "")).strip(), errors="coerce")
+        n = _num(rec.get("shares"))
+        ticker = str(rec.get("ticker", "")).strip().upper().removesuffix(".TO")
+        if pd.isna(date) or n is None or n <= 0 or not ticker:
+            continue
+        date = (date.tz_localize(None) if getattr(date, "tzinfo", None) else date).normalize()
+        if date > today:
+            continue
+        acc = str(rec.get("account", "")).strip().upper() or "TFSA"
+        ev.append({"date": date, "ticker": ticker, "account": acc, "shares": float(n), "type": typ})
+    return ev
+
+
+def merge_events(share_events, trade_events):
+    """Shares 탭(과거 기록) + Trades 탭(그 이후 거래). 같은 거래를 두 번 세지 않도록
+    종목·계좌별로 Shares 탭의 마지막 날짜 이후의 Trades 거래만 더한다."""
+    last = {}
+    for e in share_events:
+        k = (e["ticker"], e["account"])
+        last[k] = max(last.get(k, e["date"]), e["date"])
+    extra = [e for e in trade_events if e["date"] > last.get((e["ticker"], e["account"]), pd.Timestamp.min)]
+    return sorted(list(share_events) + extra, key=lambda e: e["date"])
+
+
+def _apply(own, drip, e):
+    n, t = e["shares"], e["type"]
+    if t == "BUY":
+        own += n
+    elif t == "DRIP":
+        drip += n
+    elif t == "SELL":
+        from_own = min(own, n)
+        own -= from_own
+        drip = max(0.0, drip - (n - from_own))
+    elif t == "SPLIT":
+        tot = own + drip
+        if tot > 0:
+            f = (tot + n) / tot
+            own, drip = own * f, drip * f
+    return own, drip
+
+
+def year_end_shares(events, ticker, years, today, account="TFSA"):
+    """반환: {year: (직접 매수 누적, DRIP 누적)}.
+    첫 기록 연도 이전과 아직 오지 않은 해는 넣지 않는다. 올해는 오늘 기준."""
+    today = pd.Timestamp(today).normalize()
+    evs = [e for e in events if e["ticker"] == ticker.upper() and e["account"] == account]
+    if not evs:
+        return {}
+    first = evs[0]["date"].year
+    out = {}
+    for y in years:
+        if y < first or y > today.year:
+            continue
+        cutoff = today if y == today.year else pd.Timestamp(year=y, month=12, day=31)
+        own = drip = 0.0
+        for e in evs:
+            if e["date"] <= cutoff:
+                own, drip = _apply(own, drip, e)
+        out[y] = (own, drip)
+    return out
+
+
+def current_total(events, ticker, today, account="TFSA"):
+    ys = year_end_shares(events, ticker, [pd.Timestamp(today).year], today, account)
+    v = ys.get(pd.Timestamp(today).year)
+    return None if v is None else v[0] + v[1]
+'''
+_register_embedded('shares_log', EMBEDDED_SHARES_LOG)
+
 # ---------- EMBEDDED_DIVIDENDS_LOG ----------
 EMBEDDED_DIVIDENDS_LOG = r'''# -*- coding: utf-8 -*-
 """
@@ -2004,7 +2139,7 @@ def facts_from(sm, target):
 # HTML
 # =========================
 
-def render_html(sm, target, warns, future, usd_cad, yr=None):
+def render_html(sm, target, warns, future, usd_cad, yr=None, shares=None):
     if not sm["count"]:
         msg = ("<p class='muted' style='text-align:left;'>아직 받은 배당 기록이 없습니다. Dividends 탭에 "
                "<strong>Date, Ticker, Account, Amount</strong>를 적으면 여기에 월별·종목별로 정리됩니다.</p>")
@@ -2047,13 +2182,17 @@ def render_html(sm, target, warns, future, usd_cad, yr=None):
 
     note = (f"<p class='muted' style='text-align:left;'>※ USD 배당은 오늘 환율({usd_cad:.4f})로 CAD 환산한 근사값입니다. "
             "Amount는 세금을 뗀 후 실제로 받은 금액을 적어야 정확합니다.</p>")
-    chart = render_yearly_chart(yr or [], target)
+    chart = render_yearly_chart(yr or [], target, shares)
     if not SHOW_DETAILS and chart:
         return chart + note + _warn_html(warns, future)
     return head + chart + mtbl + ytbl + qtbl + note + _warn_html(warns, future)
 
 
-def render_yearly_chart(yr, target):
+def _fmt_sh(x):
+    return f"{x:,.0f}" if abs(x - round(x)) < 0.05 else f"{x:,.1f}"
+
+
+def render_yearly_chart(yr, target, shares=None, share_ticker="SCHD"):
     """이메일용 세로 막대그래프 (표 + div 높이만 사용 — JS/SVG 없이 메일 앱에서 보이게)."""
     if not yr:
         return ""
@@ -2083,9 +2222,16 @@ def render_yearly_chart(yr, target):
         total = r["actual"] + r["est"]
         yoy = "—" if (not prev or prev < 100) else f"{(total / prev - 1) * 100:+.0f}%"   # 금액이 너무 작은 해와의 비교는 의미 없어 생략
         kind = {"actual": "실제", "partial": "실제 + 추정", "forecast": "추정"}[r["kind"]]
+        sh_cells = ""
+        if shares:
+            v = shares.get(r["year"])
+            if v is None:
+                sh_cells = "<td>—</td><td>—</td><td>—</td>"
+            else:
+                sh_cells = (f"<td>{_fmt_sh(v[0])}</td><td>{_fmt_sh(v[1])}</td><td><strong>{_fmt_sh(v[0] + v[1])}</strong></td>")
         rows += (f"<tr><td>{r['year']}</td><td>{_cad(r['actual']) if r['actual'] else '—'}</td>"
                  f"<td>{_cad(r['est']) if r['est'] else '—'}</td><td><strong>{_cad(total)}</strong></td>"
-                 f"<td>{yoy}</td><td>{kind}</td></tr>")
+                 f"<td>{yoy}</td><td>{kind}</td>{sh_cells}</tr>")
         prev = total if total > 0 else prev
     goal = ""
     last = yr[-1]
@@ -2097,8 +2243,12 @@ def render_yearly_chart(yr, target):
             "<div class='muted' style='text-align:left;'>진한 파랑 = 실제로 받은 금액, 연한 파랑(점선) = 추정. "
             "추정은 올해는 '작년 같은 기간에 받은 금액', 내년은 '최근 12개월 실제 합계'이며 아직 보유 중인 종목만 "
             "포함하고 배당 인상·DRIP으로 늘어난 주식은 반영하지 않은 보수적 값입니다.</div>"
-            "<table><tr><th>연도</th><th>실제</th><th>추정(추가)</th><th>합계</th><th>전년 대비</th><th>구분</th></tr>"
-            + rows + "</table>" + goal)
+            "<div style='overflow-x:auto;'><table class='compact'><tr><th>연도</th><th>실제</th><th>추정(추가)</th><th>합계</th><th>전년 대비</th><th>구분</th>"
+            + (f"<th>{_esc(share_ticker)} 직접 매수(주)</th><th>{_esc(share_ticker)} DRIP(주)</th><th>{_esc(share_ticker)} 합계(주)</th>" if shares else "")
+            + "</tr>" + rows + "</table></div>"
+            + ("<p class='muted' style='text-align:left;'>주수는 해당 연도 말 누적 보유 수량입니다(올해는 오늘 기준). "
+               "분할은 직접 매수·DRIP 수량에 같은 비율로 나눠 반영했습니다.</p>" if shares else "")
+            + goal)
 
 
 def _warn_html(warns, future):
@@ -2115,18 +2265,29 @@ def _warn_html(warns, future):
 # 리포트에서 부르는 함수
 # =========================
 
-def build_dividend_report(good, warns, future, usd_cad, target, today, held=None):
+def build_dividend_report(good, warns, future, usd_cad, target, today, held=None, share_events=None, shares_now=None):
     """반환: (html, facts). 예외를 던지지 않는다. held: 지금 보유 중인 티커들(추정에 사용)."""
     try:
         excluded = sorted({d["ticker"] for d in good if _norm(d["ticker"]) in INDIVIDUAL_STOCKS})
         good = [d for d in good if _norm(d["ticker"]) not in INDIVIDUAL_STOCKS]
         sm = summarize(good, usd_cad, today)
         yr = yearly(good, usd_cad, today, held)
-        html = render_html(sm, target, warns, future, usd_cad, yr)
+        shares, sh_warn, sh_facts = None, [], []
+        if share_events:
+            import shares_log as _sl
+            tk = _sl.SHARE_TICKERS[0]
+            shares = _sl.year_end_shares(share_events, tk, [r["year"] for r in yr], today) or None
+            if shares:
+                last = shares[max(shares)]
+                cur = last[0] + last[1]
+                sh_facts.append(f"Shares 탭 기록: {tk} 현재 {cur:,.0f}주 (직접 매수 {last[0]:,.0f}주 + DRIP {last[1]:,.0f}주)")
+                if shares_now and tk in shares_now and abs(shares_now[tk] - cur) > 0.5:
+                    sh_warn.append(f"Shares 탭의 {tk} 합계 {cur:,.0f}주가 현재 보유 {shares_now[tk]:,.0f}주와 다릅니다 (기록 누락 확인)")
+        html = render_html(sm, target, warns + sh_warn, future, usd_cad, yr, shares)
         if excluded:
             html += ("<p class='muted' style='text-align:left;'>※ ETF 배당만 집계했습니다. 개인 종목 배당("
                      + _esc(", ".join(excluded)) + ")은 제외했습니다.</p>")
-        return html, facts_from(sm, target) + yearly_facts(yr)
+        return html, facts_from(sm, target) + yearly_facts(yr) + sh_facts
     except Exception as e:
         return f"<p class='muted'>배당 기록 요약 중 오류: {_esc(e)}</p>", []
 '''
@@ -2528,6 +2689,7 @@ from ledger import load_trades, apply_trades, render_ledger_html          # Trad
 from combined_sim import build_combined_simulation                        # 보유 + 가정 매수 20년 배당
 from pnl_overview import build_pnl_overview, compute_overview             # 월 납입 제외 전체 손익
 from dividends_log import load_dividends, parse_all, cash_deltas, build_dividend_report   # Dividends 탭 (받은 배당 기록)
+from shares_log import load_share_events, parse_events, events_from_trades, merge_events                    # Shares 탭 (연말 보유 주수: 직접 매수 vs DRIP, 표시 전용)
 from combined_sim import read_sim_settings
 from history_log import run_history                                       # History 탭 (하루 한 줄 기록, 쓰는 곳은 여기뿐)
 from ai_briefing import build_ai_briefing                                 # 거시경제 + 뉴스 AI 브리핑(한국어)
@@ -5267,6 +5429,7 @@ def main():
 
     # ---------- Trades 탭 반영: Holdings(처음 기록) + 거래 = 현재 보유 ----------
     ledger_info = None
+    trade_rows = []
     try:
         trade_rows, trade_warn = load_trades(_open_sheet)
         df_hold, ledger_info = apply_trades(df_hold, trade_rows, usd_cad=get_usd_cad_rate())
@@ -5292,6 +5455,16 @@ def main():
     except Exception as e:
         print(f"⚠️ Dividends 처리 실패(배당 기록 없이 계속): {e}")
         div_warn = [f"Dividends 처리 중 오류: {e}"]
+
+    # ---------- Shares 탭: 연말 보유 주수 (연도별 배당 표에 표시만 함, 보유 수량 계산에는 쓰지 않음) ----------
+    share_events = []
+    try:
+        _sr, _sw = load_share_events(_open_sheet)
+        share_events, _sw2 = parse_events(_sr, pd.Timestamp.now().normalize())
+        share_events = merge_events(share_events, events_from_trades(trade_rows, pd.Timestamp.now().normalize()))   # 이후 거래는 Trades에서 자동
+        div_warn = div_warn + _sw + _sw2
+    except Exception as e:
+        print(f"⚠️ Shares 처리 실패(주수 컬럼 없이 계속): {e}")
 
     df_enriched, acc_summary = enrich_holdings_with_prices(
         df_hold,
@@ -5319,7 +5492,10 @@ def main():
         extras["dividends_html"], div_facts = build_dividend_report(
             div_good, div_warn, div_future, usd_cad, _target, pd.Timestamp.now().normalize(),
             held={str(r["Ticker"]) for _, r in df_enriched.iterrows()
-                  if (pd.to_numeric(r.get("Shares"), errors="coerce") or 0) > 0})
+                  if (pd.to_numeric(r.get("Shares"), errors="coerce") or 0) > 0},
+            share_events=share_events,
+            shares_now={str(r["Ticker"]).upper(): float(pd.to_numeric(r.get("Shares"), errors="coerce") or 0)
+                        for _, r in df_enriched.iterrows() if str(r.get("Type", "TFSA")).upper() == "TFSA"})
         pnl_facts = list(pnl_facts) + div_facts
     except Exception as e:
         extras["dividends_html"] = f"<p class='muted'>배당 기록 요약 실패: {_html_escape(e)}</p>"
