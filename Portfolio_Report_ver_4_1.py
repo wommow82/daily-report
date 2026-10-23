@@ -3477,7 +3477,42 @@ def open_gsheet(gs_id, retries=6, delay=5):
 # 시세 / 환율 유틸
 # =========================
 
-def get_last_and_prev_close(ticker, period="2y"):
+# 가격 기준일 기록: 리포트 맨 위에 "어느 날 종가인지" 보여주기 위함
+PRICE_META = {"asof": {}, "realtime": [], "stale": [], "expected": None}
+
+
+def _reset_price_meta():
+    PRICE_META.update({"asof": {}, "realtime": [], "stale": [], "expected": None})
+
+
+def _expected_last_bar_date(now=None):
+    """지금 시점에 일봉이 있어야 하는 가장 최근 거래일 (미국 동부 기준, 공휴일은 고려하지 않음).
+    평일 9:30 ET 이후면 오늘(장중 또는 마감 후), 그 전이거나 주말이면 직전 평일."""
+    from zoneinfo import ZoneInfo
+    now = now or datetime.now(ZoneInfo("America/New_York"))
+    d = now.date()
+    after_open = (now.hour, now.minute) >= (9, 30)
+    if d.weekday() < 5 and after_open:
+        return d
+    d = d - pd.Timedelta(days=1)
+    while d.weekday() >= 5:
+        d = d - pd.Timedelta(days=1)
+    return d
+
+
+def _fast_price(ticker):
+    """yfinance 실시간 시세(정규장 가격). 실패하면 None. 시간외 가격은 쓰지 않는다."""
+    try:
+        v = yf.Ticker(ticker).fast_info["last_price"]
+        v = float(v)
+        return v if v > 0 else None
+    except Exception:
+        return None
+
+
+def get_last_and_prev_close(ticker, period="2y", now=None, fast_price_fn=None):
+    """반환: (last, prev, closes). 일봉의 마지막 행이 '지금 있어야 할 거래일'보다 오래됐으면(yfinance 갱신 지연)
+    실시간 시세로 last를 대체하고 prev는 그 일봉 종가로 쓴다. 대체하지 못하면 stale로 기록한다."""
     try:
         hist = yf.Ticker(ticker).history(period=period)
         if hist is None or hist.empty:
@@ -3487,9 +3522,44 @@ def get_last_and_prev_close(ticker, period="2y"):
             return None, None, None
         last = float(closes.iloc[-1])
         prev = float(closes.iloc[-2]) if len(closes) >= 2 else last
+        bar_date = pd.Timestamp(closes.index[-1]).date()
+        expected = _expected_last_bar_date(now)
+        PRICE_META["expected"] = expected
+        if bar_date < expected:
+            fp = (fast_price_fn or _fast_price)(ticker)
+            if fp is not None and abs(fp - last) > 1e-9:
+                prev, last = last, fp               # 오늘 시세 = 실시간, 전일 종가 = 마지막 일봉
+                PRICE_META["realtime"].append(ticker)
+                PRICE_META["asof"][ticker] = expected
+            else:
+                PRICE_META["stale"].append(ticker)  # 대체할 시세가 없거나 같은 값 (휴장일일 수 있음)
+                PRICE_META["asof"][ticker] = bar_date
+        else:
+            PRICE_META["asof"][ticker] = bar_date
         return last, prev, closes
     except Exception:
         return None, None, None
+
+
+def price_asof_html(now=None):
+    """리포트 상단의 '가격 기준일' 한 줄. 정보가 없으면 빈 문자열."""
+    from zoneinfo import ZoneInfo
+    m = PRICE_META
+    if not m["asof"]:
+        return ""
+    now = now or datetime.now(ZoneInfo("America/New_York"))
+    latest = max(m["asof"].values())
+    mkt_closed = (now.date() > latest) or (now.hour, now.minute) >= (16, 0) or now.weekday() >= 5
+    kind = "종가" if mkt_closed else "장중 가격"
+    txt = f"가격 기준일: <strong>{latest.isoformat()} {kind}</strong> (정규장 기준, 시간외 가격 제외)"
+    if m["realtime"]:
+        txt += f" · 일봉 갱신이 늦어 {len(m['realtime'])}개 종목은 실시간 시세로 대체했습니다"
+    warn = ""
+    if m["stale"]:
+        names = ", ".join(sorted(set(m["stale"]))[:8])
+        warn = (f"<div style='color:#c62828;font-size:12px;margin-top:2px;'>⚠️ {_html_escape(names)} 가격이 "
+                f"{m['expected'].isoformat()} 기준 최신이 아닐 수 있습니다 (휴장일이거나 데이터 갱신 지연).</div>")
+    return f"<p class='muted' style='text-align:left;margin:2px 0 8px;'>{txt}</p>{warn}"
 
 
 def get_usd_cad_rate():
@@ -3617,6 +3687,7 @@ def enrich_holdings_with_prices(
     - summary[acc]["*"] (base)은 BaseCurrency 기준 값
     """
     df = df_hold.copy()
+    _reset_price_meta()
 
     fx_usd_to_base, fx_cad_to_base = get_fx_multipliers(base_currency)
     usd_cad = get_usd_cad_rate()
@@ -5018,6 +5089,7 @@ def build_html_report(df_enriched, account_summary, extras=None):
     # ---------- 6-1) Ver 4.0 추가 섹션 (main()에서 만들어 전달; 없으면 안내만) ----------
     _none = "<p class='muted'>이 섹션은 생성되지 않았습니다.</p>"
     pnl_html = extras.get("pnl_html") or _none
+    price_asof_line = price_asof_html()
     history_html = extras.get("history_html") or _none
     ai_html = extras.get("ai_html") or _none
     dividends_html = extras.get("dividends_html") or _none
@@ -5064,6 +5136,7 @@ def build_html_report(df_enriched, account_summary, extras=None):
 
           <h1>📊 Daily Portfolio Report</h1>
           <p class="subtitle">Generated at {now_str} &nbsp;|&nbsp; BaseCurrency: {base_ccy} &nbsp;|&nbsp; Powered by Claude AI</p>
+          {price_asof_line}
 
           <!-- ① 계좌 요약 + 월 납입 제외 총 손익 -->
           <div class="card" style="border:2px solid #2e7d32;">
