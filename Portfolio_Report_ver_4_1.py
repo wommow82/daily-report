@@ -927,6 +927,7 @@ from simulation_module import (
     fetch_ticker_inputs, read_simulation_rows, simulate_dividends,
 )
 
+LAST_DIV_GROWTH = {}   # 마지막 계산에서 쓴 종목별 배당 성장률 {티커: {"g": 소수, "note": 설명}} (받은 배당 추정에 같은 값을 쓰려고 남김)
 MAX_SCENARIOS = 4
 SHOW_BASELINE = False   # True면 리포트에 '현재 보유 기준' 표도 보여준다 (기본: Run=Y 시나리오만 표시)
 DEFAULTS = {
@@ -1267,6 +1268,7 @@ def build_combined_simulation(open_sheet_fn, df_hold, usd_cad, fetch_fn=None, sh
 
 
 def _build(open_sheet_fn, df_hold, usd_cad, fetch_fn, sheet_name):
+    LAST_DIV_GROWTH.clear()
     sh = None
     cfg = dict(DEFAULTS)
     sheet_msg = ""
@@ -1310,6 +1312,7 @@ def _build(open_sheet_fn, df_hold, usd_cad, fetch_fn, sheet_name):
         a = _assume([], t, data, cfg)
         base_results[t] = run_ticker(t, data, sh_n, [], a, years, usd_cad)
         base_assume[t], base_data[t] = a, data
+        LAST_DIV_GROWTH[t] = {"g": a["div_growth"], "note": a["div_growth_note"]}
     if not base_results:
         return _note("배당 데이터를 가져온 보유 종목이 없어 기준선을 만들 수 없습니다.") + sheet_msg, []
     base_agg = aggregate(base_results, years)
@@ -1360,6 +1363,9 @@ def _build(open_sheet_fn, df_hold, usd_cad, fetch_fn, sheet_name):
                         continue
                     a = _assume(by_t.get(t, []), t, cache[t], cfg)
                     assumptions[t] = a
+                    if a["div_growth_note"] == "시트에서 직접 지정" and \
+                            LAST_DIV_GROWTH.get(t, {}).get("note", "").startswith("자동"):
+                        LAST_DIV_GROWTH[t] = {"g": a["div_growth"], "note": f"Simulation 탭 시나리오 '{name}'의 DivGrowthPct"}
                     b_res[t] = run_ticker(t, cache[t], pos.get(t, 0.0), [], a, s_years, usd_cad)
                     s_res[t] = run_ticker(t, cache[t], pos.get(t, 0.0), by_t.get(t, []), a, s_years, usd_cad)
                 b_agg, s_agg = aggregate(b_res, s_years), aggregate(s_res, s_years)
@@ -2180,12 +2186,16 @@ def _norm(t):
     return t[:-3] if t.endswith(".TO") else t
 
 
-def yearly(good, usd_cad, today, held=None):
+HORIZON_YEARS = 10   # 증가율이 있을 때 오늘 기준으로 몇 해 앞까지 추정 막대를 그릴지
+
+
+def yearly(good, usd_cad, today, held=None, growth=None):
     """연도별 막대용 데이터. 반환: [{year, actual, est, kind}] (kind: 'actual' | 'partial' | 'forecast').
     - 지난 해: 실제 합계.
     - 올해: 지금까지 실제 + 남은 기간 추정 (작년 같은 기간에 받은 금액, 아직 보유 중인 종목만).
     - 내년: 최근 12개월 실제 (아직 보유 중인 종목만).
-    성장(배당 인상·DRIP으로 늘어난 주식)은 반영하지 않는 보수적 추정이다.
+    growth: {티커: 연 배당 증가율(소수)}. 주면 추정분(올해 남은 기간·내년)에 1년치 증가율을 곱한다.
+            (DRIP으로 늘어난 주식 수는 반영하지 않는다.) 없으면 증가율 0%.
     held: 지금 보유 중인 티커 집합. None이면 모든 기록을 대상으로 한다."""
     today = pd.Timestamp(today).normalize()
     items = [dict(d, cad=to_cad(d, usd_cad)) for d in good]
@@ -2194,6 +2204,8 @@ def yearly(good, usd_cad, today, held=None):
     hs = None if held is None else {_norm(h) for h in held}
     ok = (lambda it: True) if hs is None else (lambda it: _norm(it["ticker"]) in hs)
     one_year_ago = today - pd.DateOffset(years=1)
+    gmap = {_norm(k): float(v) for k, v in (growth or {}).items() if v is not None}
+    grow = lambda it: 1.0 + gmap.get(_norm(it["ticker"]), 0.0)
     by_year = {}
     for it in items:
         by_year[it["date"].year] = by_year.get(it["date"].year, 0.0) + it["cad"]
@@ -2203,11 +2215,14 @@ def yearly(good, usd_cad, today, held=None):
         if y < today.year:
             out.append({"year": y, "actual": a, "est": 0.0, "kind": "actual"})
         else:
-            rest = sum(it["cad"] for it in items
+            rest = sum(it["cad"] * grow(it) for it in items
                        if ok(it) and one_year_ago < it["date"] <= pd.Timestamp(year=today.year - 1, month=12, day=31))
-            out.append({"year": y, "actual": a, "est": rest, "kind": "partial"})
-    ttm = sum(it["cad"] for it in items if ok(it) and one_year_ago < it["date"] <= today)
-    out.append({"year": today.year + 1, "actual": 0.0, "est": ttm, "kind": "forecast"})
+            out.append({"year": y, "actual": a, "est": rest, "kind": "partial", "grown": bool(gmap)})
+    horizon = HORIZON_YEARS if gmap else 1       # 증가율이 없으면 먼 미래는 평평한 선이라 의미가 없어 내년만
+    ttm_items = [it for it in items if ok(it) and one_year_ago < it["date"] <= today]
+    for n in range(1, horizon + 1):
+        est = sum(it["cad"] * grow(it) ** n for it in ttm_items)
+        out.append({"year": today.year + n, "actual": 0.0, "est": est, "kind": "forecast", "grown": bool(gmap), "n": n})
     return out
 
 
@@ -2218,9 +2233,9 @@ def yearly_facts(yr):
             f.append(f"받은 배당 기록: {r['year']}년 받은 배당 합계 {_cad(r['actual'])} (CAD 환산 근사)")
         elif r["kind"] == "partial":
             f.append(f"받은 배당 기록: {r['year']}년 지금까지 {_cad(r['actual'])}, 남은 기간 추정 +{_cad(r['est'])} "
-                     f"(작년 같은 기간 실제 금액 기준 추정, 성장 미반영) → 연말 추정 {_cad(r['actual'] + r['est'])}")
-        else:
-            f.append(f"{r['year']}년 배당 추정 {_cad(r['est'])} (최근 12개월 실제 합계, 성장 미반영)")
+                     f"(작년 같은 기간 실제 금액 기준 추정, {'배당 증가율 적용' if r.get('grown') else '성장 미반영'}) → 연말 추정 {_cad(r['actual'] + r['est'])}")
+        elif r.get("n", 1) == 1:
+            f.append(f"{r['year']}년 배당 추정 {_cad(r['est'])} (최근 12개월 실제 합계, {'배당 증가율 적용' if r.get('grown') else '성장 미반영'})")
     return f
 
 
@@ -2299,12 +2314,16 @@ def render_yearly_chart(yr, target, shares=None):
         return ""
     H = 130
     mx = max([r["actual"] + r["est"] for r in yr] + [1.0])
+    compact = len(yr) > 8
+    short = lambda v: (f"{v / 1000:.1f}K" if v >= 1000 else f"{v:.0f}")
     cols = ""
     for r in yr:
         ha = r["actual"] / mx * H
         he = r["est"] / mx * H
         total = r["actual"] + r["est"]
-        if r["kind"] == "forecast":
+        if compact:
+            label = short(total)
+        elif r["kind"] == "forecast":
             label = f"{_cad(total)}<br><span style='color:#777;font-weight:400;'>추정</span>"
         elif r["kind"] == "partial":
             label = f"{_cad(total)}<br><span style='color:#777;font-weight:400;'>연말 추정</span>"
@@ -2313,10 +2332,14 @@ def render_yearly_chart(yr, target, shares=None):
         est = (f"<div style='height:{max(he, 2):.0f}px;background:#e3f2fd;border:1px dashed #1976d2;border-bottom:0;'></div>"
                if r["est"] > 0 else "")
         act = (f"<div style='height:{max(ha, 2):.0f}px;background:#1976d2;'></div>" if r["actual"] > 0 else "")
-        yname = f"{r['year']}" + (" (진행 중)" if r["kind"] == "partial" else (" (추정)" if r["kind"] == "forecast" else ""))
-        cols += (f"<td valign='bottom' align='center' style='padding:0 4px;vertical-align:bottom;border:0;'>"
-                 f"<div style='font-size:11px;font-weight:700;margin-bottom:2px;'>{label}</div>{est}{act}"
-                 f"<div style='font-size:11px;margin-top:3px;border-top:1px solid #999;padding-top:2px;'>{yname}</div></td>")
+        if compact:
+            yname = f"'{str(r['year'])[2:]}" + ("*" if r["kind"] != "actual" else "")
+        else:
+            yname = f"{r['year']}" + (" (진행 중)" if r["kind"] == "partial" else (" (추정)" if r["kind"] == "forecast" else ""))
+        fs = 9 if compact else 11
+        cols += (f"<td valign='bottom' align='center' style='padding:0 {1 if compact else 4}px;vertical-align:bottom;border:0;'>"
+                 f"<div style='font-size:{fs}px;font-weight:700;margin-bottom:2px;'>{label}</div>{est}{act}"
+                 f"<div style='font-size:{fs}px;margin-top:3px;border-top:1px solid #999;padding-top:2px;'>{yname}</div></td>")
     rows = ""
     prev = None
     for r in yr:
@@ -2339,11 +2362,15 @@ def render_yearly_chart(yr, target, shares=None):
     if target and last["est"] > 0:
         goal = (f"<p class='muted' style='text-align:left;'>연 목표 {_cad(target * 12)}(월 {_cad(target)} × 12) 대비 "
                 f"{last['year']}년 추정 {last['est'] / (target * 12) * 100:.1f}%</p>")
+    legend = ("<div class='muted' style='text-align:left;'>막대 위 숫자는 CAD, 1,000 이상은 K(천) 단위입니다. "
+              "연도 옆 * 는 추정이 포함된 해입니다.</div>" if compact else "")
     return ("<h3>연도별 받은 배당 (CAD 환산, 추정 포함)</h3>"
-            f"<table style='border:0;width:100%;table-layout:fixed;'><tr style='height:{H + 50}px;'>{cols}</tr></table>"
+            f"<table style='border:0;width:100%;table-layout:fixed;'><tr style='height:{H + 50}px;'>{cols}</tr></table>" + legend +
             "<div class='muted' style='text-align:left;'>진한 파랑 = 실제로 받은 금액, 연한 파랑(점선) = 추정. "
-            "추정은 올해는 '작년 같은 기간에 받은 금액', 내년은 '최근 12개월 실제 합계'이며 아직 보유 중인 종목만 "
-            "포함하고 배당 인상·DRIP으로 늘어난 주식은 반영하지 않은 보수적 값입니다.</div>"
+            + ("추정은 올해는 '작년 같은 기간에 받은 금액', 내년 이후는 '최근 12개월 실제 합계'에 아래 연 배당 증가율을 해마다 복리로 곱한 값이며 "
+               if any(r.get("grown") for r in yr) else
+               "추정은 올해는 '작년 같은 기간에 받은 금액', 내년은 '최근 12개월 실제 합계'이며 ")
+            + "아직 보유 중인 종목만 포함하고 DRIP으로 늘어난 주식 수는 반영하지 않은 값입니다.</div>"
             "<div style='overflow-x:auto;'><table class='compact'><tr><th>연도</th><th>실제</th><th>추정(추가)</th><th>합계</th><th>전년 대비</th><th>구분</th>"
             + "".join(f"<th>{_esc(tk)} 직접 매수(주)</th><th>{_esc(tk)} DRIP(주)</th><th>{_esc(tk)} 합계(주)</th>" for tk in (shares or {}))
             + "</tr>" + rows + "</table></div>"
@@ -2367,7 +2394,7 @@ def _warn_html(warns, future):
 # =========================
 
 def build_dividend_report(good, warns, future, usd_cad, target, today, held=None, share_events=None, shares_now=None,
-                          income_tickers=None):
+                          income_tickers=None, growth=None):
     """반환: (html, facts). 예외를 던지지 않는다.
     held: 지금 보유 중인 티커들(추정에 사용). income_tickers: 이 종목들만 집계(없으면 개인 종목만 제외).
     share_events: 주수 변화 이벤트(shares_log 형식). shares_now: {티커: 현재 보유 주수} (검증용)."""
@@ -2382,7 +2409,8 @@ def build_dividend_report(good, warns, future, usd_cad, target, today, held=None
             good = [d_ for d_ in good if _norm(d_["ticker"]) not in INDIVIDUAL_STOCKS]
             note_txt = ("※ ETF 배당만 집계했습니다. 개인 종목 배당(" + _esc(", ".join(skipped)) + ")은 제외했습니다.") if skipped else ""
         sm = summarize(good, usd_cad, today)
-        yr = yearly(good, usd_cad, today, held)
+        gmap = {_norm(k): v for k, v in (growth or {}).items() if v and v.get("g") is not None}
+        yr = yearly(good, usd_cad, today, held, {k: v["g"] for k, v in gmap.items()} or None)
         shares, sh_warn, sh_facts = {}, [], []
         if share_events:
             import shares_log as _sl
@@ -2398,6 +2426,12 @@ def build_dividend_report(good, warns, future, usd_cad, target, today, held=None
                 if shares_now and _norm(tk) in shares_now and abs(shares_now[_norm(tk)] - cur) > 0.5:
                     sh_warn.append(f"주수 기록의 {_norm(tk)} 합계 {cur:,.0f}주가 현재 보유 {shares_now[_norm(tk)]:,.0f}주와 다릅니다 (기록 누락 확인)")
         html = render_html(sm, target, warns + sh_warn, future, usd_cad, yr, shares or None)
+        if gmap:
+            used = {_norm(d_["ticker"]) for d_ in good}
+            lines = [f"{_esc(k)} 연 {v['g'] * 100:+.1f}% ({_esc(v.get('note', ''))})" for k, v in gmap.items() if k in used]
+            if lines:
+                html += ("<p class='muted' style='text-align:left;'>※ 적용한 연 배당 증가율(20년 배당 시뮬레이터와 같은 값): "
+                         + " · ".join(lines) + ". 미래 증가율은 알 수 없는 가정입니다.</p>")
         if note_txt:
             html += f"<p class='muted' style='text-align:left;'>{note_txt}</p>"
         return html, facts_from(sm, target) + yearly_facts(yr) + sh_facts
@@ -3266,6 +3300,7 @@ from dividends_log import (load_dividends, parse_all, cash_deltas, build_dividen
                            from_trades as dividends_from_trades, read_income_settings)
 from shares_log import load_share_events, parse_events, events_from_trades, merge_events                    # Shares 탭 (연말 보유 주수: 직접 매수 vs DRIP, 표시 전용)
 from combined_sim import read_sim_settings
+import combined_sim as _combined_sim                                     # 시뮬레이터가 쓴 배당 성장률(LAST_DIV_GROWTH)을 가져오는 용도
 from history_log import run_history                                       # History 탭 (하루 한 줄 기록, 쓰는 곳은 여기뿐)
 from technicals import build_technicals_report                            # 성장/모멘텀 종목 기술지표 요약(이동평균·RSI, AI 호출 없음)
 from ai_briefing import build_ai_briefing                                 # 거시경제 + 뉴스 AI 브리핑(한국어)
@@ -6078,6 +6113,12 @@ def main():
     except Exception as e:
         extras["pnl_html"], pnl_facts = f"<p class='muted'>손익 요약 실패: {_html_escape(e)}</p>", []
 
+    # 시뮬레이터를 먼저 돌려, 거기서 쓴 배당 성장률을 '받은 배당' 추정에도 같은 값으로 쓴다
+    try:
+        extras["simulation_html"], sim_facts = build_combined_simulation(_open_sheet, df_enriched, usd_cad)
+    except Exception as e:
+        extras["simulation_html"], sim_facts = f"<p class='muted'>시뮬레이터 실패: {_html_escape(e)}</p>", []
+
     try:
         try:
             _target = read_sim_settings(_open_sheet())["target_monthly_cad"]
@@ -6089,6 +6130,7 @@ def main():
                   if (pd.to_numeric(r.get("Shares"), errors="coerce") or 0) > 0},
             share_events=share_events,
             income_tickers=inc_cfg["income_tickers"],
+            growth=(dict(_combined_sim.LAST_DIV_GROWTH) if os.environ.get("DIV_GROWTH_IN_ESTIMATE", "1") == "1" else None),
             shares_now={str(r["Ticker"]).upper(): float(pd.to_numeric(r.get("Shares"), errors="coerce") or 0)
                         for _, r in df_enriched.iterrows() if str(r.get("Type", "TFSA")).upper() == "TFSA"})
         pnl_facts = list(pnl_facts) + div_facts
@@ -6103,11 +6145,6 @@ def main():
         pnl_facts = list(pnl_facts) + hist_facts
     except Exception as e:
         extras["history_html"] = f"<p class='muted'>History 실패: {_html_escape(e)}</p>"
-
-    try:
-        extras["simulation_html"], sim_facts = build_combined_simulation(_open_sheet, df_enriched, usd_cad)
-    except Exception as e:
-        extras["simulation_html"], sim_facts = f"<p class='muted'>시뮬레이터 실패: {_html_escape(e)}</p>", []
 
     try:
         extras["ledger_html"] = (
