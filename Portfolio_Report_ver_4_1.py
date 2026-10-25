@@ -2454,6 +2454,7 @@ def render_yearly_chart(yr, target, shares=None):
         ha = r["actual"] / mx * H
         he = r["est"] / mx * H
         total = r["actual"] + r["est"]
+        mo = total / 12.0
         if compact:
             label = short(total)
         elif r["kind"] == "forecast":
@@ -2462,6 +2463,8 @@ def render_yearly_chart(yr, target, shares=None):
             label = f"{_cad(total)}<br><span style='color:#777;font-weight:400;'>연말 추정</span>"
         else:
             label = _cad(total)
+        label += (f"<br><span style='color:#1565c0;font-weight:600;'>월 {short(mo) if compact else _cad(mo)}</span>"
+                  if total > 0 else "")
         if r.get("sim") and r["est"] > 0:
             hb = min(r.get("est_base", 0.0), r["est"]) / mx * H
             hadd = max(he - hb, 0.0)
@@ -2494,6 +2497,7 @@ def render_yearly_chart(yr, target, shares=None):
                 sh_cells += (f"<td>{_fmt_sh(v[0])}</td><td>{_fmt_sh(v[1])}</td><td><strong>{_fmt_sh(v[0] + v[1])}</strong></td>")
         rows += (f"<tr><td>{r['year']}</td><td>{_cad(r['actual']) if r['actual'] else '—'}</td>"
                  f"<td>{_cad(r['est']) if r['est'] else '—'}</td><td><strong>{_cad(total)}</strong></td>"
+                 f"<td>{_cad(total / 12.0) if total else '—'}</td>"
                  f"<td>{yoy}</td><td>{kind}</td>{sh_cells}</tr>")
         prev = total if total > 0 else prev
     goal = ""
@@ -2513,7 +2517,7 @@ def render_yearly_chart(yr, target, shares=None):
                     + " · 20년 배당 시뮬레이터와 같은 계산</div>")
     return ("<h3>연도별 받은 배당 (CAD 환산, 추정 포함)</h3>" + sim_head +
             f"<table style='border:0;width:100%;table-layout:fixed;'><tr style='height:{H + 50}px;'>{cols}</tr></table>" + legend +
-            "<div class='muted' style='text-align:left;'>진한 파랑 = 실제로 받은 금액, 연한 파랑(점선) = 추정"
+            "<div class='muted' style='text-align:left;'>막대 위 '월'은 연 합계 ÷ 12입니다(투자·배당 첫 해는 12개월 미만이라 낮게 보입니다). 진한 파랑 = 실제로 받은 금액, 연한 파랑(점선) = 추정"
             + (", 연한 초록(점선) = 월 추가 매수로 늘어난 몫(추정). " if sim_rows else ". ")
             + ("올해는 '작년 같은 기간에 받은 금액', 내년 이후는 20년 배당 시뮬레이터와 같은 계산(현재 보유 + 배당 재투자 + 연 배당 증가율 + 월 추가 매수)입니다. "
                "시뮬레이터는 배당을 매달 1/12씩 받는 단순화와 yfinance의 최근 12개월 주당 배당을 쓰므로 실제 지급 시기·금액과 다를 수 있습니다."
@@ -2524,7 +2528,7 @@ def render_yearly_chart(yr, target, shares=None):
                 "추정은 올해는 '작년 같은 기간에 받은 금액', 내년은 '최근 12개월 실제 합계'이며 아직 보유 중인 종목만 포함하고 "
                 "배당 인상·DRIP으로 늘어난 주식은 반영하지 않은 보수적 값입니다."))
             + "</div>"
-            "<div style='overflow-x:auto;'><table class='compact'><tr><th>연도</th><th>실제</th><th>추정(추가)</th><th>합계</th><th>전년 대비</th><th>구분</th>"
+            "<div style='overflow-x:auto;'><table class='compact'><tr><th>연도</th><th>실제</th><th>추정(추가)</th><th>합계</th><th>월 평균</th><th>전년 대비</th><th>구분</th>"
             + "".join(f"<th>{_esc(tk)} 직접 매수(주)</th><th>{_esc(tk)} DRIP(주)</th><th>{_esc(tk)} 합계(주)</th>" for tk in (shares or {}))
             + "</tr>" + rows + "</table></div>"
             + ("<p class='muted' style='text-align:left;'>주수는 해당 연도 말 누적 보유 수량입니다(올해는 오늘 기준). "
