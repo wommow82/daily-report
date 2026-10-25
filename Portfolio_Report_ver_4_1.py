@@ -927,12 +927,15 @@ from simulation_module import (
     fetch_ticker_inputs, read_simulation_rows, simulate_dividends,
 )
 
+LAST_RUN = {"data": {}, "assume": {}, "pos": {}, "cfg": None, "usd_cad": None}   # 마지막 계산에서 쓴 입력(받은 배당 미래 추정에 재사용)
 LAST_DIV_GROWTH = {}   # 마지막 계산에서 쓴 종목별 배당 성장률 {티커: {"g": 소수, "note": 설명}} (받은 배당 추정에 같은 값을 쓰려고 남김)
+SHOW_YEARLY_TABLE = False   # True면 시나리오마다 연차별 상세 표도 함께 보여준다 (기본: 그래프만)
 MAX_SCENARIOS = 4
 SHOW_BASELINE = False   # True면 리포트에 '현재 보유 기준' 표도 보여준다 (기본: Run=Y 시나리오만 표시)
 DEFAULTS = {
     "target_monthly_cad": 2000.0, "retire_years": 10, "sim_years": 20,
     "drip": True, "price_growth": 0.0, "wht_usd": 0.15, "accounts": ("TFSA",),
+    "div_chart_monthly_cad": 200.0,   # '받은 배당' 연도별 막대의 미래 추정에 쓰는 월 추가 매수액(CAD). 0이면 추가 매수 없이 증가율만 적용
 }
 NEW_COLUMNS = {"addshares", "addcad", "scenario"}
 
@@ -970,6 +973,9 @@ def read_sim_settings(sh):
     v = _num(kv.get("whtpctusd"))
     if v is not None:
         cfg["wht_usd"] = min(max(v, 0.0), 60.0) / 100.0
+    v = _num(kv.get("dividendchartmonthlycad"))
+    if v is not None:
+        cfg["div_chart_monthly_cad"] = min(max(v, 0.0), 100000.0)
     accs = [a.strip().upper() for a in str(kv.get("simaccounts", "")).split(",") if a.strip()]
     accs = [a for a in accs if a in ("TFSA", "RESP")]
     if accs:
@@ -1098,6 +1104,39 @@ def run_ticker(ticker, data, base_shares, add_rows, assume, years, usd_cad):
     return res
 
 
+
+def project_calendar(tickers, monthly_cad, today, horizon=10):
+    """받은 배당 연도별 막대의 미래 추정용. 시뮬레이터와 같은 계산(주가·배당 성장, 배당 재투자 O)으로
+    달력 연도별 세후 배당(CAD)을 구한다.
+    반환: {연도: {"base": 추가 매수 없이, "with_add": 월 monthly_cad 추가 매수 시}} 또는 {} (계산 불가).
+    올해는 오늘 이후 남은 달만 담긴다. 월 1회 단위 근사이며 배당은 매달 1/12로 나눠 받는 단순화."""
+    try:
+        data, assume, pos = LAST_RUN["data"], LAST_RUN["assume"], LAST_RUN["pos"]
+        usd_cad = LAST_RUN["usd_cad"]
+        today = pd.Timestamp(today).normalize()
+        names = [str(t).upper() for t in tickers]
+        use = [t for t in names if t in data and pos.get(t, 0) > 0]
+        if not use:
+            return {}
+        months = int(horizon) * 12 + 12
+        out = {}
+        for variant in ("base", "with_add"):
+            add = [] if variant == "base" else [{"add_shares": 0.0, "add_cad": 0.0, "monthly_cad": float(monthly_cad),
+                                                    "lump_cad": 0.0}]
+            if variant == "with_add" and not monthly_cad:
+                add = []
+            for t in use:
+                a = dict(assume[t], drip=True)         # 배당 재투자(DRIP) 적용
+                res = run_ticker(t, data[t], pos[t], add, a, int(horizon) + 1, usd_cad)
+                for i, v in enumerate(res["monthly_div_series"][:months]):
+                    m = today.month + 1 + i               # 시작 달은 다음 달(1개월 뒤)
+                    y = today.year + (m - 1) // 12
+                    out.setdefault(y, {"base": 0.0, "with_add": 0.0})[variant] += float(v)
+        return {y: v for y, v in out.items() if today.year <= y <= today.year + int(horizon)}
+    except Exception:
+        return {}
+
+
 def aggregate(results, years):
     """종목별 결과를 합쳐 연도별 표와 월별 합계 시리즈를 만든다."""
     series = np.zeros(years * 12)
@@ -1197,6 +1236,90 @@ def _scenario_title(rows, datas, usd_cad):
     return " · ".join(parts)
 
 
+
+def _short_cad(v):
+    return f"{v / 1000:.1f}K" if v >= 1000 else f"{v:.0f}"
+
+
+_PALETTE = ["#1565c0", "#6a1b9a", "#00838f", "#ef6c00", "#5d4037"]
+
+
+def _lighten(hexcol, f=0.6):
+    h = hexcol.lstrip("#")
+    r, g, b = (int(h[i:i + 2], 16) for i in (0, 2, 4))
+    mix = lambda c: int(c + (255 - c) * f)
+    return f"#{mix(r):02x}{mix(g):02x}{mix(b):02x}"
+
+
+def _render_chart(base, scen, cfg, years, rows=None, assumptions=None):
+    """연차별 월 배당(세후, CAD) 누적 막대그래프. 종목별로 색을 나누고, 각 종목 안에서
+    '현재 보유분'(진한 색)과 '추가 매수로 늘어난 몫'(같은 색의 연한 톤)을 구분한다.
+    목표(월 C$)를 넘는 해는 ★. 이메일 호환을 위해 표와 div 높이만 쓴다(JS/SVG 없음)."""
+    target = cfg["target_monthly_cad"]
+    H = 150
+    last = scen["rows"][-1]["by_ticker"]
+    order = sorted(last, key=lambda t: -last[t]["monthly_div_cad"])
+    shown, rest = order[:5], order[5:]
+    color = {t: _PALETTE[i % len(_PALETTE)] for i, t in enumerate(shown)}
+    mx = max([r["monthly_div_cad"] for r in scen["rows"]] + [1.0])
+    cols = ""
+    for i, sr in enumerate(scen["rows"]):
+        br = base["rows"][i] if i < len(base["rows"]) else {"by_ticker": {}}
+        segs = []                                    # 아래에서 위로 쌓는 순서
+        for t in shown:
+            sv = sr["by_ticker"].get(t, {"monthly_div_cad": 0.0})["monthly_div_cad"]
+            bv = min(br["by_ticker"].get(t, {"monthly_div_cad": 0.0})["monthly_div_cad"], sv)
+            segs.append((color[t], bv))
+            segs.append((_lighten(color[t]), sv - bv))
+        if rest:
+            sv = sum(sr["by_ticker"].get(t, {"monthly_div_cad": 0.0})["monthly_div_cad"] for t in rest)
+            bv = min(sum(br["by_ticker"].get(t, {"monthly_div_cad": 0.0})["monthly_div_cad"] for t in rest), sv)
+            segs.append(("#757575", bv))
+            segs.append(("#cfcfcf", sv - bv))
+        stack = "".join(
+            f"<div style='height:{max(v / mx * H, 0):.1f}px;background:{c};'></div>"
+            for c, v in reversed(segs) if v / mx * H >= 0.5)      # 위에서부터 그리므로 뒤집음
+        total = sr["monthly_div_cad"]
+        hit = bool(target) and total >= target
+        star = "<span style='color:#f9a825;'>★</span>" if hit else ""
+        bg = " background:#fffde7;" if sr["year"] == cfg["retire_years"] else ""
+        cols += (
+            f"<td valign='bottom' align='center' style='padding:0 1px;vertical-align:bottom;border:0;{bg}'>"
+            f"<div style='font-size:8px;font-weight:700;margin-bottom:2px;'>{star}{_short_cad(total)}</div>"
+            f"{stack or ''}"
+            f"<div style='font-size:8px;margin-top:3px;border-top:1px solid #999;padding-top:2px;'>{sr['year']}</div></td>")
+    hit_year = next((r["year"] for r in scen["rows"] if target and r["monthly_div_cad"] >= target), None)
+    hit_txt = (f"이 시나리오는 <strong>{hit_year}년차</strong>에 월 {_fmt_cad(target)} 목표(연말 기준)를 넘습니다(★)."
+               if hit_year else f"{years}년 안에는 월 {_fmt_cad(target)} 목표에 닿지 않습니다.")
+    legend = "".join(
+        f"<span style='white-space:nowrap;'><span style='color:{color[t]};'>■</span>"
+        f"<span style='color:{_lighten(color[t])};'>■</span> {_esc(t)}</span> &nbsp;" for t in shown)
+    if rest:
+        legend += "<span style='color:#757575;'>■</span><span style='color:#cfcfcf;'>■</span> 기타 "
+    # 가정: 월 추가 매수액, 재투자 여부
+    rows = rows or []
+    monthly = sum(a["monthly_cad"] for a in rows)
+    lump = sum(a["lump_cad"] for a in rows)
+    drips = {bool(a["drip"]) for a in (assumptions or {}).values()} or {bool(cfg.get("drip", True))}
+    drip_txt = "배당 재투자 O" if drips == {True} else ("배당 재투자 X" if drips == {False} else "배당 재투자: 종목별 상이")
+    add_parts = []
+    if monthly:
+        add_parts.append(f"월 {_fmt_cad(monthly)}씩 추가 매수")
+    if lump:
+        add_parts.append(f"매년 {_fmt_cad(lump)} 일시금")
+    first = sum(a["add_cad"] for a in rows) + sum(a["add_shares"] for a in rows)
+    if first:
+        add_parts.append("처음 한 번 추가 매수")
+    assume_txt = " + ".join(add_parts or ["추가 매수 없음"]) + f" · {drip_txt}"
+    return (
+        f"<div style='margin:6px 0 2px;font-size:12px;'><strong>연차별 월 배당 (세후, CAD)</strong> "
+        f"<span style='color:#555;'>· 가정: <strong>{assume_txt}</strong></span></div>"
+        f"<table style='border:0;width:100%;table-layout:fixed;'><tr style='height:{H + 40}px;'>{cols}</tr></table>"
+        "<div class='muted' style='text-align:left;'>"
+        f"{legend}<br>진한 색 = 현재 보유분(추가 매수 없이), 연한 색 = 추가 매수로 늘어난 몫 · 같은 종목끼리 같은 색 계열. "
+        f"노란 배경 = 은퇴 목표 시점. 막대 위 숫자는 월 배당 합계이며 1,000 이상은 K(천) 단위입니다. {hit_txt}</div>")
+
+
 def _render_scenario(name, rows, years, base, scen, cfg, datas, assumptions, usd_cad):
     target = cfg["target_monthly_cad"]
     last_s0 = scen["rows"][-1]
@@ -1241,7 +1364,7 @@ def _render_scenario(name, rows, years, base, scen, cfg, datas, assumptions, usd
         f"{years}년 후: 추가 매수 없음 {_fmt_cad(last_b['monthly_div_cad'])} → 이 시나리오 <strong>{_fmt_cad(last_s['monthly_div_cad'])}</strong>"
         f" · 신규 투입 누계 {_fmt_cad(last_s['invested_cad'])}<br>"
         f"추가 매수 없음: {_target_text(mb, target, years)}<br>이 시나리오: {_target_text(ms, target, years)}</div>"
-        f"{table}{brk_tbl}<div class='muted'>{lines}{note}</div></div>")
+        f"{_render_chart(base, scen, cfg, years, rows, assumptions)}{table if SHOW_YEARLY_TABLE else ''}{brk_tbl}<div class='muted'>{lines}{note}</div></div>")
 
 
 def _render_error(name, message):
@@ -1269,6 +1392,7 @@ def build_combined_simulation(open_sheet_fn, df_hold, usd_cad, fetch_fn=None, sh
 
 def _build(open_sheet_fn, df_hold, usd_cad, fetch_fn, sheet_name):
     LAST_DIV_GROWTH.clear()
+    LAST_RUN.update({"data": {}, "assume": {}, "pos": {}, "cfg": None, "usd_cad": usd_cad})
     sh = None
     cfg = dict(DEFAULTS)
     sheet_msg = ""
@@ -1313,6 +1437,8 @@ def _build(open_sheet_fn, df_hold, usd_cad, fetch_fn, sheet_name):
         base_results[t] = run_ticker(t, data, sh_n, [], a, years, usd_cad)
         base_assume[t], base_data[t] = a, data
         LAST_DIV_GROWTH[t] = {"g": a["div_growth"], "note": a["div_growth_note"]}
+        LAST_RUN["data"][t], LAST_RUN["assume"][t], LAST_RUN["pos"][t] = data, a, sh_n
+        LAST_RUN["cfg"] = cfg
     if not base_results:
         return _note("배당 데이터를 가져온 보유 종목이 없어 기준선을 만들 수 없습니다.") + sheet_msg, []
     base_agg = aggregate(base_results, years)
@@ -2189,7 +2315,7 @@ def _norm(t):
 HORIZON_YEARS = 10   # 증가율이 있을 때 오늘 기준으로 몇 해 앞까지 추정 막대를 그릴지
 
 
-def yearly(good, usd_cad, today, held=None, growth=None):
+def yearly(good, usd_cad, today, held=None, growth=None, proj=None, monthly_cad=0.0):
     """연도별 막대용 데이터. 반환: [{year, actual, est, kind}] (kind: 'actual' | 'partial' | 'forecast').
     - 지난 해: 실제 합계.
     - 올해: 지금까지 실제 + 남은 기간 추정 (작년 같은 기간에 받은 금액, 아직 보유 중인 종목만).
@@ -2218,11 +2344,18 @@ def yearly(good, usd_cad, today, held=None, growth=None):
             rest = sum(it["cad"] * grow(it) for it in items
                        if ok(it) and one_year_ago < it["date"] <= pd.Timestamp(year=today.year - 1, month=12, day=31))
             out.append({"year": y, "actual": a, "est": rest, "kind": "partial", "grown": bool(gmap)})
-    horizon = HORIZON_YEARS if gmap else 1       # 증가율이 없으면 먼 미래는 평평한 선이라 의미가 없어 내년만
+    horizon = HORIZON_YEARS if (gmap or proj) else 1   # 증가율·시뮬레이션이 없으면 먼 미래는 평평한 선이라 의미가 없어 내년만
     ttm_items = [it for it in items if ok(it) and one_year_ago < it["date"] <= today]
     for n in range(1, horizon + 1):
-        est = sum(it["cad"] * grow(it) ** n for it in ttm_items)
-        out.append({"year": today.year + n, "actual": 0.0, "est": est, "kind": "forecast", "grown": bool(gmap), "n": n})
+        y = today.year + n
+        if proj and y in proj:
+            # 시뮬레이터와 같은 계산: 월 추가 매수 + 배당 재투자(DRIP) 반영. base = 추가 매수 없이(재투자·증가율만)
+            base_v, add_v = proj[y]["base"], proj[y]["with_add"]
+            out.append({"year": y, "actual": 0.0, "est": add_v, "est_base": base_v, "kind": "forecast",
+                        "grown": True, "n": n, "sim": True, "monthly": float(monthly_cad or 0.0)})
+        else:
+            est = sum(it["cad"] * grow(it) ** n for it in ttm_items)
+            out.append({"year": y, "actual": 0.0, "est": est, "kind": "forecast", "grown": bool(gmap), "n": n})
     return out
 
 
@@ -2235,7 +2368,7 @@ def yearly_facts(yr):
             f.append(f"받은 배당 기록: {r['year']}년 지금까지 {_cad(r['actual'])}, 남은 기간 추정 +{_cad(r['est'])} "
                      f"(작년 같은 기간 실제 금액 기준 추정, {'배당 증가율 적용' if r.get('grown') else '성장 미반영'}) → 연말 추정 {_cad(r['actual'] + r['est'])}")
         elif r.get("n", 1) == 1:
-            f.append(f"{r['year']}년 배당 추정 {_cad(r['est'])} (최근 12개월 실제 합계, {'배당 증가율 적용' if r.get('grown') else '성장 미반영'})")
+            f.append(f"{r['year']}년 배당 추정 {_cad(r['est'])} (최근 12개월 실제 합계, {('월 ' + _cad(r.get('monthly', 0)) + ' 추가 매수·배당 재투자·증가율 적용(시뮬레이터 계산)') if r.get('sim') else ('배당 증가율 적용' if r.get('grown') else '성장 미반영')})")
     return f
 
 
@@ -2329,8 +2462,14 @@ def render_yearly_chart(yr, target, shares=None):
             label = f"{_cad(total)}<br><span style='color:#777;font-weight:400;'>연말 추정</span>"
         else:
             label = _cad(total)
-        est = (f"<div style='height:{max(he, 2):.0f}px;background:#e3f2fd;border:1px dashed #1976d2;border-bottom:0;'></div>"
-               if r["est"] > 0 else "")
+        if r.get("sim") and r["est"] > 0:
+            hb = min(r.get("est_base", 0.0), r["est"]) / mx * H
+            hadd = max(he - hb, 0.0)
+            est = ((f"<div style='height:{max(hadd, 1):.0f}px;background:#c8e6c9;border:1px dashed #2e7d32;border-bottom:0;'></div>" if hadd > 0.5 else "")
+                   + f"<div style='height:{max(hb, 2):.0f}px;background:#e3f2fd;border:1px dashed #1976d2;border-bottom:0;'></div>")
+        else:
+            est = (f"<div style='height:{max(he, 2):.0f}px;background:#e3f2fd;border:1px dashed #1976d2;border-bottom:0;'></div>"
+                   if r["est"] > 0 else "")
         act = (f"<div style='height:{max(ha, 2):.0f}px;background:#1976d2;'></div>" if r["actual"] > 0 else "")
         if compact:
             yname = f"'{str(r['year'])[2:]}" + ("*" if r["kind"] != "actual" else "")
@@ -2364,13 +2503,27 @@ def render_yearly_chart(yr, target, shares=None):
                 f"{last['year']}년 추정 {last['est'] / (target * 12) * 100:.1f}%</p>")
     legend = ("<div class='muted' style='text-align:left;'>막대 위 숫자는 CAD, 1,000 이상은 K(천) 단위입니다. "
               "연도 옆 * 는 추정이 포함된 해입니다.</div>" if compact else "")
-    return ("<h3>연도별 받은 배당 (CAD 환산, 추정 포함)</h3>"
+    sim_rows = [r for r in yr if r.get("sim")]
+    sim_head = ""
+    if sim_rows:
+        mc = sim_rows[0].get("monthly", 0.0)
+        sim_head = ("<div style='margin:2px 0 4px;font-size:12px;text-align:left;'>"
+                    + (f"추정 가정: <strong>월 {_cad(mc)}씩 추가 매수</strong> + <strong>배당 재투자(DRIP)</strong>"
+                       if mc else "추정 가정: 추가 매수 없음 + <strong>배당 재투자(DRIP)</strong>")
+                    + " · 20년 배당 시뮬레이터와 같은 계산</div>")
+    return ("<h3>연도별 받은 배당 (CAD 환산, 추정 포함)</h3>" + sim_head +
             f"<table style='border:0;width:100%;table-layout:fixed;'><tr style='height:{H + 50}px;'>{cols}</tr></table>" + legend +
-            "<div class='muted' style='text-align:left;'>진한 파랑 = 실제로 받은 금액, 연한 파랑(점선) = 추정. "
-            + ("추정은 올해는 '작년 같은 기간에 받은 금액', 내년 이후는 '최근 12개월 실제 합계'에 아래 연 배당 증가율을 해마다 복리로 곱한 값이며 "
-               if any(r.get("grown") for r in yr) else
-               "추정은 올해는 '작년 같은 기간에 받은 금액', 내년은 '최근 12개월 실제 합계'이며 ")
-            + "아직 보유 중인 종목만 포함하고 DRIP으로 늘어난 주식 수는 반영하지 않은 값입니다.</div>"
+            "<div class='muted' style='text-align:left;'>진한 파랑 = 실제로 받은 금액, 연한 파랑(점선) = 추정"
+            + (", 연한 초록(점선) = 월 추가 매수로 늘어난 몫(추정). " if sim_rows else ". ")
+            + ("올해는 '작년 같은 기간에 받은 금액', 내년 이후는 20년 배당 시뮬레이터와 같은 계산(현재 보유 + 배당 재투자 + 연 배당 증가율 + 월 추가 매수)입니다. "
+               "시뮬레이터는 배당을 매달 1/12씩 받는 단순화와 yfinance의 최근 12개월 주당 배당을 쓰므로 실제 지급 시기·금액과 다를 수 있습니다."
+               if sim_rows else
+               ("추정은 올해는 '작년 같은 기간에 받은 금액', 내년 이후는 '최근 12개월 실제 합계'에 아래 연 배당 증가율을 해마다 복리로 곱한 값이며 "
+                "아직 보유 중인 종목만 포함하고 DRIP으로 늘어난 주식 수는 반영하지 않은 값입니다."
+                if any(r.get("grown") for r in yr) else
+                "추정은 올해는 '작년 같은 기간에 받은 금액', 내년은 '최근 12개월 실제 합계'이며 아직 보유 중인 종목만 포함하고 "
+                "배당 인상·DRIP으로 늘어난 주식은 반영하지 않은 보수적 값입니다."))
+            + "</div>"
             "<div style='overflow-x:auto;'><table class='compact'><tr><th>연도</th><th>실제</th><th>추정(추가)</th><th>합계</th><th>전년 대비</th><th>구분</th>"
             + "".join(f"<th>{_esc(tk)} 직접 매수(주)</th><th>{_esc(tk)} DRIP(주)</th><th>{_esc(tk)} 합계(주)</th>" for tk in (shares or {}))
             + "</tr>" + rows + "</table></div>"
@@ -2394,7 +2547,7 @@ def _warn_html(warns, future):
 # =========================
 
 def build_dividend_report(good, warns, future, usd_cad, target, today, held=None, share_events=None, shares_now=None,
-                          income_tickers=None, growth=None):
+                          income_tickers=None, growth=None, proj=None, monthly_cad=0.0):
     """반환: (html, facts). 예외를 던지지 않는다.
     held: 지금 보유 중인 티커들(추정에 사용). income_tickers: 이 종목들만 집계(없으면 개인 종목만 제외).
     share_events: 주수 변화 이벤트(shares_log 형식). shares_now: {티커: 현재 보유 주수} (검증용)."""
@@ -2410,7 +2563,7 @@ def build_dividend_report(good, warns, future, usd_cad, target, today, held=None
             note_txt = ("※ ETF 배당만 집계했습니다. 개인 종목 배당(" + _esc(", ".join(skipped)) + ")은 제외했습니다.") if skipped else ""
         sm = summarize(good, usd_cad, today)
         gmap = {_norm(k): v for k, v in (growth or {}).items() if v and v.get("g") is not None}
-        yr = yearly(good, usd_cad, today, held, {k: v["g"] for k, v in gmap.items()} or None)
+        yr = yearly(good, usd_cad, today, held, {k: v["g"] for k, v in gmap.items()} or None, proj=proj, monthly_cad=monthly_cad)
         shares, sh_warn, sh_facts = {}, [], []
         if share_events:
             import shares_log as _sl
@@ -6121,9 +6274,15 @@ def main():
 
     try:
         try:
-            _target = read_sim_settings(_open_sheet())["target_monthly_cad"]
+            _cfg_sim = read_sim_settings(_open_sheet())
+            _target = _cfg_sim["target_monthly_cad"]
+            _div_monthly = _cfg_sim["div_chart_monthly_cad"]
         except Exception:
-            _target = 2000.0
+            _target, _div_monthly = 2000.0, 200.0
+        _today_n = pd.Timestamp.now().normalize()
+        # 미래 추정: 20년 시뮬레이터와 같은 계산(월 추가 매수 + 배당 재투자 + 증가율). 계산 못 하면 증가율만 적용한 방식으로 대체
+        _proj = (_combined_sim.project_calendar(inc_cfg["income_tickers"], _div_monthly, _today_n)
+                 if os.environ.get("DIV_GROWTH_IN_ESTIMATE", "1") == "1" else {})
         extras["dividends_html"], div_facts = build_dividend_report(
             div_good, div_warn, div_future, usd_cad, _target, pd.Timestamp.now().normalize(),
             held={str(r["Ticker"]) for _, r in df_enriched.iterrows()
@@ -6131,6 +6290,7 @@ def main():
             share_events=share_events,
             income_tickers=inc_cfg["income_tickers"],
             growth=(dict(_combined_sim.LAST_DIV_GROWTH) if os.environ.get("DIV_GROWTH_IN_ESTIMATE", "1") == "1" else None),
+            proj=_proj or None, monthly_cad=_div_monthly,
             shares_now={str(r["Ticker"]).upper(): float(pd.to_numeric(r.get("Shares"), errors="coerce") or 0)
                         for _, r in df_enriched.iterrows() if str(r.get("Type", "TFSA")).upper() == "TFSA"})
         pnl_facts = list(pnl_facts) + div_facts
