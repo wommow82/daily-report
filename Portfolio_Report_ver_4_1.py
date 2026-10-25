@@ -1238,6 +1238,8 @@ def _scenario_title(rows, datas, usd_cad):
 
 
 def _short_cad(v):
+    if v >= 10000:
+        return f"{v / 1000:.0f}K"
     return f"{v / 1000:.1f}K" if v >= 1000 else f"{v:.0f}"
 
 
@@ -1285,7 +1287,9 @@ def _render_chart(base, scen, cfg, years, rows=None, assumptions=None):
         bg = " background:#fffde7;" if sr["year"] == cfg["retire_years"] else ""
         cols += (
             f"<td valign='bottom' align='center' style='padding:0 1px;vertical-align:bottom;border:0;{bg}'>"
-            f"<div style='font-size:8px;font-weight:700;margin-bottom:2px;'>{star}{_short_cad(total)}</div>"
+            f"<div style='font-size:8px;font-weight:700;margin-bottom:2px;line-height:10px;white-space:nowrap;'>{star}"
+            f"<br><span style='color:#1565c0;'>월{_short_cad(total)}</span>"
+            f"<br><span style='font-weight:400;color:#777;font-size:7px;'>연{_short_cad(sr.get('annual_div_cad', total * 12))}</span></div>"
             f"{stack or ''}"
             f"<div style='font-size:8px;margin-top:3px;border-top:1px solid #999;padding-top:2px;'>{sr['year']}</div></td>")
     hit_year = next((r["year"] for r in scen["rows"] if target and r["monthly_div_cad"] >= target), None)
@@ -1317,7 +1321,7 @@ def _render_chart(base, scen, cfg, years, rows=None, assumptions=None):
         f"<table style='border:0;width:100%;table-layout:fixed;'><tr style='height:{H + 40}px;'>{cols}</tr></table>"
         "<div class='muted' style='text-align:left;'>"
         f"{legend}<br>진한 색 = 현재 보유분(추가 매수 없이), 연한 색 = 추가 매수로 늘어난 몫 · 같은 종목끼리 같은 색 계열. "
-        f"노란 배경 = 은퇴 목표 시점. 막대 위 숫자는 월 배당 합계이며 1,000 이상은 K(천) 단위입니다. {hit_txt}</div>")
+        f"노란 배경 = 은퇴 목표 시점. 막대 위: 파란 글씨 = 그 해 말의 월 배당 합계, 회색 = 그 해 받는 연 배당(세후). 1,000 이상은 K(천) 단위입니다. {hit_txt}</div>")
 
 
 def _render_scenario(name, rows, years, base, scen, cfg, datas, assumptions, usd_cad):
