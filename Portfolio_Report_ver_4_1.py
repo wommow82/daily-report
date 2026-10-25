@@ -3,7 +3,7 @@
 # Portfolio_Report ver 4.1  (단일 파일 버전)
 #   - 이 파일 하나만 저장소에 올리면 됩니다 (+ 워크플로 yml, requirements_ver4.txt).
 #   - 아래 EMBEDDED_* 블록은 별도 모듈 파일(simulation_module.py, ledger.py, combined_sim.py,
-#     pnl_overview.py, history_log.py, shares_log.py, dividends_log.py, ai_briefing.py)의 내용을 그대로 담은 것입니다.
+#     pnl_overview.py, history_log.py, shares_log.py, dividends_log.py, technicals.py, ai_briefing.py)의 내용을 그대로 담은 것입니다.
 # =====================================================================
 import sys as _sys
 import types as _types
@@ -2406,6 +2406,220 @@ def build_dividend_report(good, warns, future, usd_cad, target, today, held=None
 '''
 _register_embedded('dividends_log', EMBEDDED_DIVIDENDS_LOG)
 
+# ---------- EMBEDDED_TECHNICALS ----------
+EMBEDDED_TECHNICALS = r'''# -*- coding: utf-8 -*-
+"""
+technicals.py - 종목별 차트 기술지표 요약 (계산은 전부 코드, AI 호출 없음)
+
+보여주는 것: 현재가, 50일/200일 이동평균, RSI(14), 52주 고점 대비, 3개월 수익률
+기준(출처)
+  - RSI: 14일 기준, 70 초과 '과열권', 30 미만 '침체권'
+    https://www.webull.com/learn/courseware/9fAaC0/Relative-Strength-Index-RSI
+  - 50일선이 200일선 위로 올라선 것을 골든크로스(상승 전환 신호), 아래로 내려선 것을 데드크로스(하락 전환 신호)라 부름
+    https://www.forex.com/en-us/news-and-analysis/golden-cross-vs-death-cross-indicators/
+  - 현재가와 이동평균의 위/아래 비교, 52주 고점 대비, 수익률은 단순 사실 표시이며 앞날을 예측하지 않음
+"""
+import html as _html
+
+RSI_PERIOD = 14
+MIN_BARS = 60          # 이보다 적으면 계산하지 않음
+BARS_1M, BARS_3M, BARS_52W = 21, 63, 252
+
+
+def _esc(s):
+    return _html.escape(str(s), quote=True)
+
+
+def sma(values, n):
+    if len(values) < n:
+        return None
+    return sum(values[-n:]) / n
+
+
+def rsi_wilder(values, period=RSI_PERIOD):
+    """Wilder 평활 RSI. 데이터가 period+1개보다 적으면 None."""
+    if len(values) < period + 1:
+        return None
+    gains, losses = [], []
+    for a, b in zip(values[:-1], values[1:]):
+        d = b - a
+        gains.append(max(d, 0.0))
+        losses.append(max(-d, 0.0))
+    avg_g = sum(gains[:period]) / period
+    avg_l = sum(losses[:period]) / period
+    for g, l in zip(gains[period:], losses[period:]):
+        avg_g = (avg_g * (period - 1) + g) / period
+        avg_l = (avg_l * (period - 1) + l) / period
+    if avg_l == 0:
+        return 100.0 if avg_g > 0 else 50.0
+    rs = avg_g / avg_l
+    return 100.0 - 100.0 / (1.0 + rs)
+
+
+def compute(closes):
+    """종가 리스트(오래된 것 -> 최근)로 지표 계산. 부족하면 None."""
+    c = [float(x) for x in closes if x is not None and float(x) > 0]
+    if len(c) < MIN_BARS:
+        return None
+    last = c[-1]
+    win = c[-BARS_52W:]
+    hi, lo = max(win), min(win)
+    out = {
+        "last": last,
+        "sma50": sma(c, 50),
+        "sma200": sma(c, 200),
+        "rsi": rsi_wilder(c),
+        "hi52": hi,
+        "lo52": lo,
+        "from_hi": (last / hi - 1.0) * 100.0,
+        "ret3m": (last / c[-1 - BARS_3M] - 1.0) * 100.0 if len(c) > BARS_3M else None,
+        "ret1m": (last / c[-1 - BARS_1M] - 1.0) * 100.0 if len(c) > BARS_1M else None,
+        "bars": len(c),
+    }
+    return out
+
+
+def labels(m):
+    """지표 값을 (이름, 색 종류) 라벨로. 색 종류: good/bad/warn/info"""
+    out = []
+    if m.get("sma200") is not None:
+        out.append(("200일선 위", "good") if m["last"] >= m["sma200"] else ("200일선 아래", "bad"))
+    if m.get("sma50") is not None and m.get("sma200") is not None:
+        out.append(("50일선>200일선(골든크로스 상태)", "good") if m["sma50"] > m["sma200"]
+                   else ("50일선<200일선(데드크로스 상태)", "bad"))
+    elif m.get("sma50") is not None:
+        out.append(("50일선 위", "good") if m["last"] >= m["sma50"] else ("50일선 아래", "bad"))
+    r = m.get("rsi")
+    if r is not None:
+        if r > 70:
+            out.append(("RSI 과열권", "warn"))
+        elif r < 30:
+            out.append(("RSI 침체권", "info"))
+    return out
+
+
+NEAR_HIGH, FAR_FROM_HIGH = -5.0, -20.0   # 52주 고점 대비 구간(이 코드에서 정한 설명용 구간, 통상 기준 아님)
+
+
+def interpret(m):
+    """지표를 한두 문장으로 풀어쓴다. 현재 상태 설명만 하고 예측·매매 의견은 쓰지 않는다."""
+    last, s50, s200, rsi, fh = m["last"], m.get("sma50"), m.get("sma200"), m.get("rsi"), m.get("from_hi")
+    if s200 is not None and s50 is not None:
+        if last >= s200 and s50 > s200:
+            trend = "중장기 이동평균이 상승 배열입니다(현재가가 200일선 위, 50일선이 200일선 위)."
+        elif last < s200 and s50 < s200:
+            trend = "중장기 이동평균이 하락 배열입니다(현재가가 200일선 아래, 50일선이 200일선 아래)."
+        elif last >= s200:
+            trend = "현재가는 200일선 위지만 50일선이 200일선 아래라 추세 신호가 엇갈립니다."
+        else:
+            trend = "현재가는 200일선 아래지만 50일선이 200일선 위라 추세 신호가 엇갈립니다."
+    elif s50 is not None:
+        trend = "현재가가 50일선 위입니다." if last >= s50 else "현재가가 50일선 아래입니다."
+    else:
+        trend = "이동평균을 계산할 데이터가 부족합니다."
+    extra = []
+    if rsi is not None:
+        if rsi > 70:
+            extra.append(f"RSI {rsi:.0f}로 단기 과열권입니다.")
+        elif rsi < 30:
+            extra.append(f"RSI {rsi:.0f}로 단기 침체권입니다.")
+    if fh is not None:
+        if fh >= NEAR_HIGH:
+            extra.append("52주 고점 부근입니다.")
+        elif fh <= FAR_FROM_HIGH:
+            extra.append(f"52주 고점보다 {abs(fh):.0f}% 낮은 위치입니다.")
+    return " ".join([trend] + extra)
+
+
+_COLOR = {"good": "#2e7d32", "bad": "#c62828", "warn": "#e65100", "info": "#1976d2", "mixed": "#757575"}
+
+
+def verdict(m):
+    """추세 신호만으로 종합 판정: good(상승 배열) / bad(하락 배열) / mixed(엇갈림·데이터 부족).
+    RSI·52주 고점은 판정에 넣지 않고 해석 문장에만 적는다."""
+    last, s50, s200 = m["last"], m.get("sma50"), m.get("sma200")
+    if s50 is None or s200 is None:
+        return "mixed"
+    if last >= s200 and s50 > s200:
+        return "good"
+    if last < s200 and s50 < s200:
+        return "bad"
+    return "mixed"
+
+
+_VERDICT_LABEL = {"good": "긍정 신호", "bad": "부정 신호", "mixed": "신호 혼재"}
+
+
+def _num(v, fmt="{:,.2f}", dash="-"):
+    return dash if v is None else fmt.format(v)
+
+
+def fetch_closes(ticker, period="2y"):
+    import yfinance as yf
+    h = yf.Ticker(ticker).history(period=period)["Close"].dropna()
+    return [float(x) for x in h.tolist()]
+
+
+def build_technicals_report(tickers, fetch_fn=None):
+    """반환: (html, facts). 예외를 던지지 않는다. facts는 다른 곳에서 쓸 수 있는 문장 목록."""
+    try:
+        fetch_fn = fetch_fn or fetch_closes
+        tickers = [t for t in dict.fromkeys(str(x).strip() for x in tickers) if t]
+        if not tickers:
+            return "<p class='muted'>분석할 성장/모멘텀 종목이 없습니다.</p>", []
+        rows, problems, facts = "", [], []
+        for t in tickers:
+            try:
+                m = compute(fetch_fn(t))
+            except Exception as e:
+                problems.append(f"{t}: {e}")
+                continue
+            if m is None:
+                problems.append(f"{t}: 가격 데이터가 부족합니다(최소 {MIN_BARS}일)")
+                continue
+            chips = "".join(
+                f"<span style='background:{_COLOR[k]};color:#fff;border-radius:10px;padding:1px 7px;"
+                f"font-size:10px;margin:1px 2px 1px 0;display:inline-block;'>{_esc(n)}</span>"
+                for n, k in labels(m))
+            rsi = m["rsi"]
+            rsi_col = _COLOR["warn"] if (rsi is not None and (rsi > 70)) else (
+                _COLOR["info"] if (rsi is not None and rsi < 30) else "inherit")
+            fh = m["from_hi"]
+            rows += (
+                f"<tr><td style='padding:4px 6px;text-align:left;'><strong>{_esc(t)}</strong></td>"
+                f"<td style='padding:4px 6px;text-align:right;'>{_num(m['last'])}</td>"
+                f"<td style='padding:4px 6px;text-align:right;'>{_num(m['sma50'])}</td>"
+                f"<td style='padding:4px 6px;text-align:right;'>{_num(m['sma200'])}</td>"
+                f"<td style='padding:4px 6px;text-align:right;color:{rsi_col};'>{_num(rsi, '{:.0f}')}</td>"
+                f"<td style='padding:4px 6px;text-align:right;'>{_num(fh, '{:+.1f}%')}</td>"
+                f"<td style='padding:4px 6px;text-align:right;'>{_num(m['ret3m'], '{:+.1f}%')}</td>"
+                f"<td style='padding:4px 6px;text-align:left;'>{chips}</td></tr>"
+                f"<tr><td colspan='8' style='padding:0 6px 6px;text-align:left;font-size:12px;"
+                f"color:{_COLOR[verdict(m)]};font-weight:600;border-bottom:1px solid #eee;'>"
+                f"→ [{_VERDICT_LABEL[verdict(m)]}] {_esc(interpret(m))}</td></tr>")
+            facts.append(f"{t}: 현재가 {m['last']:.2f}, RSI {_num(rsi, '{:.0f}')}, 52주 고점 대비 {fh:+.1f}%")
+        if not rows:
+            return ("<p class='muted'>기술지표를 계산하지 못했습니다: " + _esc("; ".join(problems[:6])) + "</p>"), []
+        head = ("<tr style='border-bottom:1px solid #ddd;color:#666;'>"
+                "<th style='padding:4px 6px;text-align:left;'>종목</th><th style='text-align:right;'>현재가</th>"
+                "<th style='text-align:right;'>50일선</th><th style='text-align:right;'>200일선</th>"
+                "<th style='text-align:right;'>RSI(14)</th><th style='text-align:right;'>52주 고점 대비</th>"
+                "<th style='text-align:right;'>3개월</th><th style='text-align:left;'>상태</th></tr>")
+        note = ("<p class='muted' style='text-align:left;'>※ 기준: RSI 70 초과 과열권·30 미만 침체권(14일), "
+                "50일선이 200일선 위=골든크로스 상태·아래=데드크로스 상태. 현재 상태를 요약한 것이며 앞날을 예측하지 않습니다. "
+                "'→' 해석 줄은 코드가 지표 값으로 만든 현재 상태 설명이며, 이동평균 배열만으로 녹색(긍정)·빨강(부정)·회색(혼재)을 정합니다(RSI·52주 고점은 색에 반영하지 않음)(52주 고점 -5% 이내=부근, -20% 이하=크게 낮음은 이 코드에서 정한 구간). "
+                "지표는 종가 기준이고 데이터가 부족한 항목은 '-'입니다. "
+                "<a href='https://www.webull.com/learn/courseware/9fAaC0/Relative-Strength-Index-RSI' style='color:#1976d2;'>RSI 출처</a> · "
+                "<a href='https://www.forex.com/en-us/news-and-analysis/golden-cross-vs-death-cross-indicators/' style='color:#1976d2;'>이동평균 출처</a></p>")
+        prob = (f"<p class='muted' style='text-align:left;'>계산하지 못한 종목: {_esc('; '.join(problems[:6]))}</p>"
+                if problems else "")
+        return ("<div style='overflow-x:auto;'><table style='width:100%;border-collapse:collapse;font-size:12px;'>"
+                + head + rows + "</table></div>" + note + prob), facts
+    except Exception as e:
+        return f"<p class='muted'>기술지표 요약 실패: {_esc(e)}</p>", []
+'''
+_register_embedded('technicals', EMBEDDED_TECHNICALS)
+
 # ---------- EMBEDDED_AI_BRIEFING ----------
 EMBEDDED_AI_BRIEFING = r'''# -*- coding: utf-8 -*-
 """
@@ -3053,6 +3267,7 @@ from dividends_log import (load_dividends, parse_all, cash_deltas, build_dividen
 from shares_log import load_share_events, parse_events, events_from_trades, merge_events                    # Shares 탭 (연말 보유 주수: 직접 매수 vs DRIP, 표시 전용)
 from combined_sim import read_sim_settings
 from history_log import run_history                                       # History 탭 (하루 한 줄 기록, 쓰는 곳은 여기뿐)
+from technicals import build_technicals_report                            # 성장/모멘텀 종목 기술지표 요약(이동평균·RSI, AI 호출 없음)
 from ai_briefing import build_ai_briefing                                 # 거시경제 + 뉴스 AI 브리핑(한국어)
 
 
@@ -5618,6 +5833,7 @@ def build_html_report(df_enriched, account_summary, extras=None):
     dividends_html = extras.get("dividends_html") or _none
     simulation_html = extras.get("simulation_html") or _none
     ledger_html = extras.get("ledger_html") or _none
+    tech_html = extras.get("tech_html") or _none
 
     # ---------- 7) HTML 템플릿 (Ver 3.0 개선) ----------
     style = """
@@ -5691,6 +5907,15 @@ def build_html_report(df_enriched, account_summary, extras=None):
               <span class="tag tag-new">Claude</span>
             </div>
             {ai_html}
+          </div>
+
+          <!-- ④-1 차트 기술지표 (성장/모멘텀 종목, 코드 계산) -->
+          <div class="card">
+            <div class="card-header">
+              <h2>📈 차트 기술지표 (성장/모멘텀 종목)</h2>
+              <span class="tag">이동평균·RSI</span>
+            </div>
+            {tech_html}
           </div>
 
           <!-- ⑤ 배당 인컴 목표 (합산 마일스톤) - 메인 섹션 -->
@@ -5891,6 +6116,24 @@ def main():
         )
     except Exception as e:
         extras["ledger_html"] = f"<p class='muted'>거래 내역 표시 실패: {_html_escape(e)}</p>"
+
+    # 성장/모멘텀 종목 = TFSA 보유 종목 중 배당 ETF(IncomeTickers) 제외 (RESP 제외)
+    try:
+        _inc0 = {str(t).upper() for t in (inc_cfg.get("income_tickers") or [])}
+        _d0 = df_enriched[(pd.to_numeric(df_enriched["Shares"], errors="coerce").fillna(0) > 0)
+                          & (df_enriched["Type"].astype(str).str.upper() == "TFSA")]
+        growth_tickers = [t for t in _d0.sort_values("PositionValueBase", ascending=False)["Ticker"]
+                          .astype(str).drop_duplicates().tolist() if t.upper() not in _inc0]
+    except Exception:
+        growth_tickers = []
+
+    if os.environ.get("ENABLE_TECHNICALS", "1") == "1":
+        try:
+            extras["tech_html"], _tech_facts = build_technicals_report(growth_tickers)
+        except Exception as e:
+            extras["tech_html"] = f"<p class='muted'>기술지표 요약 실패: {_html_escape(e)}</p>"
+    else:
+        extras["tech_html"] = "<p class='muted'>ENABLE_TECHNICALS=0 이라 기술지표를 건너뛰었습니다.</p>"
 
     if os.environ.get("ENABLE_AI_BRIEFING", "1") == "1":
         try:
