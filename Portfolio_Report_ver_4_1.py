@@ -937,7 +937,7 @@ DEFAULTS = {
     "drip": True, "price_growth": 0.0, "wht_usd": 0.15, "accounts": ("TFSA",),
     "div_chart_monthly_cad": 200.0,   # '받은 배당' 연도별 막대의 미래 추정에 쓰는 월 추가 매수액(CAD). 0이면 추가 매수 없이 증가율만 적용
 }
-NEW_COLUMNS = {"addshares", "addcad", "scenario"}
+NEW_COLUMNS = {"addshares", "addcad", "scenario", "link"}
 
 
 # =========================
@@ -1012,7 +1012,7 @@ def parse_addition(rec, cfg):
     drip_raw = str(rec.get("drip", "")).strip()
     add = {
         "row": rec.get("_row"),
-        "scenario": str(rec.get("scenario", "")).strip(),
+        "scenario": str(rec.get("scenario") or rec.get("link") or "").strip(),   # Link = Scenario의 다른 이름(같은 이름이면 한 묶음)
         "ticker": ticker,
         "add_shares": max(_num(rec.get("addshares"), 0.0), 0.0),
         "add_cad": max(_num(rec.get("addcad"), 0.0), 0.0),
@@ -1381,7 +1381,7 @@ def _render_error(name, message):
 # 리포트에서 부르는 함수
 # =========================
 
-def build_combined_simulation(open_sheet_fn, df_hold, usd_cad, fetch_fn=None, sheet_name="Simulation"):
+def build_combined_simulation(open_sheet_fn, df_hold, usd_cad, fetch_fn=None, sheet_name="Simulation", income_tickers=None):
     """
     반환: (html, facts)
       html  : 리포트 카드 안에 넣을 HTML (예외를 던지지 않음)
@@ -1389,12 +1389,17 @@ def build_combined_simulation(open_sheet_fn, df_hold, usd_cad, fetch_fn=None, sh
     df_hold: Trades가 반영된 현재 보유 DataFrame
     """
     try:
-        return _build(open_sheet_fn, df_hold, usd_cad, fetch_fn or fetch_ticker_inputs, sheet_name)
+        return _build(open_sheet_fn, df_hold, usd_cad, fetch_fn or fetch_ticker_inputs, sheet_name, income_tickers)
     except Exception as e:  # 마지막 안전망
         return _note(f"시뮬레이터 생성 중 오류가 났습니다: {_esc(e)}"), []
 
 
-def _build(open_sheet_fn, df_hold, usd_cad, fetch_fn, sheet_name):
+def _norm_t(t):
+    t = str(t).strip().upper()
+    return t[:-3] if t.endswith(".TO") else t
+
+
+def _build(open_sheet_fn, df_hold, usd_cad, fetch_fn, sheet_name, income_tickers=None):
     LAST_DIV_GROWTH.clear()
     LAST_RUN.update({"data": {}, "assume": {}, "pos": {}, "cfg": None, "usd_cad": usd_cad})
     sh = None
@@ -1426,9 +1431,17 @@ def _build(open_sheet_fn, df_hold, usd_cad, fetch_fn, sheet_name):
                 errors[t] = str(e)
         return cache.get(t)
 
+    allowed = {_norm_t(t) for t in income_tickers} if income_tickers else None   # 개별주 제외: IncomeTickers만 계산
     pos = baseline_positions(df_hold, cfg["accounts"])
+    excl_held = []
+    if allowed is not None:
+        excl_held = sorted(t for t in pos if _norm_t(t) not in allowed)
+        pos = {t: v for t, v in pos.items() if _norm_t(t) in allowed}
     if not pos:
-        return _note("선택한 계좌에 보유 종목이 없어 기준선을 만들 수 없습니다.") + sheet_msg, []
+        msg = ("선택한 계좌에 보유 종목이 없어 기준선을 만들 수 없습니다." if allowed is None else
+               "IncomeTickers(" + ", ".join(sorted(allowed)) + ")에 해당하는 보유 종목이 없어 기준선을 만들 수 없습니다. "
+               "Settings의 IncomeTickers를 확인하세요.")
+        return _note(msg) + sheet_msg, []
 
     # --- 기준선 ---
     base_results, base_assume, base_data, excluded = {}, {}, {}, []
@@ -1473,6 +1486,16 @@ def _build(open_sheet_fn, df_hold, usd_cad, fetch_fn, sheet_name):
         skipped = max(0, len(groups) - MAX_SCENARIOS)
         for name, rows in groups[:MAX_SCENARIOS]:
             try:
+                drop_note = ""
+                if allowed is not None:
+                    dropped = sorted({r["ticker"] for r in rows if r["ticker"] and _norm_t(r["ticker"]) not in allowed})
+                    rows = [r for r in rows if not r["ticker"] or _norm_t(r["ticker"]) in allowed]
+                    if dropped:
+                        drop_note = _note(f"'{_esc(name)}': {_esc(', '.join(dropped))}은(는) Settings의 IncomeTickers에 없어 "
+                                          "시뮬레이션에서 제외했습니다(개별주 제외). 넣고 싶으면 IncomeTickers에 추가하세요.")
+                    if not rows:
+                        blocks.append(drop_note or _render_error(name, "계산할 줄이 없습니다"))
+                        continue
                 bad = [r for r in rows if r["errors"]]
                 if bad:
                     blocks.append(_render_error(name, "; ".join(
@@ -1499,7 +1522,7 @@ def _build(open_sheet_fn, df_hold, usd_cad, fetch_fn, sheet_name):
                     b_res[t] = run_ticker(t, cache[t], pos.get(t, 0.0), [], a, s_years, usd_cad)
                     s_res[t] = run_ticker(t, cache[t], pos.get(t, 0.0), by_t.get(t, []), a, s_years, usd_cad)
                 b_agg, s_agg = aggregate(b_res, s_years), aggregate(s_res, s_years)
-                blocks.append(_render_scenario(name, rows, s_years, b_agg, s_agg, cfg, datas, assumptions, usd_cad))
+                blocks.append(_render_scenario(name, rows, s_years, b_agg, s_agg, cfg, datas, assumptions, usd_cad) + drop_note)
                 rr = min(cfg["retire_years"], s_years) - 1
                 ms = first_month_reaching(s_agg["series"], target)
                 facts.append(
@@ -1514,8 +1537,9 @@ def _build(open_sheet_fn, df_hold, usd_cad, fetch_fn, sheet_name):
         if not groups and not sheet_msg:
             blocks.append(_note("Simulation 탭에 실행할 시나리오가 없습니다 (비었거나 Run이 모두 N)."))
 
+    excl_txt = (f" 개별주(IncomeTickers 밖: {_esc(', '.join(excl_held))})는 기준선에서 제외했습니다." if excl_held else "")
     intro = _note(
-        "Simulation 탭에서 <strong>Run=Y</strong>인 가정 매수만 계산합니다. 현재 보유(Holdings + Trades 반영) 위에 얹어 월 단위로 계산하고, "
+        "Simulation 탭에서 <strong>Run=Y</strong>인 가정 매수만 계산합니다. Scenario(또는 Link) 이름이 같은 줄은 한 묶음으로 합쳐 계산하고, 이름이 다르면 별도 시나리오입니다." + excl_txt + " 현재 보유(Holdings + Trades 반영) 위에 얹어 월 단위로 계산하고, "
         "표는 현재 보유와 가정 매수를 합친 종목별 월 배당입니다. 노란 줄은 은퇴 목표 시점입니다. "
         "종목끼리 서로 영향을 주지 않고, 각 종목 안에서만 재투자한다고 가정합니다.")
     tail = _note(
@@ -6276,7 +6300,8 @@ def main():
 
     # 시뮬레이터를 먼저 돌려, 거기서 쓴 배당 성장률을 '받은 배당' 추정에도 같은 값으로 쓴다
     try:
-        extras["simulation_html"], sim_facts = build_combined_simulation(_open_sheet, df_enriched, usd_cad)
+        extras["simulation_html"], sim_facts = build_combined_simulation(_open_sheet, df_enriched, usd_cad,
+                                                                          income_tickers=inc_cfg.get("income_tickers"))
     except Exception as e:
         extras["simulation_html"], sim_facts = f"<p class='muted'>시뮬레이터 실패: {_html_escape(e)}</p>", []
 
