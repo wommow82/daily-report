@@ -976,6 +976,16 @@ def read_sim_settings(sh):
     v = _num(kv.get("dividendchartmonthlycad"))
     if v is not None:
         cfg["div_chart_monthly_cad"] = min(max(v, 0.0), 100000.0)
+    # 종목별 성장률 직접 지정: Settings에 PriceGrowthPct_JEPQ / DivGrowthPct_JEPQ (기준선·받은 배당 예측에도 적용)
+    tg = {}
+    for k, val in kv.items():
+        for prefix, field, lo, hi in (("pricegrowthpct_", "pg", -50.0, 30.0), ("divgrowthpct_", "dg", -50.0, 50.0)):
+            if k.startswith(prefix):
+                n = _num(val)
+                if n is not None:
+                    tg.setdefault(_norm_t(k[len(prefix):]), {})[field] = min(max(n, lo), hi) / 100.0
+    if tg:
+        cfg["ticker_growth"] = tg
     accs = [a.strip().upper() for a in str(kv.get("simaccounts", "")).split(",") if a.strip()]
     accs = [a for a in accs if a in ("TFSA", "RESP")]
     if accs:
@@ -1012,7 +1022,7 @@ def parse_addition(rec, cfg):
     drip_raw = str(rec.get("drip", "")).strip()
     add = {
         "row": rec.get("_row"),
-        "scenario": str(rec.get("scenario") or rec.get("link") or "").strip(),   # Link = Scenario의 다른 이름(같은 이름이면 한 묶음)
+        "scenario": str(rec.get("link") or rec.get("scenario") or "").strip(),   # Link가 있으면 Link가 우선(같은 Link = 한 묶음), 없으면 Scenario 이름
         "ticker": ticker,
         "add_shares": max(_num(rec.get("addshares"), 0.0), 0.0),
         "add_cad": max(_num(rec.get("addcad"), 0.0), 0.0),
@@ -1073,12 +1083,18 @@ def _assume(add_rows, ticker, data, cfg):
     dg = pick("div_growth")
     wht = pick("wht")
     cur = currency_of(ticker)
+    tg = (cfg.get("ticker_growth") or {}).get(_norm_t(ticker), {})   # Settings의 종목별 값(시나리오 줄 값이 더 우선)
+    if pg is None:
+        pg = tg.get("pg")
+    dg_src = "시트에서 직접 지정"
+    if dg is None and tg.get("dg") is not None:
+        dg, dg_src = tg["dg"], "Settings의 DivGrowthPct_" + _norm_t(ticker)
     return {
         "drip": cfg["drip"] if drip is None else drip,
         "price_growth": cfg["price_growth"] if pg is None else pg,
         "div_growth": data["auto_div_growth"] if dg is None else dg,
         "wht": (cfg["wht_usd"] if cur == "USD" else 0.0) if wht is None else wht,
-        "div_growth_note": ("자동: " + data["growth_basis"]) if dg is None else "시트에서 직접 지정",
+        "div_growth_note": ("자동: " + data["growth_basis"]) if dg is None else dg_src,
     }
 
 
@@ -1539,7 +1555,7 @@ def _build(open_sheet_fn, df_hold, usd_cad, fetch_fn, sheet_name, income_tickers
 
     excl_txt = (f" 개별주(IncomeTickers 밖: {_esc(', '.join(excl_held))})는 기준선에서 제외했습니다." if excl_held else "")
     intro = _note(
-        "Simulation 탭에서 <strong>Run=Y</strong>인 가정 매수만 계산합니다. Scenario(또는 Link) 이름이 같은 줄은 한 묶음으로 합쳐 계산하고, 이름이 다르면 별도 시나리오입니다." + excl_txt + " 현재 보유(Holdings + Trades 반영) 위에 얹어 월 단위로 계산하고, "
+        "Simulation 탭에서 <strong>Run=Y</strong>인 가정 매수만 계산합니다. <strong>Link</strong>(Link가 비면 Scenario) 이름이 같은 줄은 한 묶음으로 합쳐 계산하고, 다르면 별도 시나리오입니다." + excl_txt + " 현재 보유(Holdings + Trades 반영) 위에 얹어 월 단위로 계산하고, "
         "표는 현재 보유와 가정 매수를 합친 종목별 월 배당입니다. 노란 줄은 은퇴 목표 시점입니다. "
         "종목끼리 서로 영향을 주지 않고, 각 종목 안에서만 재투자한다고 가정합니다.")
     tail = _note(
