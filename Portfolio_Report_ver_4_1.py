@@ -935,6 +935,7 @@ SHOW_BASELINE = False   # True면 리포트에 '현재 보유 기준' 표도 보
 DEFAULTS = {
     "target_monthly_cad": 2000.0, "retire_years": 10, "sim_years": 20,
     "drip": True, "price_growth": 0.0, "wht_usd": 0.15, "accounts": ("TFSA",),
+    "include_holdings": False,   # False(기본): 시나리오에 넣은 값만 계산. True: 현재 보유 위에 얹어 계산
     "div_chart_monthly_cad": 200.0,   # '받은 배당' 연도별 막대의 미래 추정에 쓰는 월 추가 매수액(CAD). 0이면 추가 매수 없이 증가율만 적용
 }
 NEW_COLUMNS = {"addshares", "addcad", "scenario", "link"}
@@ -986,6 +987,8 @@ def read_sim_settings(sh):
                     tg.setdefault(_norm_t(k[len(prefix):]), {})[field] = min(max(n, lo), hi) / 100.0
     if tg:
         cfg["ticker_growth"] = tg
+    if "simincludeholdings" in kv:
+        cfg["include_holdings"] = _flag(kv["simincludeholdings"], False)
     accs = [a.strip().upper() for a in str(kv.get("simaccounts", "")).split(",") if a.strip()]
     accs = [a for a in accs if a in ("TFSA", "RESP")]
     if accs:
@@ -1336,7 +1339,7 @@ def _render_chart(base, scen, cfg, years, rows=None, assumptions=None):
         f"<span style='color:#555;'>· 가정: <strong>{assume_txt}</strong></span></div>"
         f"<table style='border:0;width:100%;table-layout:fixed;'><tr style='height:{H + 40}px;'>{cols}</tr></table>"
         "<div class='muted' style='text-align:left;'>"
-        f"{legend}<br>진한 색 = 현재 보유분(추가 매수 없이), 연한 색 = 추가 매수로 늘어난 몫 · 같은 종목끼리 같은 색 계열. "
+        f"{legend}<br>" + ("진한 색 = 현재 보유분(추가 매수 없이), 연한 색 = 추가 매수로 늘어난 몫 · 같은 종목끼리 같은 색 계열. " if cfg.get("include_holdings") else "현재 보유는 제외하고 시나리오에 넣은 매수만 보여줍니다(종목별 색). ") +
         f"노란 배경 = 은퇴 목표 시점. 막대 위: 파란 글씨 = 그 해 말의 월 배당 합계, 회색 = 그 해 받는 연 배당(세후). 1,000 이상은 K(천) 단위입니다. {hit_txt}</div>")
 
 
@@ -1378,12 +1381,20 @@ def _render_scenario(name, rows, years, base, scen, cfg, datas, assumptions, usd
         "<div style='margin:12px 0;padding:10px 12px;border:1px solid #e0e0e0;border-radius:8px;text-align:left;'>"
         f"<div><strong>{_esc(name)}</strong></div>"
         f"<div style='margin:4px 0;'>{_scenario_title(rows, datas, usd_cad)}</div>"
+        + (
         f"<div style='margin:6px 0;'>{cfg['retire_years']}년 후 월 배당: 추가 매수 없음 {_fmt_cad(base['rows'][ry]['monthly_div_cad'])}"
         f" → 이 시나리오 <strong style='color:#2e7d32;'>{_fmt_cad(scen['rows'][ry]['monthly_div_cad'])}</strong>"
         f" (목표 대비 {scen['rows'][ry]['monthly_div_cad'] / target * 100:,.0f}%)<br>"
         f"{years}년 후: 추가 매수 없음 {_fmt_cad(last_b['monthly_div_cad'])} → 이 시나리오 <strong>{_fmt_cad(last_s['monthly_div_cad'])}</strong>"
         f" · 신규 투입 누계 {_fmt_cad(last_s['invested_cad'])}<br>"
         f"추가 매수 없음: {_target_text(mb, target, years)}<br>이 시나리오: {_target_text(ms, target, years)}</div>"
+        if cfg.get("include_holdings") else
+        f"<div style='margin:6px 0;'>(현재 보유는 제외하고 이 시나리오에 넣은 매수만 계산)<br>"
+        f"{cfg['retire_years']}년 후 월 배당 <strong style='color:#2e7d32;'>{_fmt_cad(scen['rows'][ry]['monthly_div_cad'])}</strong>"
+        f" (목표 대비 {scen['rows'][ry]['monthly_div_cad'] / target * 100:,.0f}%)<br>"
+        f"{years}년 후 <strong>{_fmt_cad(last_s['monthly_div_cad'])}</strong>"
+        f" · 신규 투입 누계 {_fmt_cad(last_s['invested_cad'])}<br>"
+        f"{_target_text(ms, target, years)}</div>") +
         f"{_render_chart(base, scen, cfg, years, rows, assumptions)}{table if SHOW_YEARLY_TABLE else ''}{brk_tbl}<div class='muted'>{lines}{note}</div></div>")
 
 
@@ -1518,7 +1529,8 @@ def _build(open_sheet_fn, df_hold, usd_cad, fetch_fn, sheet_name, income_tickers
                     continue
                 datas = {t: cache[t] for t in set(pos) | set(by_t) if t in cache}
                 assumptions, b_res, s_res = {}, {}, {}
-                for t in sorted(set(pos) | set(by_t)):
+                spos = pos if cfg["include_holdings"] else {}      # 현재 보유를 시나리오에 합칠지
+                for t in sorted(set(spos) | set(by_t)):
                     if t not in cache:
                         continue
                     a = _assume(by_t.get(t, []), t, cache[t], cfg)
@@ -1526,16 +1538,18 @@ def _build(open_sheet_fn, df_hold, usd_cad, fetch_fn, sheet_name, income_tickers
                     if a["div_growth_note"] == "시트에서 직접 지정" and \
                             LAST_DIV_GROWTH.get(t, {}).get("note", "").startswith("자동"):
                         LAST_DIV_GROWTH[t] = {"g": a["div_growth"], "note": f"Simulation 탭 시나리오 '{name}'의 DivGrowthPct"}
-                    b_res[t] = run_ticker(t, cache[t], pos.get(t, 0.0), [], a, s_years, usd_cad)
-                    s_res[t] = run_ticker(t, cache[t], pos.get(t, 0.0), by_t.get(t, []), a, s_years, usd_cad)
+                    b_res[t] = run_ticker(t, cache[t], spos.get(t, 0.0), [], a, s_years, usd_cad)
+                    s_res[t] = run_ticker(t, cache[t], spos.get(t, 0.0), by_t.get(t, []), a, s_years, usd_cad)
                 b_agg, s_agg = aggregate(b_res, s_years), aggregate(s_res, s_years)
                 blocks.append(_render_scenario(name, rows, s_years, b_agg, s_agg, cfg, datas, assumptions, usd_cad) + drop_note)
                 rr = min(cfg["retire_years"], s_years) - 1
                 ms = first_month_reaching(s_agg["series"], target)
                 facts.append(
                     f"시뮬레이션 시나리오 '{name}' ({_scenario_title(rows, datas, usd_cad)}): "
-                    f"{cfg['retire_years']}년 후 세후 월 배당 기준 {_fmt_cad(b_agg['rows'][rr]['monthly_div_cad'])} → "
-                    f"{_fmt_cad(s_agg['rows'][rr]['monthly_div_cad'])}, 월 {_fmt_cad(target)} 목표 "
+                    + (f"{cfg['retire_years']}년 후 세후 월 배당 기준 {_fmt_cad(b_agg['rows'][rr]['monthly_div_cad'])} → "
+                       f"{_fmt_cad(s_agg['rows'][rr]['monthly_div_cad'])}, " if cfg["include_holdings"] else
+                       f"현재 보유 제외, {cfg['retire_years']}년 후 세후 월 배당 {_fmt_cad(s_agg['rows'][rr]['monthly_div_cad'])}, ")
+                    + f"월 {_fmt_cad(target)} 목표 "
                     + (f"약 {_ym(ms)} 후 도달" if ms else f"{s_years}년 안에 도달하지 못함"))
             except Exception as e:
                 blocks.append(_render_error(name, e))
@@ -1546,8 +1560,9 @@ def _build(open_sheet_fn, df_hold, usd_cad, fetch_fn, sheet_name, income_tickers
 
     excl_txt = (f" 개별주(IncomeTickers 밖: {_esc(', '.join(excl_held))})는 기준선에서 제외했습니다." if excl_held else "")
     intro = _note(
-        "Simulation 탭에서 <strong>Run=Y</strong>인 가정 매수만 계산합니다. <strong>Link</strong>(Link가 비면 Scenario) 이름이 같은 줄은 한 묶음으로 합쳐 계산하고, 다르면 별도 시나리오입니다." + excl_txt + " 현재 보유(Holdings + Trades 반영) 위에 얹어 월 단위로 계산하고, "
-        "표는 현재 보유와 가정 매수를 합친 종목별 월 배당입니다. 노란 줄은 은퇴 목표 시점입니다. "
+        "Simulation 탭에서 <strong>Run=Y</strong>인 가정 매수만 계산합니다. <strong>Link</strong>(Link가 비면 Scenario) 이름이 같은 줄은 한 묶음으로 합쳐 계산하고, 다르면 별도 시나리오입니다." + excl_txt + (" 현재 보유(Holdings + Trades 반영) 위에 얹어 월 단위로 계산하고, 표는 현재 보유와 가정 매수를 합친 종목별 월 배당입니다. "
+         if cfg["include_holdings"] else " 현재 보유는 계산에서 빼고, 시나리오에 넣은 매수만 월 단위로 계산합니다(Settings SimIncludeHoldings=Y면 현재 보유 위에 얹음). ")
+        + "노란 줄은 은퇴 목표 시점입니다. "
         "종목끼리 서로 영향을 주지 않고, 각 종목 안에서만 재투자한다고 가정합니다.")
     tail = _note(
         "※ 예측이 아니라 가정에 따른 계산입니다. 환율 고정, 배당을 매달 1/12씩 받는 단순화, "
