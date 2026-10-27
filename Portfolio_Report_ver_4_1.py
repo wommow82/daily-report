@@ -1503,15 +1503,6 @@ def _build(open_sheet_fn, df_hold, usd_cad, fetch_fn, sheet_name, income_tickers
         for name, rows in groups[:MAX_SCENARIOS]:
             try:
                 drop_note = ""
-                if allowed is not None:
-                    dropped = sorted({r["ticker"] for r in rows if r["ticker"] and _norm_t(r["ticker"]) not in allowed})
-                    rows = [r for r in rows if not r["ticker"] or _norm_t(r["ticker"]) in allowed]
-                    if dropped:
-                        drop_note = _note(f"'{_esc(name)}': {_esc(', '.join(dropped))}은(는) Settings의 IncomeTickers에 없어 "
-                                          "시뮬레이션에서 제외했습니다(개별주 제외). 넣고 싶으면 IncomeTickers에 추가하세요.")
-                    if not rows:
-                        blocks.append(drop_note or _render_error(name, "계산할 줄이 없습니다"))
-                        continue
                 bad = [r for r in rows if r["errors"]]
                 if bad:
                     blocks.append(_render_error(name, "; ".join(
