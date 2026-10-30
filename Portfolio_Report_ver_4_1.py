@@ -710,6 +710,21 @@ def apply_trades(df_hold, trade_rows, today=None, usd_cad=None, asof=None):
 
     parsed.sort(key=lambda x: (x["date"], x["row"] or 0))
 
+    # 같은 종목의 표기 차이(XEQT ↔ XEQT.TO)를 보유 종목 기준으로 맞춘다 (같은 계좌에 이미 있는 쪽으로)
+    for t in parsed:
+        if t["side"] in ("DEPOSIT", "WITHDRAW") or not t.get("ticker"):
+            continue
+        tk, acc_ = t["ticker"], t["account"]
+        if (tk, acc_) in pos:
+            continue
+        alt = tk[:-3] if tk.endswith(".TO") else tk + ".TO"
+        if (alt, acc_) in pos:
+            info["warnings"].append(
+                f"Trades {t['row']}행: '{tk}'를 Holdings의 '{alt}'와 같은 종목으로 보고 합산했습니다.")
+            t["ticker"] = alt
+            if alt.endswith(".TO") and t.get("currency") == "USD":
+                t["currency"] = "CAD"           # 토론토 거래소(.TO) 종목은 캐나다 달러
+
     for t in parsed:
         acc = t["account"]
         if t["side"] in ("DEPOSIT", "WITHDRAW"):
