@@ -40,6 +40,7 @@ jobs:
           # 선택: AI 비용을 0으로 하려면 아래 줄의 주석을 풀기 / 모델을 바꾸려면 BRIEFING_MODEL
           # ENABLE_AI_BRIEFING: '0'
           # BRIEFING_MODEL: 'claude-haiku-5-5'
+          # 뉴스 섹션을 통째로 끄려면: ENABLE_MARKET_NEWS: '0'  /  큰 변동 기준(%) 바꾸려면: MOVER_PCT: '4'
         run: |
           python Market_Report_ver_1.py
 
