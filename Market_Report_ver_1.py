@@ -247,7 +247,9 @@ import re
 from datetime import datetime, timedelta
 
 MOVER_PCT = 3.0            # 이 % 이상 움직인 종목에 뉴스를 붙인다(환경변수 MOVER_PCT로 변경)
-MARKET_QUERY = "stock market OR Wall Street OR Nasdaq OR S&P 500 OR Federal Reserve OR Treasury yields"
+MARKET_QUERY = '"stock market" OR "Wall Street" OR Nasdaq OR "S&P 500" OR "Federal Reserve" OR "Treasury yields"'
+# 금융 매체로 먼저 좁혀 검색한다(NewsAPI domains 옵션). 결과가 없으면 제한 없이 다시 검색한다.
+MARKET_DOMAINS = "reuters.com,cnbc.com,bloomberg.com,wsj.com,marketwatch.com,finance.yahoo.com,ft.com,barrons.com,apnews.com"
 MAX_FETCH = 30             # AI에 보여줄 헤드라인 최대 개수
 MAX_PICK = 5
 GOOD, BAD, WARN, MUTED = "#2e7d32", "#c62828", "#e65100", "#757575"
@@ -269,7 +271,7 @@ NEWS_TOOL = {
                 "id": {"type": "string", "description": "고른 헤드라인의 ID(예: N3). 목록에 있는 것만."},
                 "title_ko": {"type": "string", "description": "헤드라인을 자연스러운 한국어로 번역(제목에 없는 내용 추가 금지, 고유명사는 원어 유지 가능)"},
                 "why": {"type": "string", "description": "이 뉴스가 시장·투자자에게 왜 중요한지 한국어 한 문장(제목에 있는 사실만, 추측·매매 지시 금지)"},
-                "tickers": {"type": "array", "items": {"type": "string"}, "description": "제목에 직접 나온 관련 티커(없으면 빈 배열)"},
+                "tickers": {"type": "array", "items": {"type": "string"}, "description": "제목이 다루는 기업·ETF의 미국 상장 티커 최대 3개(예: Nvidia→NVDA). 지수·금리 등 특정 종목이 아니면, 또는 불확실하면 빈 배열"},
             },
             "required": ["id", "title_ko", "why"]}}},
         "required": ["items"],
@@ -298,25 +300,30 @@ def _safe_url(u):
 # 헤드라인 수집
 # =========================
 
-def fetch_headlines(query, api_key=None, page_size=10, days=2, http_get=None, rss_fn=None):
+def fetch_headlines(query, api_key=None, page_size=10, days=2, http_get=None, rss_fn=None, domains=None):
     """[{title,url,source,published}, ...]. NewsAPI -> Google News RSS 순. 실패는 빈 목록."""
     out = []
     if api_key:
-        try:
-            if http_get is None:
-                import requests
-                http_get = requests.get
-            r = http_get("https://newsapi.org/v2/everything", params={
-                "q": query, "apiKey": api_key, "language": "en", "sortBy": "publishedAt",
-                "pageSize": page_size, "from": (datetime.today() - timedelta(days=days)).strftime("%Y-%m-%d")}, timeout=20)
-            if r.status_code == 200:
-                for a in r.json().get("articles", []):
-                    if a.get("title"):
-                        out.append({"title": a.get("title"), "url": a.get("url"),
-                                    "source": (a.get("source") or {}).get("name", ""),
-                                    "published": (a.get("publishedAt") or "")[:10]})
-        except Exception as e:
-            print(f"⚠️ NewsAPI 오류(B): {e}")
+        if http_get is None:
+            import requests
+            http_get = requests.get
+        for dom in ([domains, None] if domains else [None]):
+            try:
+                params = {"q": query, "apiKey": api_key, "language": "en", "sortBy": "publishedAt",
+                          "pageSize": page_size, "from": (datetime.today() - timedelta(days=days)).strftime("%Y-%m-%d")}
+                if dom:
+                    params["domains"] = dom
+                r = http_get("https://newsapi.org/v2/everything", params=params, timeout=20)
+                if r.status_code == 200:
+                    for a in r.json().get("articles", []):
+                        if a.get("title"):
+                            out.append({"title": a.get("title"), "url": a.get("url"),
+                                        "source": (a.get("source") or {}).get("name", ""),
+                                        "published": (a.get("publishedAt") or "")[:10]})
+            except Exception as e:
+                print(f"⚠️ NewsAPI 오류(B): {e}")
+            if out:
+                break
     if not out:
         try:
             if rss_fn is None:
@@ -390,18 +397,19 @@ def mover_news_html(day_changes, news_fn, threshold=None, limit_stocks=5, per_st
 # 2) 오늘의 시장 뉴스
 # =========================
 
-def build_user_message(headlines):
+def build_user_message(headlines, held=None):
     lines = [f"N{i + 1}. {a['title']} ({a.get('source', '')}, {a.get('published', '')})" for i, a in enumerate(headlines)]
-    return "헤드라인 목록:\n" + "\n".join(lines) + "\n\n3~5개를 골라 submit_market_news 도구로 제출하세요."
+    hh = f"\n(참고: 사용자가 보유한 종목 {', '.join(held)} — 제목이 이 종목들과 직접 관련되면 tickers에 포함)\n" if held else ""
+    return "헤드라인 목록:\n" + "\n".join(lines) + hh + "\n3~5개를 골라 submit_market_news 도구로 제출하세요."
 
 
-def select_market_news(headlines, call_fn):
+def select_market_news(headlines, call_fn, held=None):
     """call_fn(system, user, tool)->JSON 텍스트. 반환: [{'a':기사,'why':str,'tickers':[...]}]. 검증 통과분만."""
     import json
     hs = headlines[:MAX_FETCH]
     if not hs:
         return []
-    txt = call_fn(SYSTEM, build_user_message(hs), NEWS_TOOL)
+    txt = call_fn(SYSTEM, build_user_message(hs, held), NEWS_TOOL)
     try:
         data = json.loads(txt)
     except Exception:
@@ -418,7 +426,7 @@ def select_market_news(headlines, call_fn):
             continue
         used.add(idx)
         tks = [str(t).upper() for t in (it.get("tickers") or []) if re.fullmatch(r"[A-Za-z.\-]{1,8}", str(t))]
-        tks = [t for t in tks if t in hs[idx]["title"].upper()]      # 제목에 실제로 나온 티커만
+        tks = list(dict.fromkeys(tks))[:3]
         tko = str(it.get("title_ko", "")).strip()
         if _BANNED.search(tko):
             tko = ""
@@ -428,14 +436,14 @@ def select_market_news(headlines, call_fn):
     return out
 
 
-def market_news_html(headlines, call_fn=None):
+def market_news_html(headlines, call_fn=None, held=None):
     """AI 선별(가능하면) + 표. AI 실패·키 없음이면 상위 헤드라인 5개만."""
     if not headlines:
         return f"<p style='color:{MUTED};font-size:13px;'>시장 뉴스를 가져오지 못했습니다.</p>"
     picked, note = [], ""
     if call_fn is not None:
         try:
-            picked = select_market_news(headlines, call_fn)
+            picked = select_market_news(headlines, call_fn, held)
         except Exception as e:
             note = f"AI 선별 실패({_esc(str(e)[:80])}) — 헤드라인만 표시합니다."
     if not picked:
@@ -448,9 +456,15 @@ def market_news_html(headlines, call_fn=None):
         title = (f"<a href='{_esc(_safe_url(a.get('url')))}' style='color:#1a56b0;text-decoration:none;font-weight:600;'>{_esc(shown)}</a>"
                  if _safe_url(a.get("url")) else f"<strong>{_esc(shown)}</strong>")
         orig = f"<div style='color:{MUTED};font-size:11px;'>원문: {_esc(a['title'])}</div>" if p.get("title_ko") else ""
-        tk = f" <span style='color:#555;font-size:11px;'>[{', '.join(_esc(t) for t in p['tickers'])}]</span>" if p["tickers"] else ""
+        hs_ = {str(h).upper() for h in (held or [])}
+        tk = ""
+        if p["tickers"]:
+            tk = "<div style='margin-top:2px;'>" + " ".join(
+                (f"<span style='background:#fff3d6;color:#8a5a00;border:1px solid #f0c36d;border-radius:4px;padding:0 5px;font-size:11px;font-weight:700;'>{_esc(t)} 보유</span>"
+                 if t in hs_ else f"<span style='background:#eef1f5;color:#444;border-radius:4px;padding:0 5px;font-size:11px;'>{_esc(t)}</span>")
+                for t in p["tickers"]) + "</div>"
         why = f"<div style='color:#333;margin-top:2px;'>→ {_esc(p['why'])}</div>" if p["why"] else ""
-        rows += (f"<tr style='border-top:1px solid #eee;'><td style='padding:6px;font-size:13px;'>{title}{tk}{orig}"
+        rows += (f"<tr style='border-top:1px solid #eee;'><td style='padding:6px;font-size:13px;'>{title}{orig}{tk}"
                  f"<div style='color:{MUTED};font-size:11px;'>{_esc(a.get('source', ''))} {_esc(a.get('published', ''))}</div>{why}</td></tr>")
     foot = (f"<p style='font-size:11px;color:{MUTED};margin:4px 0 0;'>※ 헤드라인(제목)만 읽고 정리한 것입니다. 제목 번역은 AI가 했으니 중요한 건 원문을 확인하고, 기사 본문은 읽지 않았으니 링크로 원문을 보세요."
             + (f" {note}" if note else "") + "</p>")
@@ -1029,11 +1043,13 @@ def main():
         news_key = os.environ.get("NEWS_API_KEY")
         mover_fn = lambda t: mn.fetch_headlines(f"{t} stock", news_key, page_size=3, days=3)
         try:
-            heads = mn.fetch_headlines(mn.MARKET_QUERY, news_key, page_size=mn.MAX_FETCH, days=2)
+            heads = mn.fetch_headlines(mn.MARKET_QUERY, news_key, page_size=mn.MAX_FETCH, days=2, domains=mn.MARKET_DOMAINS)
             call_fn = None
             if os.environ.get("ANTHROPIC_API_KEY"):
-                call_fn = lambda sys_, usr, tool: A.call_claude(sys_, usr, max_tokens=2000, tool=tool)
-            market_news_html = mn.market_news_html(heads, call_fn)
+                import ai_briefing as _ab      # Portfolio_Report_ver_4_1.py가 내장해 등록해 둔 모듈
+                call_fn = lambda sys_, usr, tool: _ab.call_claude(sys_, usr, max_tokens=3000, tool=tool)
+            held_all = list(stocks) + [t for t in (inc_cfg.get("income_tickers") or []) if t not in stocks]
+            market_news_html = mn.market_news_html(heads, call_fn, held=held_all)
         except Exception as e:
             market_news_html = f"<p style='color:#757575;'>시장 뉴스를 만들지 못했습니다: {e}</p>"
     body, problems = build_market_report(stocks, ai_html=ai_html, mover_news_fn=mover_fn, market_news_html=market_news_html)
