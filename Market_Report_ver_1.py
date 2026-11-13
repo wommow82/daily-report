@@ -229,22 +229,247 @@ def build_technicals_report(tickers, fetch_fn=None):
 '''
 _register_embedded('technicals', EMBEDDED_TECHNICALS)
 
+# ---------- EMBEDDED_MARKET_NEWS ----------
+EMBEDDED_MARKET_NEWS = r'''# -*- coding: utf-8 -*-
+"""
+market_news.py - B 리포트의 뉴스 두 가지
+
+  1) 큰 변동 종목 뉴스: 전일 대비 |변동| >= MOVER_PCT 인 보유 개별주에 최근 헤드라인(제목+링크)을 붙인다. AI 없음.
+  2) 오늘의 시장 뉴스: 가져온 헤드라인 중에서만 AI가 3~5개를 고르고 '시장에 왜 중요한지'를 한 줄로 쓴다.
+     - 근거 ID(N1, N2...)에 없는 항목은 버린다(AI가 기억으로 지어내는 것 방지).
+     - 매매 지시 문구는 걸러낸다. AI 호출 실패 시 AI 없이 헤드라인만 보여준다.
+  - 헤드라인(제목)만 읽는다. 기사 본문은 읽지 않으므로 요약은 제목 수준이다.
+  - 뉴스 소스: NewsAPI(everything 검색) -> 없으면 Google News RSS. 실패해도 예외를 던지지 않는다.
+"""
+import html as _html
+import os
+import re
+from datetime import datetime, timedelta
+
+MOVER_PCT = 3.0            # 이 % 이상 움직인 종목에 뉴스를 붙인다(환경변수 MOVER_PCT로 변경)
+MARKET_QUERY = "stock market OR Wall Street OR Nasdaq OR S&P 500 OR Federal Reserve OR Treasury yields"
+MAX_FETCH = 30             # AI에 보여줄 헤드라인 최대 개수
+MAX_PICK = 5
+GOOD, BAD, WARN, MUTED = "#2e7d32", "#c62828", "#e65100", "#757575"
+
+_BANNED = re.compile(
+    r"(사세요|파세요|사십시오|파십시오|매수\s*(하세요|하십시오|하라|해야|추천|권고|권장)|"
+    r"매도\s*(하세요|하십시오|하라|해야|추천|권고|권장)|비중\s*(늘리세요|줄이세요|확대하세요|축소하세요)|"
+    r"손절\s*(하세요|해야)|익절\s*(하세요|해야)|담으세요|정리하세요|팔아야|사야\s*(합니다|해요|한다)|"
+    r"\bbuy now\b|\bsell now\b|you should (buy|sell))", re.I)
+
+NEWS_TOOL = {
+    "name": "submit_market_news",
+    "description": "주어진 헤드라인 중에서만 시장에 중요한 뉴스를 고른다.",
+    "input_schema": {
+        "type": "object",
+        "properties": {"items": {"type": "array", "items": {
+            "type": "object",
+            "properties": {
+                "id": {"type": "string", "description": "고른 헤드라인의 ID(예: N3). 목록에 있는 것만."},
+                "why": {"type": "string", "description": "이 뉴스가 시장·투자자에게 왜 중요한지 한국어 한 문장(제목에 있는 사실만, 추측·매매 지시 금지)"},
+                "tickers": {"type": "array", "items": {"type": "string"}, "description": "제목에 직접 나온 관련 티커(없으면 빈 배열)"},
+            },
+            "required": ["id", "why"]}}},
+        "required": ["items"],
+    },
+}
+
+SYSTEM = (
+    "당신은 투자 일지를 정리하는 조수입니다. 아래 '헤드라인 목록'은 오늘 수집한 뉴스 제목입니다.\n"
+    "규칙: (1) 목록에 있는 ID만 고르세요. 목록에 없는 사건·숫자·인물은 쓰지 마세요. "
+    "(2) 주식시장 전체나 큰 기업·금리·경제지표에 영향이 있을 만한 것 3~5개만 고르고, 연예·사생활성 가십은 주가·경영에 영향을 준 사실만 중립적으로 다루세요. "
+    "(3) 'why'는 제목에 있는 사실만으로 한국어 한 문장. 원인을 단정하거나 앞날을 예측하지 마세요. "
+    "(4) 사라/파세요 같은 매매 지시는 절대 쓰지 마세요."
+)
+
+
+def _esc(s):
+    return _html.escape(str(s), quote=True)
+
+
+def _safe_url(u):
+    u = str(u or "")
+    return u if u.startswith(("http://", "https://")) else ""
+
+
+# =========================
+# 헤드라인 수집
+# =========================
+
+def fetch_headlines(query, api_key=None, page_size=10, days=2, http_get=None, rss_fn=None):
+    """[{title,url,source,published}, ...]. NewsAPI -> Google News RSS 순. 실패는 빈 목록."""
+    out = []
+    if api_key:
+        try:
+            if http_get is None:
+                import requests
+                http_get = requests.get
+            r = http_get("https://newsapi.org/v2/everything", params={
+                "q": query, "apiKey": api_key, "language": "en", "sortBy": "publishedAt",
+                "pageSize": page_size, "from": (datetime.today() - timedelta(days=days)).strftime("%Y-%m-%d")}, timeout=20)
+            if r.status_code == 200:
+                for a in r.json().get("articles", []):
+                    if a.get("title"):
+                        out.append({"title": a.get("title"), "url": a.get("url"),
+                                    "source": (a.get("source") or {}).get("name", ""),
+                                    "published": (a.get("publishedAt") or "")[:10]})
+        except Exception as e:
+            print(f"⚠️ NewsAPI 오류(B): {e}")
+    if not out:
+        try:
+            if rss_fn is None:
+                import feedparser
+                from urllib.parse import quote_plus
+                feed = feedparser.parse(f"https://news.google.com/rss/search?q={quote_plus(query)}&hl=en&gl=US&ceid=US:en")
+                entries = feed.entries[:page_size]
+            else:
+                entries = rss_fn(query)[:page_size]
+            for e in entries:
+                src = "Google News"
+                try:
+                    if getattr(e, "source", None):
+                        src = e.source.get("title", src)
+                except Exception:
+                    pass
+                out.append({"title": getattr(e, "title", ""), "url": getattr(e, "link", ""), "source": src,
+                            "published": (getattr(e, "published", "") or "")[:16]})
+        except Exception as e:
+            print(f"⚠️ Google News RSS 오류(B): {e}")
+    seen, uniq = set(), []
+    for a in out:
+        k = (a.get("title") or "").strip().lower()
+        if k and k not in seen:
+            seen.add(k)
+            uniq.append(a)
+    return uniq
+
+
+# =========================
+# 1) 큰 변동 종목 뉴스
+# =========================
+
+def movers(day_changes, threshold=None):
+    """day_changes: {티커: 전일 대비 %}. 기준 이상 움직인 종목을 절댓값 큰 순으로."""
+    th = MOVER_PCT if threshold is None else threshold
+    return [t for t, p in sorted(day_changes.items(), key=lambda kv: -abs(kv[1] or 0))
+            if p is not None and abs(p) >= th]
+
+
+def mover_news_html(day_changes, news_fn, threshold=None, limit_stocks=5, per_stock=3):
+    """큰 변동 종목별 헤드라인 표. 해당 종목이 없으면 한 줄 안내."""
+    th = MOVER_PCT if threshold is None else threshold
+    mv = movers(day_changes, th)[:limit_stocks]
+    if not mv:
+        return f"<p style='color:{MUTED};font-size:13px;'>어제 ±{th:g}% 이상 움직인 보유 종목이 없습니다.</p>"
+    rows = ""
+    for t in mv:
+        p = day_changes[t]
+        try:
+            arts = (news_fn(t) or [])[:per_stock]
+        except Exception as e:
+            print(f"⚠️ {t} 뉴스 실패: {e}")
+            arts = []
+        col = GOOD if p > 0 else BAD
+        if arts:
+            links = "<br>".join(
+                (f"• <a href='{_esc(_safe_url(a.get('url')))}' style='color:#1a56b0;text-decoration:none;'>{_esc(a.get('title'))}</a> "
+                 f"<span style='color:{MUTED};font-size:11px;'>{_esc(a.get('source', ''))} {_esc(a.get('published', ''))}</span>")
+                if _safe_url(a.get("url")) else f"• {_esc(a.get('title'))}" for a in arts)
+        else:
+            links = f"<span style='color:{MUTED};'>관련 뉴스를 찾지 못했습니다</span>"
+        rows += (f"<tr style='border-top:1px solid #eee;'><td style='padding:6px;vertical-align:top;white-space:nowrap;'>"
+                 f"<strong>{_esc(t)}</strong><br><span style='color:{col};font-weight:600;'>{p:+.1f}%</span></td>"
+                 f"<td style='padding:6px;font-size:12px;'>{links}</td></tr>")
+    return (f"<table style='width:100%;border-collapse:collapse;font-size:13px;'>{rows}</table>"
+            f"<p style='font-size:11px;color:{MUTED};margin:4px 0 0;'>※ 헤드라인 검색 결과이며, 주가 변동의 '원인'을 확인한 것이 아닙니다.</p>")
+
+
+# =========================
+# 2) 오늘의 시장 뉴스
+# =========================
+
+def build_user_message(headlines):
+    lines = [f"N{i + 1}. {a['title']} ({a.get('source', '')}, {a.get('published', '')})" for i, a in enumerate(headlines)]
+    return "헤드라인 목록:\n" + "\n".join(lines) + "\n\n3~5개를 골라 submit_market_news 도구로 제출하세요."
+
+
+def select_market_news(headlines, call_fn):
+    """call_fn(system, user, tool)->JSON 텍스트. 반환: [{'a':기사,'why':str,'tickers':[...]}]. 검증 통과분만."""
+    import json
+    hs = headlines[:MAX_FETCH]
+    if not hs:
+        return []
+    txt = call_fn(SYSTEM, build_user_message(hs), NEWS_TOOL)
+    try:
+        data = json.loads(txt)
+    except Exception:
+        m = re.search(r"\{.*\}", txt or "", re.S)
+        data = json.loads(m.group(0)) if m else {}
+    out, used = [], set()
+    for it in (data.get("items") or []):
+        m = re.fullmatch(r"N(\d+)", str(it.get("id", "")).strip())
+        why = str(it.get("why", "")).strip()
+        if not m or not why or _BANNED.search(why):
+            continue
+        idx = int(m.group(1)) - 1
+        if not (0 <= idx < len(hs)) or idx in used:
+            continue
+        used.add(idx)
+        tks = [str(t).upper() for t in (it.get("tickers") or []) if re.fullmatch(r"[A-Za-z.\-]{1,8}", str(t))]
+        tks = [t for t in tks if t in hs[idx]["title"].upper()]      # 제목에 실제로 나온 티커만
+        out.append({"a": hs[idx], "why": why, "tickers": tks})
+        if len(out) >= MAX_PICK:
+            break
+    return out
+
+
+def market_news_html(headlines, call_fn=None):
+    """AI 선별(가능하면) + 표. AI 실패·키 없음이면 상위 헤드라인 5개만."""
+    if not headlines:
+        return f"<p style='color:{MUTED};font-size:13px;'>시장 뉴스를 가져오지 못했습니다.</p>"
+    picked, note = [], ""
+    if call_fn is not None:
+        try:
+            picked = select_market_news(headlines, call_fn)
+        except Exception as e:
+            note = f"AI 선별 실패({_esc(str(e)[:80])}) — 헤드라인만 표시합니다."
+    if not picked:
+        picked = [{"a": a, "why": "", "tickers": []} for a in headlines[:MAX_PICK]]
+        note = note or ("AI 선별 없이 최신 헤드라인만 표시합니다." if call_fn is None else "AI가 고른 항목이 검증을 통과하지 못해 헤드라인만 표시합니다.")
+    rows = ""
+    for p in picked:
+        a = p["a"]
+        title = (f"<a href='{_esc(_safe_url(a.get('url')))}' style='color:#1a56b0;text-decoration:none;font-weight:600;'>{_esc(a['title'])}</a>"
+                 if _safe_url(a.get("url")) else f"<strong>{_esc(a['title'])}</strong>")
+        tk = f" <span style='color:#555;font-size:11px;'>[{', '.join(_esc(t) for t in p['tickers'])}]</span>" if p["tickers"] else ""
+        why = f"<div style='color:#333;margin-top:2px;'>→ {_esc(p['why'])}</div>" if p["why"] else ""
+        rows += (f"<tr style='border-top:1px solid #eee;'><td style='padding:6px;font-size:13px;'>{title}{tk}"
+                 f"<div style='color:{MUTED};font-size:11px;'>{_esc(a.get('source', ''))} {_esc(a.get('published', ''))}</div>{why}</td></tr>")
+    foot = (f"<p style='font-size:11px;color:{MUTED};margin:4px 0 0;'>※ 헤드라인(제목)만 읽고 정리한 것입니다. 기사 본문은 확인하지 않았으니 링크로 원문을 보세요."
+            + (f" {note}" if note else "") + "</p>")
+    return f"<table style='width:100%;border-collapse:collapse;'>{rows}</table>{foot}"
+'''
+_register_embedded('market_news', EMBEDDED_MARKET_NEWS)
+
 # ---------- EMBEDDED_MARKET_REPORT ----------
 EMBEDDED_MARKET_REPORT = r'''# -*- coding: utf-8 -*-
 """
 market_report.py - B 리포트(시장·종목): 어젯밤 시황, 보유 개별주 카드, 앞으로 2주 일정
 
 원칙
-  - 1단계는 AI를 쓰지 않는다(계산·표시만). 외부 값은 가져온 그대로 보여주고 해석은 규칙(기술지표)만 쓴다.
+  - 표·핵심 요약·기술지표는 AI 없이 계산한다. AI는 (선택) 세계 경제 브리핑과 시장 뉴스 선별에만 쓴다.
   - 가져오지 못한 값은 '-'로 두고 이유를 아래에 적는다. 예외를 던지지 않는다.
   - 가격 데이터: yfinance(비공식, 형식이 바뀔 수 있음). 일정: yfinance의 calendar / get_earnings_dates.
     https://ranaroussi.github.io/yfinance/reference/api/yfinance.Ticker.html
   - VIX 기준(20 미만 안정, 30 초과 변동성 큼): Robinhood의 VIX 설명(앞선 대화에서 확인한 통상 기준)
 """
 import html as _html
+import os
 from datetime import date, datetime, timedelta
 
 import technicals as tech
+import market_news as mn
 
 HORIZON_DAYS = 14          # 일정 표시 범위
 STALE_DAYS = 4             # 마지막 가격이 이보다 오래되면 '오래됨' 표시
@@ -388,10 +613,21 @@ def earnings_reaction(series, d):
 # 계산
 # =========================
 
-def pick_stocks(df_hold, income_tickers):
-    """보유 수량이 있는 TFSA 개별주(IncomeTickers 제외)를 평가액 큰 순서로. RESP는 제외."""
+def is_etf(ticker):
+    """yfinance quoteType이 ETF/MUTUALFUND면 True. 알 수 없으면 False(개별주로 취급)."""
+    try:
+        import yfinance as yf
+        qt = str((yf.Ticker(ticker).info or {}).get("quoteType", "")).upper()
+        return qt in ("ETF", "MUTUALFUND")
+    except Exception:
+        return False
+
+
+def pick_stocks(df_hold, income_tickers, exclude=None, etf_fn=None):
+    """보유 수량이 있는 TFSA 개별주를 평가액 큰 순서로.
+    제외: RESP, 0주, IncomeTickers, Settings의 MarketExclude(exclude), ETF(etf_fn이 True인 것)."""
     import pandas as pd
-    inc = {str(t).strip().upper() for t in (income_tickers or [])}
+    inc = {str(t).strip().upper() for t in (income_tickers or [])} | {str(t).strip().upper() for t in (exclude or [])}
     d = df_hold.copy()
     d["_sh"] = pd.to_numeric(d["Shares"], errors="coerce").fillna(0)
     d = d[(d["_sh"] > 0) & (d["Type"].astype(str).str.upper() == "TFSA")]
@@ -400,8 +636,15 @@ def pick_stocks(df_hold, income_tickers):
     out = []
     for t in d["Ticker"].astype(str):
         t = t.strip()
-        if t and t.upper() not in inc and t not in out:
-            out.append(t)
+        if not t or t.upper() in inc or t in out:
+            continue
+        if etf_fn is not None:
+            try:
+                if etf_fn(t):
+                    continue
+            except Exception:
+                pass
+        out.append(t)
     return out
 
 
@@ -443,39 +686,8 @@ def vix_label(v):
     return "<span style='color:%s;'>보통(20~30)</span>" % WARN
 
 
-# =========================
-# 렌더
-# =========================
-
-def _market_table(fetch_fn, today, problems):
-    rows = ""
-    for name, tk, kind in MARKET_ITEMS:
-        try:
-            dc = day_change(fetch_fn(tk, "1mo"))
-        except Exception as e:
-            dc = None
-            problems.append(f"{name}: {e}")
-        if dc is None:
-            rows += (f"<tr><td style='padding:4px 6px;'>{_esc(name)}</td><td style='text-align:right;'>-</td>"
-                     f"<td style='text-align:right;'>-</td><td></td></tr>")
-            continue
-        d1, v1, pct, diff = dc
-        if kind == "yield":
-            chg = f"<span style='font-weight:600;'>{diff:+.2f}%p</span>"          # 금리·환율은 오르내림이 좋고 나쁨을 뜻하지 않아 색 없음
-            val = f"{v1:.2f}"
-        else:
-            chg = _pct_html(pct, "inverse" if kind == "vix" else ("neutral" if kind == "fx" else "normal"))
-            val = f"{v1:,.2f}" if kind != "fx" else f"{v1:.4f}"
-        note = vix_label(v1) if kind == "vix" else ""
-        if _stale(d1, today):
-            note = (note + " " if note else "") + f"<span style='color:{WARN};'>({d1} 이후 갱신 없음)</span>"
-        rows += (f"<tr><td style='padding:4px 6px;text-align:left;'>{_esc(name)}</td>"
-                 f"<td style='text-align:right;'>{val}</td><td style='text-align:right;'>{chg}</td>"
-                 f"<td style='text-align:left;padding-left:8px;font-size:11px;'>{note}</td></tr>")
-    return ("<table style='width:100%;border-collapse:collapse;font-size:13px;'>"
-            "<tr style='border-bottom:1px solid #ddd;color:#666;'><th style='text-align:left;padding:4px 6px;'>지표</th>"
-            "<th style='text-align:right;'>최근 종가</th><th style='text-align:right;'>전일 대비</th><th></th></tr>"
-            + rows + "</table>")
+def _vix_text(v):
+    return "안정권(20 미만)" if v < 20 else ("변동성 큼(30 초과)" if v > 30 else "보통(20~30)")
 
 
 def _dday(d, today):
@@ -483,68 +695,122 @@ def _dday(d, today):
     return "오늘" if n == 0 else (f"D-{n}" if n > 0 else f"D+{abs(n)}")
 
 
-def _stock_card(tk, series, events, today, earn=None):
-    dc = day_change(series)
-    m = tech.compute([v for _, v in series]) if series else None
-    if dc is None:
-        head = f"<strong>{_esc(tk)}</strong> <span style='color:{MUTED};'>가격을 가져오지 못했습니다</span>"
-        return f"<div style='border-top:1px solid #eee;padding:8px 0;'>{head}</div>"
-    d1, v1, pct, _ = dc
-    stale = f" <span style='color:{WARN};font-size:11px;'>({d1} 이후 갱신 없음)</span>" if _stale(d1, today) else ""
-    head = (f"<strong style='font-size:14px;'>{_esc(tk)}</strong> &nbsp;{v1:,.2f} &nbsp;{_pct_html(pct)}{stale}")
-    body = ""
-    if m:
-        vd = tech.verdict(m)
-        col = {"good": GOOD, "bad": BAD}.get(vd, MUTED)
-        label = {"good": "긍정 신호", "bad": "부정 신호"}.get(vd, "신호 혼재")
-        rsi = m.get("rsi")
-        extra = []
-        if rsi is not None:
-            extra.append(f"RSI {rsi:.0f}")
-        if m.get("from_hi") is not None:
-            extra.append(f"52주 고점 대비 {m['from_hi']:+.1f}%")
-        if m.get("ret3m") is not None:
-            extra.append(f"3개월 {m['ret3m']:+.1f}%")
-        body += (f"<div style='font-size:12px;color:#555;margin-top:2px;'>{' · '.join(extra)}</div>"
-                 f"<div style='font-size:12px;color:{col};font-weight:600;margin-top:2px;'>→ [{label}] {_esc(tech.interpret(m))}</div>")
-    else:
-        body += f"<div style='font-size:12px;color:{MUTED};'>기술지표를 계산할 가격 데이터가 부족합니다.</div>"
-    ev = []
-    if events.get("earnings"):
-        ev.append(f"실적 발표 {events['earnings']:%m/%d}({_dday(events['earnings'], today)})")
-    if events.get("ex_div"):
-        ev.append(f"배당락 {events['ex_div']:%m/%d}({_dday(events['ex_div'], today)})")
-    body += (f"<div style='font-size:12px;margin-top:2px;'>📅 {' · '.join(ev)}</div>" if ev
-             else f"<div style='font-size:12px;color:{MUTED};margin-top:2px;'>📅 확인된 예정 일정 없음</div>")
-    body += _earnings_lines(series, earn or {})
-    return f"<div style='border-top:1px solid #eee;padding:8px 0;'>{head}{body}</div>"
+# =========================
+# 렌더(표 중심)
+# =========================
+
+TH = "style='text-align:%s;padding:5px 6px;color:#666;font-weight:600;border-bottom:1px solid #ccc;'"
+TD = "padding:6px;border-top:1px solid #eee;"
 
 
-def _earnings_lines(series, earn):
-    out = ""
-    last, nxt = earn.get("last"), earn.get("next")
-    if last:
-        sur = last.get("surprise_pct")
-        col = GOOD if (sur or 0) > 0 else (BAD if (sur or 0) < 0 else MUTED)
-        word = "" if sur is None else (" 상회" if sur > 0 else (" 하회" if sur < 0 else " 부합"))
-        est = f" vs 예상 {last['estimate']:.2f}" if last.get("estimate") is not None else ""
-        sur_t = f" <span style='color:{col};font-weight:600;'>({sur:+.1f}%{word})</span>" if sur is not None else ""
-        rx = earnings_reaction(series, last["date"])
-        rx_t = f" · 발표 후 주가 {_pct_html(rx)}" if rx is not None else ""
-        out += (f"<div style='font-size:12px;margin-top:2px;'>📊 지난 실적({last['date']:%m/%d}): "
-                f"EPS {last['actual']:.2f}{est}{sur_t}{rx_t}</div>")
-    if nxt:
-        rng = (f", 범위 {nxt['low']:.2f}~{nxt['high']:.2f}" if nxt.get("low") is not None and nxt.get("high") is not None else "")
-        n = f", 애널리스트 {int(nxt['n'])}명" if nxt.get("n") else ""
-        ya = ""
-        if nxt.get("year_ago") is not None:
-            gr = f" ({nxt['growth'] * 100:+.0f}%)" if nxt.get("growth") is not None else ""
-            ya = f", 전년 동기 {nxt['year_ago']:.2f}{gr}"
-        out += (f"<div style='font-size:12px;margin-top:2px;color:#444;'>🔮 이번 분기 예상 EPS 평균 {nxt['avg']:.2f}{rng}{n}{ya}"
-                f" <span style='color:{MUTED};'>(애널리스트 집계, 제 예측 아님)</span></div>")
-    if not last and not nxt:
-        out += f"<div style='font-size:12px;color:{MUTED};margin-top:2px;'>📊 실적 정보를 가져오지 못했습니다(ETF이거나 데이터 없음)</div>"
+def _table(headers, rows, aligns=None):
+    aligns = aligns or ["left"] * len(headers)
+    th = "".join(f"<th {TH % a}>{h}</th>" for h, a in zip(headers, aligns))
+    return f"<table style='width:100%;border-collapse:collapse;font-size:13px;'><tr>{th}</tr>{''.join(rows)}</table>"
+
+
+def _market_data(fetch_fn, problems):
+    out = []
+    for name, tk, kind in MARKET_ITEMS:
+        try:
+            dc = day_change(fetch_fn(tk, "1mo"))
+        except Exception as e:
+            dc = None
+            problems.append(f"{name}: {e}")
+        out.append((name, kind, dc))
     return out
+
+
+def _market_table(mdata, today):
+    rows = []
+    for name, kind, dc in mdata:
+        if dc is None:
+            rows.append(f"<tr><td style='{TD}'>{_esc(name)}</td><td style='{TD}text-align:right;'>-</td>"
+                        f"<td style='{TD}text-align:right;'>-</td><td style='{TD}'></td></tr>")
+            continue
+        d1, v1, pct, diff = dc
+        if kind == "yield":
+            chg, val = f"<span style='font-weight:600;'>{diff:+.2f}%p</span>", f"{v1:.2f}"
+        else:
+            chg = _pct_html(pct, "inverse" if kind == "vix" else ("neutral" if kind == "fx" else "normal"))
+            val = f"{v1:,.2f}" if kind != "fx" else f"{v1:.4f}"
+        note = vix_label(v1) if kind == "vix" else ""
+        if _stale(d1, today):
+            note = (note + " " if note else "") + f"<span style='color:{WARN};'>({d1} 이후 갱신 없음)</span>"
+        rows.append(f"<tr><td style='{TD}'>{_esc(name)}</td><td style='{TD}text-align:right;'>{val}</td>"
+                    f"<td style='{TD}text-align:right;'>{chg}</td><td style='{TD}font-size:12px;'>{note}</td></tr>")
+    return _table(["지표", "종가", "전일 대비", ""], rows, ["left", "right", "right", "left"])
+
+
+def _trend(m):
+    if not m:
+        return "-", MUTED, ""
+    vd = tech.verdict(m)
+    label, col = {"good": ("상승 추세", GOOD), "bad": ("하락 추세", BAD)}.get(vd, ("엇갈림", MUTED))
+    rsi = m.get("rsi")
+    flag = "과열" if (rsi is not None and rsi > 70) else ("침체" if (rsi is not None and rsi < 30) else "")
+    return label, col, flag
+
+
+def _stock_rows(stocks, data, today):
+    """data[tk] = {series, events, earn}. 요약 표 행과 변동 dict 반환."""
+    rows, changes = [], {}
+    for tk in stocks:
+        d = data[tk]
+        dc = day_change(d["series"])
+        if dc is None:
+            rows.append(f"<tr><td style='{TD}'><strong>{_esc(tk)}</strong></td>"
+                        f"<td colspan='4' style='{TD}color:{MUTED};'>가격을 가져오지 못했습니다</td></tr>")
+            continue
+        d1, v1, pct, _ = dc
+        changes[tk] = pct
+        m = tech.compute([v for _, v in d["series"]]) if d["series"] else None
+        label, col, flag = _trend(m)
+        r3 = f"{m['ret3m']:+.1f}%" if m and m.get("ret3m") is not None else "-"
+        stale = f"<br><span style='color:{WARN};font-size:11px;'>({d1} 이후 갱신 없음)</span>" if _stale(d1, today) else ""
+        e = d["events"].get("earnings")
+        nxt = f"{e:%m/%d} ({_dday(e, today)})" if e and e >= today else "-"
+        flag_t = f" <span style='color:{WARN};font-size:11px;'>RSI {flag}</span>" if flag else ""
+        rows.append(f"<tr><td style='{TD}'><strong>{_esc(tk)}</strong>{stale}</td>"
+                    f"<td style='{TD}text-align:right;'>{v1:,.2f}<br>{_pct_html(pct)}</td>"
+                    f"<td style='{TD}text-align:right;'>{r3}</td>"
+                    f"<td style='{TD}'><span style='color:{col};font-weight:600;'>{label}</span>{flag_t}</td>"
+                    f"<td style='{TD}'>{nxt}</td></tr>")
+    return rows, changes
+
+
+def _earnings_table(stocks, data):
+    rows = []
+    for tk in stocks:
+        d = data[tk]
+        earn = d["earn"] or {}
+        last, nxt = earn.get("last"), earn.get("next")
+        if not last and not nxt:
+            rows.append(f"<tr><td style='{TD}'><strong>{_esc(tk)}</strong></td><td colspan='2' style='{TD}color:{MUTED};'>실적 정보를 가져오지 못했습니다</td></tr>")
+            continue
+        lt = "-"
+        if last:
+            sur = last.get("surprise_pct")
+            col = GOOD if (sur or 0) > 0 else (BAD if (sur or 0) < 0 else MUTED)
+            word = "" if sur is None else (" 상회" if sur > 0 else (" 하회" if sur < 0 else " 부합"))
+            est = f" / 예상 {last['estimate']:.2f}" if last.get("estimate") is not None else ""
+            sur_t = f"<br><span style='color:{col};font-weight:600;'>{sur:+.1f}%{word}</span>" if sur is not None else ""
+            rx = earnings_reaction(d["series"], last["date"])
+            rx_t = f"<br>발표 후 주가 {_pct_html(rx)}" if rx is not None else ""
+            lt = f"{last['date']:%m/%d} · EPS {last['actual']:.2f}{est}{sur_t}{rx_t}"
+        nt = "-"
+        if nxt:
+            rng = f"<br>범위 {nxt['low']:.2f}~{nxt['high']:.2f}" if nxt.get("low") is not None and nxt.get("high") is not None else ""
+            n = f", 애널리스트 {int(nxt['n'])}명" if nxt.get("n") else ""
+            ya = ""
+            if nxt.get("year_ago") is not None:
+                gr = f" ({nxt['growth'] * 100:+.0f}%)" if nxt.get("growth") is not None else ""
+                ya = f"<br>전년 동기 {nxt['year_ago']:.2f}{gr}"
+            nt = f"평균 <strong>{nxt['avg']:.2f}</strong>{rng}{n}{ya}"
+        rows.append(f"<tr><td style='{TD}vertical-align:top;'><strong>{_esc(tk)}</strong></td>"
+                    f"<td style='{TD}font-size:12px;'>{lt}</td><td style='{TD}font-size:12px;'>{nt}</td></tr>")
+    return (_table(["종목", "지난 실적 (EPS 실제 / 예상)", "이번 분기 예상 EPS"], rows)
+            + f"<p style='font-size:11px;color:{MUTED};margin:4px 0 0;'>※ 예상 EPS는 애널리스트 집계 평균이며 제 예측이 아닙니다.</p>")
 
 
 def _calendar_block(all_events, today):
@@ -558,25 +824,56 @@ def _calendar_block(all_events, today):
     items.sort()
     if not items:
         return f"<p style='color:{MUTED};font-size:13px;'>앞으로 {HORIZON_DAYS}일 안에 확인된 일정이 없습니다.</p>"
-    rows = "".join(
-        f"<tr><td style='padding:3px 6px;'>{d:%m/%d (%a)}</td><td style='padding:3px 6px;'>{_dday(d, today)}</td>"
-        f"<td style='padding:3px 6px;'><strong>{_esc(tk)}</strong></td><td style='padding:3px 6px;'>{label}</td></tr>"
-        for d, tk, label in items)
-    return f"<table style='border-collapse:collapse;font-size:13px;'>{rows}</table>"
+    rows = [f"<tr><td style='{TD}'>{d:%m/%d (%a)}</td><td style='{TD}'>{_dday(d, today)}</td>"
+            f"<td style='{TD}'><strong>{_esc(tk)}</strong></td><td style='{TD}'>{label}</td></tr>" for d, tk, label in items]
+    return _table(["날짜", "남은 날", "종목", "내용"], rows)
 
 
-def build_market_report(stocks, fetch_fn=None, events_fn=None, today=None, ai_html="", earnings_fn=None):
-    """반환: (html 본문 조각, problems). 예외를 던지지 않는다."""
+def _key_points(mdata, changes, all_events, today, mover_pct):
+    """오늘 핵심 요약(규칙 기반, AI 없음). 줄마다 사실만."""
+    pts = []
+    idx = [(n, dc[2]) for n, k, dc in mdata if k == "idx" and dc]
+    if idx:
+        pts.append("미국 증시: " + " · ".join(f"{n} {p:+.2f}%" for n, p in idx))
+    for n, k, dc in mdata:
+        if k == "vix" and dc:
+            pts.append(f"VIX(공포지수) {dc[1]:.1f} — {_vix_text(dc[1])}")
+    mv = mn.movers(changes, mover_pct)
+    if mv:
+        pts.append("큰 변동 보유 종목: " + ", ".join(f"{t} {changes[t]:+.1f}%" for t in mv[:5]))
+    soon = sorted((ev["earnings"], tk) for tk, ev in all_events.items() if ev.get("earnings") and 0 <= (ev["earnings"] - today).days <= 7)
+    if soon:
+        pts.append("이번 주 실적 발표: " + ", ".join(f"{tk} {d:%m/%d}({_dday(d, today)})" for d, tk in soon))
+    exd = sorted((ev["ex_div"], tk) for tk, ev in all_events.items() if ev.get("ex_div") and 0 <= (ev["ex_div"] - today).days <= 7)
+    if exd:
+        pts.append("이번 주 배당락: " + ", ".join(f"{tk} {d:%m/%d}({_dday(d, today)})" for d, tk in exd))
+    if not pts:
+        return ""
+    lis = "".join(f"<li style='margin:3px 0;'>{_esc(p)}</li>" for p in pts)
+    return (f"<div style='background:#f3f7ff;border:1px solid #d6e2f7;border-radius:8px;padding:8px 12px;margin:10px 0;'>"
+            f"<div style='font-weight:700;font-size:15px;'>⭐ 오늘 핵심</div><ul style='margin:4px 0 0;padding-left:18px;font-size:14px;'>{lis}</ul></div>")
+
+
+def build_market_report(stocks, fetch_fn=None, events_fn=None, today=None, ai_html="", earnings_fn=None,
+                        mover_news_fn=None, market_news_html="", mover_pct=None):
+    """반환: (html 본문 조각, problems). 예외를 던지지 않는다.
+    mover_news_fn(ticker)->[{title,url,source,published}]  / market_news_html: 미리 만든 '시장 뉴스' 조각."""
     fetch_fn = fetch_fn or fetch_series
     events_fn = events_fn or fetch_events
     earnings_fn = earnings_fn or fetch_earnings
     today = today or date.today()
     problems = []
+    if mover_pct is None:
+        try:
+            mover_pct = float(os.environ.get("MOVER_PCT", mn.MOVER_PCT))
+        except ValueError:
+            mover_pct = mn.MOVER_PCT
     try:
-        market = _market_table(fetch_fn, today, problems)
+        mdata = _market_data(fetch_fn, problems)
+        market = _market_table(mdata, today)
     except Exception as e:
-        market = f"<p style='color:{MUTED};'>시황을 만들지 못했습니다: {_esc(e)}</p>"
-    cards, all_events = "", {}
+        mdata, market = [], f"<p style='color:{MUTED};'>시황을 만들지 못했습니다: {_esc(e)}</p>"
+    data = {}
     for tk in stocks:
         try:
             series = fetch_fn(tk, "2y")
@@ -588,36 +885,59 @@ def build_market_report(stocks, fetch_fn=None, events_fn=None, today=None, ai_ht
         except Exception as e:
             ev = {}
             problems.append(f"{tk}: 일정 {e}")
-        all_events[tk] = ev
         try:
             earn = earnings_fn(tk) or {}
         except Exception as e:
             earn = {}
             problems.append(f"{tk}: 실적 {e}")
+        data[tk] = {"series": series, "events": ev, "earn": earn}
+    h2 = "style='margin:20px 0 6px;font-size:16px;'"
+    if stocks:
         try:
-            cards += _stock_card(tk, series, ev, today, earn)
+            srows, changes = _stock_rows(stocks, data, today)
+            summary = _table(["종목", "종가 / 전일", "3개월", "추세", "다음 실적"], srows, ["left", "right", "right", "left", "left"])
+            summary += (f"<p style='font-size:11px;color:{MUTED};margin:4px 0 0;'>※ 추세: 현재가·50일선·200일선 위치로 본 현재 상태이며 앞날 예측이 아닙니다. "
+                        f"RSI 과열/침체는 단기 과열(70↑)·침체(30↓) 표시입니다.</p>")
+            earn_tbl = _earnings_table(stocks, data)
         except Exception as e:
-            problems.append(f"{tk}: 카드 {e}")
-    if not stocks:
-        cards = f"<p style='color:{MUTED};font-size:13px;'>표시할 보유 개별주가 없습니다.</p>"
-    h2 = "style='margin:18px 0 6px;font-size:16px;'"
+            changes, summary, earn_tbl = {}, f"<p style='color:{MUTED};'>종목 표를 만들지 못했습니다: {_esc(e)}</p>", ""
+            problems.append(f"종목 표 {e}")
+    else:
+        changes = {}
+        summary = f"<p style='color:{MUTED};font-size:13px;'>표시할 보유 개별주가 없습니다.</p>"
+        earn_tbl = ""
+    all_events = {tk: d["events"] for tk, d in data.items()}
+    try:
+        key = _key_points(mdata, changes, all_events, today, mover_pct)
+    except Exception as e:
+        key = ""
+        problems.append(f"핵심 요약 {e}")
+    mover_html = ""
+    if stocks and mover_news_fn is not None:
+        try:
+            mover_html = f"<h2 {h2}>🔥 큰 변동 종목 뉴스</h2>" + mn.mover_news_html(changes, mover_news_fn, mover_pct)
+        except Exception as e:
+            problems.append(f"변동 종목 뉴스 {e}")
     html = (
-        f"<h2 {h2}>🌎 어젯밤 시황</h2>{market}"
-        + (f"<h2 {h2}>🧠 AI 브리핑 (세계 경제)</h2>{ai_html}" if ai_html else "") +
-        f"<h2 {h2}>📅 앞으로 {HORIZON_DAYS}일 일정 (보유 개별주)</h2>{_calendar_block(all_events, today)}"
-        f"<h2 {h2}>🔎 내 개별주</h2>{cards}"
-        f"<p style='font-size:11px;color:{MUTED};margin-top:14px;'>※ 가격·일정·실적은 yfinance(비공식)에서 가져온 값이며 틀리거나 늦을 수 있고, "
-        f"실적일은 회사가 바꿀 수 있고, '예상 EPS'는 애널리스트 집계값이지 제 예측이 아닙니다. 기술지표는 현재 상태를 요약한 것이지 앞날의 예측이 아닙니다. "
-        f"VIX 20 미만 안정·30 초과 변동성 큼은 통상 기준입니다. 투자 판단의 단독 근거로 쓰지 마세요.</p>")
+        key
+        + f"<h2 {h2}>🌎 어젯밤 시황</h2>{market}"
+        + (f"<h2 {h2}>📰 오늘의 시장 뉴스</h2>{market_news_html}" if market_news_html else "")
+        + f"<h2 {h2}>🔎 내 개별주</h2>{summary}"
+        + mover_html
+        + (f"<h2 {h2}>📊 실적 (지난 결과 · 이번 분기 예상)</h2>{earn_tbl}" if earn_tbl else "")
+        + f"<h2 {h2}>📅 앞으로 {HORIZON_DAYS}일 일정</h2>{_calendar_block(all_events, today)}"
+        + (f"<h2 {h2}>🧠 AI 브리핑 (세계 경제)</h2>{ai_html}" if ai_html else "")
+        + f"<p style='font-size:11px;color:{MUTED};margin-top:14px;'>※ 가격·일정·실적은 yfinance(비공식)에서 가져온 값이며 틀리거나 늦을 수 있고, "
+          f"실적일은 회사가 바꿀 수 있습니다. 뉴스는 헤드라인 검색 결과이고 원인을 확정한 것이 아닙니다. VIX 20 미만 안정·30 초과 변동성 큼은 통상 기준입니다. "
+          f"투자 판단의 단독 근거로 쓰지 마세요.</p>")
     if problems:
-        html += (f"<p style='font-size:11px;color:{WARN};'>가져오지 못한 항목: "
-                 + _esc("; ".join(problems[:8])) + "</p>")
+        html += (f"<p style='font-size:11px;color:{WARN};'>가져오지 못한 항목: " + _esc("; ".join(problems[:8])) + "</p>")
     return html, problems
 
 
 def wrap_email(body_html, today=None):
     today = today or date.today()
-    return ("<html><body style='font-family:-apple-system,Segoe UI,Arial,sans-serif;max-width:720px;margin:0 auto;padding:12px;color:#222;'>"
+    return ("<html><head><meta charset='utf-8'></head><body style='font-family:-apple-system,Segoe UI,Arial,sans-serif;max-width:720px;margin:0 auto;padding:12px;color:#222;'>"
             f"<h1 style='font-size:20px;margin:0 0 4px;'>🌅 시장·종목 리포트</h1>"
             f"<div style='font-size:12px;color:{MUTED};'>{today:%Y-%m-%d (%a)} · 포트폴리오 리포트와는 별도 메일입니다</div>"
             f"{body_html}</body></html>")
@@ -630,8 +950,10 @@ _register_embedded('market_report', EMBEDDED_MARKET_REPORT)
 Market_Report ver 1 - B 리포트(시장·종목)
   - 포트폴리오 리포트(Portfolio_Report_ver_4_1.py)와 별도 메일/별도 워크플로로 돌아간다.
   - 같은 저장소에 Portfolio_Report_ver_4_1.py가 있어야 한다(시트 읽기·메일 보내기를 그대로 가져다 쓴다).
-  - 내용: 시황 + AI 브리핑(하루 1회) + 14일 일정 + 개별주 카드(기술지표, 지난 실적, 다음 분기 예상 EPS).
-  - ENABLE_AI_BRIEFING=0 이면 AI 호출 없이(비용 0) 나머지만 보낸다.
+  - 내용: 오늘 핵심 → 시황 → 시장 뉴스 → 내 개별주 표(ETF 제외) → 큰 변동 종목 뉴스 → 실적 표 → 14일 일정 → AI 브리핑.
+  - ENABLE_AI_BRIEFING=0 이면 세계 경제 AI 브리핑을, ENABLE_MARKET_NEWS=0 이면 뉴스 섹션 전체를 끈다.
+  - ANTHROPIC_API_KEY가 없으면 시장 뉴스는 AI 선별 없이 최신 헤드라인만 보여준다.
+  - Settings 탭 MarketExclude(쉼표 구분)에 적은 티커는 개별주 목록에서 뺀다. ETF는 자동 제외(yfinance quoteType, 못 알아내면 개별주로 취급).
 """
 import os
 from datetime import datetime
@@ -639,7 +961,8 @@ from datetime import datetime
 import pandas as pd
 
 import Portfolio_Report_ver_4_1 as A
-from market_report import build_market_report, pick_stocks, wrap_email
+import market_news as mn
+from market_report import build_market_report, pick_stocks, wrap_email, is_etf
 
 
 def main():
@@ -663,7 +986,14 @@ def main():
     except Exception as e:
         print(f"⚠️ Trades 반영 실패(기준 Holdings로 계속): {e}")
 
-    stocks = pick_stocks(df_hold, inc_cfg.get("income_tickers"))
+    exclude = []
+    try:
+        for row in _open_sheet().worksheet("Settings").get_all_values()[1:]:
+            if len(row) >= 2 and str(row[0]).strip().lower() == "marketexclude":
+                exclude = [t.strip().upper() for t in str(row[1]).replace(";", ",").split(",") if t.strip()]
+    except Exception as e:
+        print(f"⚠️ Settings(MarketExclude) 읽기 실패(무시): {e}")
+    stocks = pick_stocks(df_hold, inc_cfg.get("income_tickers"), exclude=exclude, etf_fn=is_etf)
     print("개별주:", stocks)
     ai_html = ""
     if os.environ.get("ENABLE_AI_BRIEFING", "1") == "1":
@@ -676,7 +1006,19 @@ def main():
             )
         except Exception as e:
             ai_html = f"<p style='color:#757575;'>AI 브리핑을 만들지 못했습니다: {e}</p>"
-    body, problems = build_market_report(stocks, ai_html=ai_html)
+    market_news_html, mover_fn = "", None
+    if os.environ.get("ENABLE_MARKET_NEWS", "1") == "1":
+        news_key = os.environ.get("NEWS_API_KEY")
+        mover_fn = lambda t: mn.fetch_headlines(f"{t} stock", news_key, page_size=3, days=3)
+        try:
+            heads = mn.fetch_headlines(mn.MARKET_QUERY, news_key, page_size=mn.MAX_FETCH, days=2)
+            call_fn = None
+            if os.environ.get("ANTHROPIC_API_KEY"):
+                call_fn = lambda sys_, usr, tool: A.call_claude(sys_, usr, max_tokens=2000, tool=tool)
+            market_news_html = mn.market_news_html(heads, call_fn)
+        except Exception as e:
+            market_news_html = f"<p style='color:#757575;'>시장 뉴스를 만들지 못했습니다: {e}</p>"
+    body, problems = build_market_report(stocks, ai_html=ai_html, mover_news_fn=mover_fn, market_news_html=market_news_html)
     html_doc = wrap_email(body)
 
     outname = f"market_report_{datetime.now().strftime('%Y%m%d')}.html"
