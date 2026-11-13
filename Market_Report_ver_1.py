@@ -267,10 +267,11 @@ NEWS_TOOL = {
             "type": "object",
             "properties": {
                 "id": {"type": "string", "description": "고른 헤드라인의 ID(예: N3). 목록에 있는 것만."},
+                "title_ko": {"type": "string", "description": "헤드라인을 자연스러운 한국어로 번역(제목에 없는 내용 추가 금지, 고유명사는 원어 유지 가능)"},
                 "why": {"type": "string", "description": "이 뉴스가 시장·투자자에게 왜 중요한지 한국어 한 문장(제목에 있는 사실만, 추측·매매 지시 금지)"},
                 "tickers": {"type": "array", "items": {"type": "string"}, "description": "제목에 직접 나온 관련 티커(없으면 빈 배열)"},
             },
-            "required": ["id", "why"]}}},
+            "required": ["id", "title_ko", "why"]}}},
         "required": ["items"],
     },
 }
@@ -280,7 +281,7 @@ SYSTEM = (
     "규칙: (1) 목록에 있는 ID만 고르세요. 목록에 없는 사건·숫자·인물은 쓰지 마세요. "
     "(2) 주식시장 전체나 큰 기업·금리·경제지표에 영향이 있을 만한 것 3~5개만 고르고, 연예·사생활성 가십은 주가·경영에 영향을 준 사실만 중립적으로 다루세요. "
     "(3) 'why'는 제목에 있는 사실만으로 한국어 한 문장. 원인을 단정하거나 앞날을 예측하지 마세요. "
-    "(4) 사라/파세요 같은 매매 지시는 절대 쓰지 마세요."
+    "(4) 사라/파세요 같은 매매 지시는 절대 쓰지 마세요. (5) title_ko는 제목을 충실하게 번역만 하고 내용을 보태지 마세요."
 )
 
 
@@ -418,7 +419,10 @@ def select_market_news(headlines, call_fn):
         used.add(idx)
         tks = [str(t).upper() for t in (it.get("tickers") or []) if re.fullmatch(r"[A-Za-z.\-]{1,8}", str(t))]
         tks = [t for t in tks if t in hs[idx]["title"].upper()]      # 제목에 실제로 나온 티커만
-        out.append({"a": hs[idx], "why": why, "tickers": tks})
+        tko = str(it.get("title_ko", "")).strip()
+        if _BANNED.search(tko):
+            tko = ""
+        out.append({"a": hs[idx], "why": why, "tickers": tks, "title_ko": tko})
         if len(out) >= MAX_PICK:
             break
     return out
@@ -440,13 +444,15 @@ def market_news_html(headlines, call_fn=None):
     rows = ""
     for p in picked:
         a = p["a"]
-        title = (f"<a href='{_esc(_safe_url(a.get('url')))}' style='color:#1a56b0;text-decoration:none;font-weight:600;'>{_esc(a['title'])}</a>"
-                 if _safe_url(a.get("url")) else f"<strong>{_esc(a['title'])}</strong>")
+        shown = p.get("title_ko") or a["title"]
+        title = (f"<a href='{_esc(_safe_url(a.get('url')))}' style='color:#1a56b0;text-decoration:none;font-weight:600;'>{_esc(shown)}</a>"
+                 if _safe_url(a.get("url")) else f"<strong>{_esc(shown)}</strong>")
+        orig = f"<div style='color:{MUTED};font-size:11px;'>원문: {_esc(a['title'])}</div>" if p.get("title_ko") else ""
         tk = f" <span style='color:#555;font-size:11px;'>[{', '.join(_esc(t) for t in p['tickers'])}]</span>" if p["tickers"] else ""
         why = f"<div style='color:#333;margin-top:2px;'>→ {_esc(p['why'])}</div>" if p["why"] else ""
-        rows += (f"<tr style='border-top:1px solid #eee;'><td style='padding:6px;font-size:13px;'>{title}{tk}"
+        rows += (f"<tr style='border-top:1px solid #eee;'><td style='padding:6px;font-size:13px;'>{title}{tk}{orig}"
                  f"<div style='color:{MUTED};font-size:11px;'>{_esc(a.get('source', ''))} {_esc(a.get('published', ''))}</div>{why}</td></tr>")
-    foot = (f"<p style='font-size:11px;color:{MUTED};margin:4px 0 0;'>※ 헤드라인(제목)만 읽고 정리한 것입니다. 기사 본문은 확인하지 않았으니 링크로 원문을 보세요."
+    foot = (f"<p style='font-size:11px;color:{MUTED};margin:4px 0 0;'>※ 헤드라인(제목)만 읽고 정리한 것입니다. 제목 번역은 AI가 했으니 중요한 건 원문을 확인하고, 기사 본문은 읽지 않았으니 링크로 원문을 보세요."
             + (f" {note}" if note else "") + "</p>")
     return f"<table style='width:100%;border-collapse:collapse;'>{rows}</table>{foot}"
 '''
@@ -472,6 +478,7 @@ import technicals as tech
 import market_news as mn
 
 HORIZON_DAYS = 14          # 일정 표시 범위
+EPS_BAND = 0.05           # 예상 EPS가 전년 동기 대비 ±5% 이상이면 증가/감소로 색 표시(이 코드의 설명용 기준)
 STALE_DAYS = 4             # 마지막 가격이 이보다 오래되면 '오래됨' 표시
 GOOD, BAD, WARN, MUTED = "#2e7d32", "#c62828", "#e65100", "#757575"
 
@@ -806,11 +813,22 @@ def _earnings_table(stocks, data):
             if nxt.get("year_ago") is not None:
                 gr = f" ({nxt['growth'] * 100:+.0f}%)" if nxt.get("growth") is not None else ""
                 ya = f"<br>전년 동기 {nxt['year_ago']:.2f}{gr}"
-            nt = f"평균 <strong>{nxt['avg']:.2f}</strong>{rng}{n}{ya}"
+            g = nxt.get("growth")
+            if g is None and nxt.get("year_ago") and nxt["year_ago"] > 0 and nxt.get("avg") is not None:
+                g = nxt["avg"] / nxt["year_ago"] - 1.0
+            if g is None:
+                gcol, glab = MUTED, "비교 불가"
+            elif g >= EPS_BAND:
+                gcol, glab = GOOD, "전년 대비 증가"
+            elif g <= -EPS_BAND:
+                gcol, glab = BAD, "전년 대비 감소"
+            else:
+                gcol, glab = MUTED, "전년 비슷"
+            nt = (f"<span style='color:{gcol};font-weight:700;'>평균 {nxt['avg']:.2f} ({glab})</span>{rng}{n}{ya}")
         rows.append(f"<tr><td style='{TD}vertical-align:top;'><strong>{_esc(tk)}</strong></td>"
                     f"<td style='{TD}font-size:12px;'>{lt}</td><td style='{TD}font-size:12px;'>{nt}</td></tr>")
     return (_table(["종목", "지난 실적 (EPS 실제 / 예상)", "이번 분기 예상 EPS"], rows)
-            + f"<p style='font-size:11px;color:{MUTED};margin:4px 0 0;'>※ 예상 EPS는 애널리스트 집계 평균이며 제 예측이 아닙니다.</p>")
+            + f"<p style='font-size:11px;color:{MUTED};margin:4px 0 0;'>※ 예상 EPS는 애널리스트 집계 평균이며 제 예측이 아닙니다. 색: 전년 동기 대비 ±5% 이상 증가 녹색 · 감소 빨강 · 그 안쪽/비교 불가 회색(5%는 이 코드의 설명용 기준).</p>")
 
 
 def _calendar_block(all_events, today):
